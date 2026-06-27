@@ -3,6 +3,28 @@
 This doc explains how push is put together and, more importantly, *why* we made
 the memory and config choices we did, and how they differ from Hermes.
 
+## Principles
+
+These are the rules the design is held to. They override convenience.
+
+### 1. Polling only — never expose a port
+
+push only ever *reads* (`chat.db`) and *runs local commands* (`claude`,
+`osascript`). It opens no listening socket and accepts no inbound connection.
+The gateway pulls work from the message database on a timer; nothing can reach
+into it from the network.
+
+This is deliberate, because push is a security-focused gateway that handles an
+agent with tool access. An open port is an attack surface: a listener to fuzz,
+an auth layer to get wrong, a service to exploit. Polling has none of that. The
+only way to give push work is to send a message through a channel it already
+trusts (the allowlist), so the trust boundary is the messaging account, not a
+network endpoint.
+
+Consequence for deployment: push runs anywhere it can read a message source and
+shell out — your local machine, a Mac mini, or a cloud VM — with **no inbound
+firewall rules and no ports to lock down**. It reaches out; nothing reaches in.
+
 ## System overview
 
 push is a single Go process on your Mac. It reads incoming iMessages from the
