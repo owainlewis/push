@@ -2,7 +2,7 @@
 
 ## Summary
 
-`push` is a small Go binary that lets you text a personal assistant. It polls
+`push` is a small Rust binary that lets you text a personal assistant. It polls
 iMessage for new messages, runs each one through the Claude Code CLI
 (`claude -p`) with persistent per-conversation sessions and injected memory, and
 sends the reply back over iMessage.
@@ -40,7 +40,7 @@ takes a different bet on **memory**:
 | Edit a fact | Re-prompt / hope it updates | Open the file, edit, commit |
 | Versioning | None | Git, like any text file |
 | Model | Any provider | Claude Code only (v1) |
-| Footprint | Full framework | One Go binary, zero deps |
+| Footprint | Full framework | One small Rust binary |
 
 push's bet: memory that is human-legible, hand-editable, and version-controlled
 beats opaque memory for a single-user personal assistant. It also rides Claude
@@ -51,10 +51,10 @@ reimplementing memory injection.
 
 ```
                  +-------------------------------------------------+
-                 |                    push (Go)                    |
+                 |                   push (Rust)                   |
                  |                                                 |
   chat.db  --->  |  Poller  -->  Gateway loop  -->  per-thread     |
- (sqlite3)       |  (read)        - filter         worker queue    |
+ (rusqlite)      |  (read)        - filter         worker task     |
                  |                - control cmds   (serialized)     |
                  |                                     |           |
                  |   Store (thread -> session UUID, last ROWID)    |
@@ -68,20 +68,21 @@ reimplementing memory injection.
 
 ### Components
 
-- **Poller** (`internal/imessage`): reads new rows from `chat.db` via the
-  `sqlite3` CLI, tracking the last processed `ROWID`. Falls back to decoding the
-  `attributedBody` typedstream blob when `message.text` is NULL (common on
-  recent macOS).
-- **Sender** (`internal/imessage`): sends replies with `osascript`, passing the
-  message and target as `argv` to avoid AppleScript string escaping.
-- **Store** (`internal/store`): JSON file holding `last_row_id` and a
-  `thread -> {uuid, started}` map. Generates session UUIDs (crypto/rand v4).
-- **Memory** (`internal/memory`): concatenates `assistant/User.md` and
+- **Poller** (`src/imessage/poller.rs`): reads new rows from `chat.db`
+  in-process via `rusqlite` (bundled SQLite, read-only), tracking the last
+  processed `ROWID`. Decodes the `attributedBody` typedstream blob when
+  `message.text` is NULL (common on recent macOS). The query also filters out
+  tapbacks/reactions and system rows.
+- **Sender** (`src/imessage/sender.rs`): sends replies with `osascript`, passing
+  the message and target as `argv` to avoid AppleScript string escaping.
+- **Store** (`src/store.rs`): JSON file holding `last_row_id` and a
+  `thread -> {uuid, started}` map. Generates session UUIDs (v4).
+- **Memory** (`src/memory.rs`): concatenates `assistant/User.md` and
   `assistant/Memory.md` for injection.
-- **Claude runner** (`internal/claude`): builds and runs the `claude -p`
-  command, parses the JSON result.
-- **Gateway** (`internal/gateway`): the poll loop, sender/handle filtering,
-  control-command routing, and per-thread serialization.
+- **Claude runner** (`src/claude.rs`): builds and runs the `claude -p` command
+  with a timeout, parses the JSON result.
+- **Gateway** (`src/gateway.rs`): the poll loop, sender/handle filtering,
+  control-command routing, and per-thread serialization via tokio tasks.
 
 ### Session model
 
@@ -132,7 +133,7 @@ and skips any inbound message containing it.
 
 ### Concurrency
 
-One worker goroutine per thread, fed by a channel. Messages within a thread
+One worker task (tokio) per thread, fed by a bounded channel. Messages within a thread
 process strictly in order (so two quick texts never run two `claude` processes
 against the same session transcript at once). Different threads run in parallel.
 

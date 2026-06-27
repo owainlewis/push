@@ -1,7 +1,8 @@
-# Binaries
+# Rust build output
+/target/
+
+# Stray compiled binary at repo root
 /push
-/bin/
-*.exe
 
 # Local config and state (never commit secrets or session state)
 config.json

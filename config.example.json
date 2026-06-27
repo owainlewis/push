@@ -1,6 +1,7 @@
 {
   "db_path": "~/Library/Messages/chat.db",
   "poll_interval": "3s",
+  "run_timeout": "120s",
   "self_handles": ["you@icloud.com", "+15551234567"],
   "allow_from": [],
   "claude_bin": "claude",
