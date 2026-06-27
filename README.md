@@ -4,7 +4,7 @@ A tiny messaging gateway that turns Claude Code into a personal assistant you
 text. It polls iMessage for new messages, runs them through `claude -p`, and
 sends the reply back to your phone.
 
-One small Go binary. No daemon framework, no database, no cloud. It runs on your
+One small Rust binary. No daemon framework, no server, no cloud. It runs on your
 Mac and reads your local Messages history directly.
 
 ## How it works
@@ -64,8 +64,9 @@ See [docs/prd.md](docs/prd.md) for the full v1 product spec, and
 - **Full Disk Access** for your terminal (System Settings -> Privacy &
   Security -> Full Disk Access) so push can read `chat.db`.
 - `claude` (Claude Code CLI) on your `PATH`.
-- `sqlite3` and `osascript` (both ship with macOS).
-- Go 1.26+ to build.
+- `osascript` (ships with macOS). The Messages database is read in-process via
+  the bundled SQLite, so no `sqlite3` binary is needed.
+- A recent Rust toolchain (`cargo`) to build.
 
 ## Quick start
 
@@ -74,9 +75,11 @@ git clone https://github.com/owainlewis/push.git
 cd push
 cp config.example.json config.json
 # edit config.json: set self_handles to your own iMessage handles
-go build -o push ./cmd/push
-./push
+cargo build --release
+./target/release/push
 ```
+
+By default it reads `config.json`; pass `--config <path>` to use another.
 
 Then text yourself in Messages. The reply comes back in the same thread.
 

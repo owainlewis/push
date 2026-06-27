@@ -1,0 +1,26 @@
+[package]
+name = "push"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A tiny messaging gateway that turns Claude Code into an assistant you text."
+repository = "https://github.com/owainlewis/push"
+
+[[bin]]
+name = "push"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "signal"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+anyhow = "1"
+humantime = "2"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[profile.release]
+strip = true
+lto = true

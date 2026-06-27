@@ -27,14 +27,14 @@ firewall rules and no ports to lock down**. It reaches out; nothing reaches in.
 
 ## System overview
 
-push is a single Go process on your Mac. It reads incoming iMessages from the
+push is a single Rust process on your Mac. It reads incoming iMessages from the
 local Messages database, runs each through the Claude Code CLI, and texts the
 reply back. No server, no database, no cloud.
 
 ```mermaid
 flowchart LR
     user([You on iPhone/Mac]) -->|iMessage| db[(chat.db)]
-    db -->|sqlite3 poll| push
+    db -->|rusqlite poll| push
     subgraph push[push gateway]
         direction TB
         poller[Poller] --> loop[Gateway loop]
@@ -227,7 +227,7 @@ flowchart TB
     qc --> cc[claude -p]
 ```
 
-One worker goroutine per thread, fed by a buffered channel. Messages within a
+One worker task (tokio) per thread, fed by a bounded mpsc channel. Messages within a
 thread run strictly in order, so two quick texts never launch two `claude`
 processes against the same transcript at once. Different threads run in
 parallel.
