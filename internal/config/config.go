@@ -14,6 +14,7 @@ import (
 type Config struct {
 	DBPath         string   `json:"db_path"`
 	PollInterval   string   `json:"poll_interval"`
+	RunTimeout     string   `json:"run_timeout"`
 	SelfHandles    []string `json:"self_handles"`
 	AllowFrom      []string `json:"allow_from"`
 	ClaudeBin      string   `json:"claude_bin"`
@@ -53,6 +54,9 @@ func (c *Config) applyDefaults() {
 	if c.PollInterval == "" {
 		c.PollInterval = "3s"
 	}
+	if c.RunTimeout == "" {
+		c.RunTimeout = "120s"
+	}
 	if c.ClaudeBin == "" {
 		c.ClaudeBin = "claude"
 	}
@@ -80,12 +84,20 @@ func (c *Config) validate() error {
 	if _, err := c.PollDuration(); err != nil {
 		return fmt.Errorf("config: invalid poll_interval %q: %w", c.PollInterval, err)
 	}
+	if _, err := c.RunDuration(); err != nil {
+		return fmt.Errorf("config: invalid run_timeout %q: %w", c.RunTimeout, err)
+	}
 	return nil
 }
 
 // PollDuration parses PollInterval into a time.Duration.
 func (c *Config) PollDuration() (time.Duration, error) {
 	return time.ParseDuration(c.PollInterval)
+}
+
+// RunDuration parses RunTimeout into a time.Duration.
+func (c *Config) RunDuration() (time.Duration, error) {
+	return time.ParseDuration(c.RunTimeout)
 }
 
 func expandHome(p string) string {

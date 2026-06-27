@@ -26,13 +26,17 @@ type Gateway struct {
 	sender *imessage.Sender
 	runner *claude.Runner
 
-	self  map[string]bool // self_handles set
-	allow map[string]bool // allow_from set
+	self       map[string]bool // self_handles set
+	allow      map[string]bool // allow_from set
+	runTimeout time.Duration   // max wall-clock per claude run
 
 	mu     sync.Mutex
 	queues map[string]chan job // per-thread work queues
 	wg     sync.WaitGroup
 }
+
+// sendTimeout bounds a single osascript reply.
+const sendTimeout = 30 * time.Second
 
 type job struct {
 	thread string
@@ -42,15 +46,17 @@ type job struct {
 
 // New constructs a Gateway from its dependencies.
 func New(cfg *config.Config, st *store.Store, p *imessage.Poller, s *imessage.Sender, r *claude.Runner) *Gateway {
+	runTimeout, _ := cfg.RunDuration()
 	g := &Gateway{
-		cfg:    cfg,
-		store:  st,
-		poller: p,
-		sender: s,
-		runner: r,
-		self:   toSet(cfg.SelfHandles),
-		allow:  toSet(cfg.AllowFrom),
-		queues: map[string]chan job{},
+		cfg:        cfg,
+		store:      st,
+		poller:     p,
+		sender:     s,
+		runner:     r,
+		self:       toSet(cfg.SelfHandles),
+		allow:      toSet(cfg.AllowFrom),
+		runTimeout: runTimeout,
+		queues:     map[string]chan job{},
 	}
 	return g
 }
@@ -74,11 +80,32 @@ func (g *Gateway) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			g.drain()
-			return ctx.Err()
+			// Stop polling. In-flight runs are drained by Shutdown.
+			return nil
 		case <-ticker.C:
 			g.tick(ctx)
 		}
+	}
+}
+
+// Shutdown stops accepting new work and waits up to grace for in-flight runs to
+// finish so a reply is never lost mid-send.
+func (g *Gateway) Shutdown(grace time.Duration) {
+	g.mu.Lock()
+	for _, q := range g.queues {
+		close(q)
+	}
+	g.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		g.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(grace):
+		log.Printf("shutdown: grace period expired with runs still in flight")
 	}
 }
 
@@ -97,7 +124,7 @@ func (g *Gateway) tick(ctx context.Context) {
 		if !ok {
 			continue
 		}
-		g.enqueue(ctx, job{thread: thread, target: target, text: strings.TrimSpace(m.Text)})
+		g.enqueue(job{thread: thread, target: target, text: strings.TrimSpace(m.Text)})
 	}
 	if maxRow > 0 {
 		if err := g.store.SetLastRow(maxRow); err != nil {
@@ -128,41 +155,39 @@ func (g *Gateway) accept(m imessage.Message) (thread, target string, ok bool) {
 	return "", "", false
 }
 
-// enqueue routes a job to its thread worker, starting the worker on demand.
-func (g *Gateway) enqueue(ctx context.Context, j job) {
+// enqueue routes a job to its thread worker, starting the worker on demand. If
+// the thread's queue is full it tells the sender instead of dropping silently.
+func (g *Gateway) enqueue(j job) {
 	g.mu.Lock()
 	q, ok := g.queues[j.thread]
 	if !ok {
 		q = make(chan job, 32)
 		g.queues[j.thread] = q
 		g.wg.Add(1)
-		go g.worker(ctx, j.thread, q)
+		go g.worker(q)
 	}
 	g.mu.Unlock()
 
 	select {
 	case q <- j:
 	default:
-		log.Printf("[%s] queue full, dropping message", j.thread)
+		log.Printf("[%s] queue full, asking sender to resend", j.thread)
+		g.reply(j.target, "I'm a bit behind on this thread — resend that in a moment.")
 	}
 }
 
-// worker processes one thread's jobs strictly in order.
-func (g *Gateway) worker(ctx context.Context, thread string, q chan job) {
+// worker processes one thread's jobs strictly in order, draining the queue when
+// it is closed during shutdown.
+func (g *Gateway) worker(q chan job) {
 	defer g.wg.Done()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case j := <-q:
-			g.handle(ctx, j)
-		}
+	for j := range q {
+		g.handle(j)
 	}
 }
 
-func (g *Gateway) handle(ctx context.Context, j job) {
+func (g *Gateway) handle(j job) {
 	if reply, handled := g.command(j); handled {
-		g.reply(ctx, j.target, reply)
+		g.reply(j.target, reply)
 		return
 	}
 
@@ -178,7 +203,12 @@ func (g *Gateway) handle(ctx context.Context, j job) {
 		return
 	}
 
-	reply, err := g.runner.Run(ctx, claude.Request{
+	// Runs use a background-derived timeout so an OS signal stops new polling
+	// but does not kill a reply mid-flight; the run is bounded by runTimeout.
+	runCtx, cancel := context.WithTimeout(context.Background(), g.runTimeout)
+	defer cancel()
+
+	reply, err := g.runner.Run(runCtx, claude.Request{
 		SessionID:    sessionID,
 		IsNew:        isNew,
 		WorkDir:      workDir,
@@ -186,12 +216,17 @@ func (g *Gateway) handle(ctx context.Context, j job) {
 		Prompt:       j.text,
 	})
 	if err != nil {
+		if runCtx.Err() == context.DeadlineExceeded {
+			log.Printf("[%s] claude run timed out after %s", j.thread, g.runTimeout)
+			g.reply(j.target, "That took too long and was stopped. Try again or simplify the request.")
+			return
+		}
 		log.Printf("[%s] claude error: %v", j.thread, err)
-		g.reply(ctx, j.target, "⚠️ "+claudeErrorMessage(err))
+		g.reply(j.target, "⚠️ "+claudeErrorMessage(err))
 		return
 	}
 	_ = g.store.MarkStarted(j.thread)
-	g.reply(ctx, j.target, reply)
+	g.reply(j.target, reply)
 }
 
 // command handles gateway-level slash commands before anything reaches Claude.
@@ -209,10 +244,12 @@ func (g *Gateway) command(j job) (reply string, handled bool) {
 	}
 }
 
-func (g *Gateway) reply(ctx context.Context, target, text string) {
+func (g *Gateway) reply(target, text string) {
 	if strings.TrimSpace(text) == "" {
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
+	defer cancel()
 	out := text + g.cfg.ReplyMarker
 	if err := g.sender.Send(ctx, target, out); err != nil {
 		log.Printf("send error to %s: %v", target, err)
@@ -222,14 +259,6 @@ func (g *Gateway) reply(ctx context.Context, target, text string) {
 // sandbox returns the per-thread working directory.
 func (g *Gateway) sandbox(thread string) string {
 	return filepath.Join(g.cfg.SessionsDir, sanitize(thread))
-}
-
-func (g *Gateway) drain() {
-	g.mu.Lock()
-	for _, q := range g.queues {
-		close(q)
-	}
-	g.mu.Unlock()
 }
 
 func ensureDir(path string) error {

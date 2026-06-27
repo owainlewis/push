@@ -53,6 +53,8 @@ LEFT JOIN handle h ON m.handle_id = h.ROWID
 LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
 LEFT JOIN chat c ON c.ROWID = cmj.chat_id
 WHERE m.ROWID > %d
+  AND m.associated_message_type = 0
+  AND m.item_type = 0
 ORDER BY m.ROWID ASC;`
 
 // Poll returns messages with ROWID greater than sinceRowID, oldest first. When
