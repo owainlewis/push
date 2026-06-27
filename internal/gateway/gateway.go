@@ -187,7 +187,7 @@ func (g *Gateway) handle(ctx context.Context, j job) {
 	})
 	if err != nil {
 		log.Printf("[%s] claude error: %v", j.thread, err)
-		g.reply(ctx, j.target, "Something went wrong handling that.")
+		g.reply(ctx, j.target, "⚠️ "+claudeErrorMessage(err))
 		return
 	}
 	_ = g.store.MarkStarted(j.thread)
@@ -234,6 +234,18 @@ func (g *Gateway) drain() {
 
 func ensureDir(path string) error {
 	return os.MkdirAll(path, 0o755)
+}
+
+// claudeErrorMessage extracts a short, user-facing reason from a runner error.
+func claudeErrorMessage(err error) string {
+	msg := err.Error()
+	if i := strings.LastIndex(msg, ": "); i >= 0 && i+2 < len(msg) {
+		msg = msg[i+2:]
+	}
+	if strings.TrimSpace(msg) == "" {
+		return "couldn't reach Claude"
+	}
+	return msg
 }
 
 func toSet(items []string) map[string]bool {

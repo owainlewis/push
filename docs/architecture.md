@@ -155,6 +155,44 @@ loading (`CLAUDE.md`, `--append-system-prompt`). By shelling out to `claude -p`,
 push stays tiny and inherits all of that. The cost is one process per message;
 for a personal assistant that is fine.
 
+## No third-party agent layer
+
+This is push's main positioning. push has no agent loop of its own. It is a pipe
+to the real `claude` binary, so the assistant you text *is* Claude Code: same
+model, tools, MCP servers, permission modes, context loading, and login.
+
+```mermaid
+flowchart TB
+    subgraph other[Hermes / OpenClaw]
+        u1([You]) --> g1[Gateway]
+        g1 --> a1[Their own agent runtime\nHermes runtime / pi wrapper]
+        a1 --> p1[Provider abstraction]
+        p1 --> m1[Some model]
+    end
+    subgraph push[push]
+        u2([You]) --> g2[push pipe]
+        g2 --> cc[claude binary]
+        cc --> m2[Claude, your subscription]
+    end
+```
+
+The competing gateways interpose an agent they wrote between you and the model:
+Hermes runs its own runtime across many providers; OpenClaw wraps the
+third-party `pi` agent. That layer looks like flexibility but is a liability —
+you inherit their agent loop, their bugs, and their model choices, and you lag
+whatever Anthropic ships in Claude Code itself. push inherits nothing because it
+wraps nothing. It runs `claude` and relays the answer.
+
+Practical consequences:
+
+- **Billing**: push runs `claude` with your environment, so it uses your Claude
+  subscription. No separate API account, no provider keys. (If
+  `ANTHROPIC_API_KEY` is set it honors that; otherwise the subscription login.)
+- **Features for free**: skills, MCP, permission modes, `CLAUDE.md` — anything
+  Claude Code gains, push gains the same day with no code change.
+- **One source of truth**: there is no second agent implementation to keep in
+  sync with the real one.
+
 ## Concurrency
 
 ```mermaid
