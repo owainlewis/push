@@ -1,0 +1,16 @@
+# Binaries
+/push
+/bin/
+*.exe
+
+# Local config and state (never commit secrets or session state)
+config.json
+state.json
+/sessions/
+
+# Local assistant memory (keep examples, ignore real personal data)
+/assistant/Memory.md
+/assistant/User.md
+
+# OS / editor
+.DS_Store
