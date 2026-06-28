@@ -1,248 +1,211 @@
-# push — Architecture
+# push Architecture
 
-This doc explains how push is put together and, more importantly, *why* we made
-the memory and config choices we did, and how they differ from Hermes.
+push is one local Rust process. It polls Messages, filters messages, loads the
+assistant context, runs a configured agent backend, and sends the final reply.
+
+The important boundary is not iMessage or Claude. The important boundary is:
+
+```text
+message gateway -> agent backend -> message gateway
+```
+
+The gateway owns the personal assistant state. The backend owns execution.
 
 ## Principles
 
-These are the rules the design is held to. They override convenience.
+### 1. Gateway First
 
-### 1. Polling only — never expose a port
+push is a messaging gateway for a personal assistant. It should stay small and
+own the durable pieces:
 
-push only ever *reads* (`chat.db`) and *runs local commands* (`claude`,
-`osascript`). It opens no listening socket and accepts no inbound connection.
-The gateway pulls work from the message database on a timer; nothing can reach
-into it from the network.
+- channels
+- allowlists
+- routing
+- assistant config
+- memory loading
+- conversation state
+- delivery
 
-This is deliberate, because push is a security-focused gateway that handles an
-agent with tool access. An open port is an attack surface: a listener to fuzz,
-an auth layer to get wrong, a service to exploit. Polling has none of that. The
-only way to give push work is to send a message through a channel it already
-trusts (the allowlist), so the trust boundary is the messaging account, not a
-network endpoint.
+### 2. Runtime Disposable
 
-Consequence for deployment: push runs anywhere it can read a message source and
-shell out — your local machine, a Mac mini, or a cloud VM — with **no inbound
-firewall rules and no ports to lock down**. It reaches out; nothing reaches in.
+Agent runtimes are replaceable. Claude Code and Codex are the first adapters.
+More can be added without changing the messaging core.
 
-## System overview
+The gateway should not build:
 
-push is a single Rust process on your Mac. It reads incoming iMessages from the
-local Messages database, runs each through the Claude Code CLI, and texts the
-reply back. No server, no database, no cloud.
+- its own agent loop
+- its own plugin system
+- its own MCP layer
+- its own coding workflow
+- its own tool runner
+
+Those belong to the selected backend.
+
+### 3. Polling Only
+
+push reads local message state and shells out to local commands. It opens no
+server port and accepts no inbound network connection.
+
+The trust boundary is the messaging account plus the configured allowlist.
+
+## System Overview
 
 ```mermaid
 flowchart LR
-    user([You on iPhone/Mac]) -->|iMessage| db[(chat.db)]
-    db -->|rusqlite poll| push
+    user([You]) -->|iMessage| db[(chat.db)]
+    db -->|poll| push
     subgraph push[push gateway]
-        direction TB
-        poller[Poller] --> loop[Gateway loop]
-        loop --> worker[Per-thread worker]
-        worker --> runner[Claude runner]
-        store[(state.json)] <--> loop
-        mem[/User.md + Memory.md/] --> runner
+        poller[Poller] --> gateway[Gateway loop]
+        gateway --> worker[Per-thread worker]
+        store[(state.json)] <--> gateway
+        memory[/User.md + Memory.md/] --> worker
+        worker --> adapter[Agent adapter]
     end
-    runner -->|claude -p| cc[Claude Code]
-    cc --> runner
-    worker -->|osascript| db
-    db -->|iMessage| user
+    adapter -->|claude -p| claude[Claude Code]
+    adapter -->|codex exec| codex[Codex]
+    claude --> adapter
+    codex --> adapter
+    adapter --> sender[Sender]
+    sender -->|osascript| db
+    db -->|reply| user
 ```
 
-## Message lifecycle
+## Message Lifecycle
 
 ```mermaid
 sequenceDiagram
-    participant U as You (iMessage)
+    participant U as User
     participant DB as chat.db
     participant P as Poller
     participant G as Gateway
-    participant W as Thread worker
-    participant C as claude -p
+    participant W as Worker
+    participant A as Agent backend
     participant S as Sender
 
-    U->>DB: send text
-    loop every poll_interval
-        P->>DB: SELECT rows WHERE ROWID > last
-        DB-->>P: new rows (text or attributedBody)
-    end
-    P->>G: messages
-    G->>G: filter (allowlist, reply marker)
-    alt control command (/clear)
-        G->>S: rotate session, confirm
-    else normal message
-        G->>W: enqueue (serialized per thread)
-        W->>W: resolve session UUID + sandbox dir
-        W->>C: claude -p --resume <uuid> --append-system-prompt <memory>
-        C-->>W: { result, session_id }
-        W->>S: reply + marker
+    U->>DB: send message
+    P->>DB: read rows newer than last_row_id
+    DB-->>P: messages
+    P->>G: Message values
+    G->>G: filter sender and reply marker
+    alt slash command
+        G->>S: handle command locally
+    else assistant turn
+        G->>W: enqueue job by thread
+        W->>W: load assistant memory
+        W->>W: resolve backend session
+        W->>A: run prompt with context
+        A-->>W: reply and optional backend session id
+        W->>S: send reply
     end
     S->>DB: osascript send
-    DB->>U: reply
+    DB->>U: delivered reply
 ```
 
-## Session model
+## Backend Boundary
 
-Each conversation maps to a stable Claude Code session UUID that the gateway
-owns. The first message uses `--session-id <uuid>`; every message after uses
-`--resume <uuid>`. We let Claude Code keep the transcript (including tool-call
-state) instead of rebuilding conversation memory ourselves.
+The gateway calls an agent through this internal shape:
 
-```mermaid
-stateDiagram-v2
-    [*] --> NoSession
-    NoSession --> Active: first message\n--session-id <uuid>
-    Active --> Active: next message\n--resume <uuid>
-    Active --> NoSession: /clear\n(rotate UUID)
+```rust
+Request {
+    session_id,
+    is_new,
+    work_dir,
+    system_append,
+    prompt,
+}
+
+RunOutput {
+    reply,
+    session_id,
+}
 ```
 
-`/clear` just generates a new UUID. The old transcript stays on disk, unused, as
-a free audit trail.
+That keeps the gateway independent of backend-specific mechanics.
 
-## Two kinds of state, kept separate
+### Claude Code Adapter
 
-This is the core design decision, so it gets its own picture.
+Claude Code lets push choose the session id.
 
-```mermaid
-flowchart TB
-    subgraph gw[Gateway-owned config: how the assistant runs]
-        cfg[config.json:\nallowlist, permission mode,\npoll interval, paths]
-        st[state.json:\nthread to session UUID,\nlast ROWID]
-    end
-    subgraph memdir[User-owned memory: what the assistant knows]
-        u[User.md - who you are]
-        m[Memory.md - durable facts]
-    end
-    cfg --> run[claude -p]
-    st --> run
-    u --> inj[--append-system-prompt]
-    m --> inj
-    inj --> run
+- New conversation: `claude -p --session-id <uuid>`
+- Existing conversation: `claude -p --resume <uuid>`
+- Memory: `--append-system-prompt <User.md + Memory.md>`
+- Work dir: per-thread sandbox dir
+
+### Codex Adapter
+
+Codex creates its own thread id.
+
+- New conversation: `codex exec --json ...`
+- Existing conversation: `codex exec resume <thread_id> ...`
+- Memory: included in the prompt wrapper
+- Work dir: per-thread sandbox dir on the first run
+
+The adapter reads Codex JSONL events to capture `thread.started.thread_id` and
+stores that id for future turns.
+
+## State Model
+
+`state.json` stores:
+
+```json
+{
+  "last_row_id": 123,
+  "sessions": {
+    "self:you@icloud.com": {
+      "uuid": "backend-session-id",
+      "started": true,
+      "backend": "codex"
+    }
+  }
+}
 ```
 
-- **Config** is operational: who may message, what permission mode, where files
-  live, how often to poll. It belongs to the gateway. You rarely touch it.
-- **Memory** is content: who you are and what the assistant should always know.
-  It is plain markdown you own and edit. It rides into every run via
-  `--append-system-prompt`, which appends to Claude Code's default system prompt
-  rather than replacing it.
+The field is still named `uuid` for compatibility with old state files, but it
+now means "backend session id".
 
-Keeping these apart means you can hand-edit what the assistant knows without
-touching how it runs, and version the two independently.
+If the configured backend changes for a thread, push starts a fresh backend
+session instead of trying to resume the old runtime's session.
 
-## Memory: why files beat a memory database
+## Assistant Context
 
-Hermes stores memory as opaque state: Honcho dialectic user modeling plus FTS5
-session search with LLM summarization. It is powerful, but you cannot open it,
-read it, or correct a single wrong fact by hand. push takes the opposite bet.
+push loads:
 
-```mermaid
-flowchart LR
-    subgraph hermes[Hermes memory]
-        h1[Conversations] --> h2[LLM summarizer]
-        h2 --> h3[(Opaque DB / vectors)]
-        h3 -->|recall| h4[Prompt]
-    end
-    subgraph pushm[push memory]
-        p1[User.md] --> p3
-        p2[Memory.md] --> p3[--append-system-prompt]
-        p3 --> p4[Prompt]
-        you([You]) -->|edit + git commit| p1
-        you -->|edit + git commit| p2
-    end
-```
+- `assistant/User.md`
+- `assistant/Memory.md`
 
-Why this is better for a single-user personal assistant:
-
-| Property | Hermes | push |
-|---|---|---|
-| **Legible** | No — DB rows / vectors | Yes — it is markdown you read |
-| **Correctable** | Re-prompt and hope | Open the file, fix the line |
-| **Versioned** | No | Git, with full history and blame |
-| **Portable** | Tied to its store | Copy two files anywhere |
-| **Injection** | Custom recall pipeline | Native Claude Code context loading |
-| **Auditable** | Opaque | A diff shows exactly what changed |
-
-The trade-off is honest: file memory does not do automatic semantic recall over
-thousands of past sessions. For one person's assistant that is a feature, not a
-gap — you want a small, curated, trustworthy context, not a sprawling vector
-store you cannot inspect. When scale memory is needed later, it can be added
-behind the same `--append-system-prompt` seam without changing anything else.
-
-## Why Claude Code instead of the raw API
-
-Claude Code already solves the parts a gateway would otherwise reimplement:
-session persistence and resume, tool execution, permission modes, and context
-loading (`CLAUDE.md`, `--append-system-prompt`). By shelling out to `claude -p`,
-push stays tiny and inherits all of that. The cost is one process per message;
-for a personal assistant that is fine.
-
-## No third-party agent layer
-
-This is push's main positioning. push has no agent loop of its own. It is a pipe
-to the real `claude` binary, so the assistant you text *is* Claude Code: same
-model, tools, MCP servers, permission modes, context loading, and login.
-
-```mermaid
-flowchart TB
-    subgraph other[Hermes / OpenClaw]
-        u1([You]) --> g1[Gateway]
-        g1 --> a1[Their own agent runtime\nHermes runtime / pi wrapper]
-        a1 --> p1[Provider abstraction]
-        p1 --> m1[Some model]
-    end
-    subgraph push[push]
-        u2([You]) --> g2[push pipe]
-        g2 --> cc[claude binary]
-        cc --> m2[Claude, your subscription]
-    end
-```
-
-The competing gateways interpose an agent they wrote between you and the model:
-Hermes runs its own runtime across many providers; OpenClaw wraps the
-third-party `pi` agent. That layer looks like flexibility but is a liability —
-you inherit their agent loop, their bugs, and their model choices, and you lag
-whatever Anthropic ships in Claude Code itself. push inherits nothing because it
-wraps nothing. It runs `claude` and relays the answer.
-
-Practical consequences:
-
-- **Billing**: push runs `claude` with your environment, so it uses your Claude
-  subscription. No separate API account, no provider keys. (If
-  `ANTHROPIC_API_KEY` is set it honors that; otherwise the subscription login.)
-- **Features for free**: skills, MCP, permission modes, `CLAUDE.md` — anything
-  Claude Code gains, push gains the same day with no code change.
-- **One source of truth**: there is no second agent implementation to keep in
-  sync with the real one.
+This context is human-owned markdown. The gateway injects it into the selected
+backend, but the backend still owns how tools, skills, MCP, repo context, and
+permissions work.
 
 ## Concurrency
 
-```mermaid
-flowchart TB
-    loop[Poll loop] -->|self chat| qa[Worker: self]
-    loop -->|dm: alice| qb[Worker: alice]
-    loop -->|dm: bob| qc[Worker: bob]
-    qa --> ca[claude -p]
-    qb --> cb[claude -p]
-    qc --> cc[claude -p]
-```
+One worker task exists per conversation thread. Messages in the same thread run
+in order. Different threads can run in parallel.
 
-One worker task (tokio) per thread, fed by a bounded mpsc channel. Messages within a
-thread run strictly in order, so two quick texts never launch two `claude`
-processes against the same transcript at once. Different threads run in
-parallel.
+This prevents two messages in the same conversation from racing against the same
+backend session.
 
-## Extending to other channels
+## Security Posture
 
-The poller and sender are concrete today (iMessage only, per the v1 scope), but
-the gateway depends only on a `Message` value and a send call. A second channel
-(Telegram) becomes a new poller/sender pair feeding the same loop, store, and
-memory injection. Nothing in the session or memory design is iMessage-specific.
+An allowed inbound message can cause an agent to run tools. The allowlist is the
+main control.
 
-## Security posture
+Backend permissions are adapter-specific:
 
-push runs Claude Code with `--permission-mode bypassPermissions` because a
-headless run has no human to approve tool calls. Each thread runs in its own
-sandbox directory under `sessions/`. The real control is the allowlist: an
-inbound text is an instruction to an agent with tool access, so only trusted
-senders should ever be allowed. See the PRD for the full filtering rules.
+- Claude Code currently defaults to `bypassPermissions` for headless use.
+- Codex currently defaults to `workspace-write` with approval policy `never`.
+
+Both should be treated as powerful local automation. Use broader modes only in
+environments you control.
+
+## Extension Points
+
+The next extension points should be added in this order:
+
+1. More agent adapters.
+2. Per-thread or per-task backend routing.
+3. More channels.
+4. Memory write-back with audit and review.
+
+Avoid adding a gateway plugin system until there is a specific capability that
+cannot live in the selected backend.

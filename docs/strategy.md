@@ -1,61 +1,150 @@
-# push — Strategy
+# push Strategy
 
-## The bet
+## The Bet
 
-Personal AI agents are becoming a platform category. Google has Spark. Nous has
-Hermes. OpenAI and Anthropic have agent tools. But I do not want to bet my
-workflow on one assistant app. I want a gateway that lets me talk to whichever
-agent is best for the job.
+The agent runtime is becoming the commodity layer.
 
-push is that gateway, and it is a long-term hedge against single-provider
-lock-in.
+Claude Code, Codex, Cursor, AMP, Pi-style agents, in-house agents, and small
+open-source agents are all racing to own the same capabilities: reasoning,
+coding, file edits, shell commands, MCP, plugins, permissions, repo context, and
+task execution.
 
-## Own the gateway, not the assistant
+push should not compete there.
 
-The durable thing is not the model. Models change every few months. The durable
-thing is the layer you own: how messages reach you, how your context and memory
-are stored, and how work is routed to an agent. That layer should be yours, not
-rented from whichever assistant app is ahead this quarter.
+push should own the durable personal assistant layer: messages, identity,
+memory, user preferences, business context, routing, and state. The agent
+runtime should be replaceable.
 
-So push splits the world into two parts:
+## Product Thesis
 
-- **The gateway is yours and provider-independent.** Channels (iMessage today,
-  more later), your memory as plain files you own and version, session and
-  routing state, the poll loop. None of this is tied to a vendor.
-- **The agent is a swappable slot.** Today push drives Claude Code, because it
-  is the best first-party agent available and push uses it natively rather than
-  wrapping it. Tomorrow the same gateway can route to a different agent when a
-  different agent is better for the task.
+push is a personal assistant gateway, not an agent runtime.
 
-## Why this is not a contradiction
+The gateway answers these questions:
 
-push's other headline is "it's actually Claude Code, not a third-party wrapper."
-That is about the agent layer: when you choose Claude, you get the real thing,
-not a degraded proxy like Hermes' runtime or OpenClaw's `pi` wrapper. The hedge
-is about the gateway layer: the part you own does not depend on Claude, or on
-anyone.
+- Who is allowed to talk to the assistant?
+- Which conversation is this?
+- Which assistant profile and memory should be loaded?
+- Which runtime should handle the work?
+- What should be sent back to the user?
+- What state should persist for next time?
 
-Put together: use the best agent natively, but never let any one assistant app
-own your workflow. Single-provider apps like Hermes ask you to live inside their
-world. push keeps the world yours and lets the agent be a choice you remake
-whenever you want.
+The backend agent answers a smaller question:
 
-## What this requires (the honest gap)
+- Given this message and assistant context, what work should be done and what
+  response should be sent back?
 
-Today the agent slot is shaped like Claude Code. The session model leans on
-`--session-id` / `--resume`, and memory injection uses `--append-system-prompt`.
-That is fine for v1, but it means "swap the agent" is not yet free.
+That contract keeps the hard and fast-moving agent work inside products with
+large teams behind them, while push owns the layer that makes the interaction a
+personal assistant.
 
-To make the hedge real, the agent needs a clean contract: an `AgentRunner` seam
-that takes a prompt plus conversation state and returns a reply, with the
-gateway owning the conversation identity rather than borrowing the agent's. The
-file-based memory already helps here, because it is injected, not stored inside
-any agent. Defining that seam is the main piece of work between "Claude Code
-gateway" and "multi-agent gateway."
+## What Personal Assistant Means
 
-## Course angle
+This is not just a coding bot over iMessage.
 
-This doubles as a teaching artifact. The lesson is not "here is how to use one
-assistant app." It is "here is how to build a personal AI gateway you own, so no
-single provider owns your workflow." push is the worked example: small, legible,
-file-based memory, and an agent slot you control.
+A personal assistant needs:
+
+- Durable user preferences.
+- Business and project context.
+- A memory model the user can inspect and correct.
+- Access to tools through the selected runtime.
+- Channel-aware replies.
+- A stable identity across backend changes.
+- Permission and routing rules that match the user's life.
+
+For now, push stores the assistant profile and memory as markdown files. That is
+small, legible, and good enough for one person's assistant.
+
+## What The Gateway Owns
+
+- Channel polling and sending.
+- Allowlist and reply-loop filtering.
+- Conversation ids.
+- Backend session ids.
+- Assistant config and memory loading.
+- Runtime selection.
+- User-visible delivery.
+- The audit trail in plain files and JSON state.
+
+## What The Runtime Owns
+
+- Model behavior.
+- Coding workflow.
+- Tool execution.
+- MCP servers.
+- Plugins and skills.
+- Shell permissions.
+- Repo context.
+- Long-running task mechanics.
+
+The gateway should not rebuild these unless there is no reliable backend
+contract for the job.
+
+## Backend Contract
+
+The backend seam should stay small:
+
+```text
+input:
+  user message
+  assistant context
+  conversation/session id if one exists
+  working directory
+  timeout and permission config
+
+output:
+  final reply
+  backend session id if created by the runtime
+```
+
+Claude Code and Codex already fit this shape:
+
+- Claude Code accepts a gateway-generated session id with `--session-id` and
+  resumes with `--resume`.
+- Codex creates its own thread id through `codex exec`; push stores it and later
+  resumes with `codex exec resume`.
+
+The state store must therefore track backend-owned session ids, not just
+gateway-owned UUIDs.
+
+## Positioning
+
+Hermes and OpenClaw are useful comparisons, but the critique should be precise.
+
+Hermes is powerful because it builds a full agent runtime and memory system. The
+cost is complexity and a second agent layer between the user and the underlying
+model or tool runtime.
+
+push takes the opposite bet. It delegates agent quality to first-party or
+specialized coding agents and focuses on the personal gateway layer.
+
+This means push can be smaller and more durable:
+
+- When Claude Code improves, the Claude backend improves.
+- When Codex improves, the Codex backend improves.
+- When another agent becomes better, push can add an adapter instead of
+  rewriting the product.
+
+## Current Direction
+
+Lock in these choices:
+
+- Keep iMessage as the first channel, not the whole product.
+- Keep markdown memory as the first memory model.
+- Support multiple runtimes early so the architecture does not harden around
+  one agent.
+- Avoid a plugin system in the gateway.
+- Avoid a custom agent loop.
+- Treat runtime config as adapter-specific.
+- Keep the core gateway state backend-neutral.
+
+## Next Actions
+
+1. Make delivery state more reliable: do not mark a message fully processed
+   until the reply path has completed or the failure has been recorded.
+2. Split assistant profile from raw memory: `User.md` and `Memory.md` are good,
+   but the gateway also needs explicit profile fields like tone, business,
+   projects, and preferred runtime.
+3. Add per-thread runtime routing: one default backend is enough now, but the
+   product wants rules like "coding tasks to Codex, personal chat to Claude".
+4. Add a second channel after the backend seam has settled.
+5. Add memory write-back only with an audit trail and explicit user review.

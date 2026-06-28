@@ -1,5 +1,5 @@
 //! The message loop: poll, filter, and route each message to a per-thread
-//! worker task that runs Claude Code and sends the reply.
+//! worker task that runs an agent backend and sends the reply.
 //!
 //! Design: a single loop task owns the queue map and the store. Each thread
 //! gets its own task fed by an mpsc channel, which serializes that thread's
@@ -15,7 +15,10 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::claude::{Request, RunError, Runner};
+use crate::agent::{Request, RunError, Runner};
+use crate::claude;
+use crate::codex;
+use crate::config::AgentBackend;
 use crate::config::Config;
 use crate::imessage::{Message, Poller, Sender};
 use crate::memory;
@@ -87,9 +90,17 @@ pub struct Gateway {
 impl Gateway {
     pub fn new(cfg: Config) -> Result<Self> {
         let store = Arc::new(Mutex::new(Store::open(&cfg.state_path)?));
-        let runner = Arc::new(Runner {
-            bin: cfg.claude_bin.clone(),
-            permission_mode: cfg.permission_mode.clone(),
+        let runner = Arc::new(match cfg.agent_backend()? {
+            AgentBackend::Claude => Runner::Claude(claude::Runner {
+                bin: cfg.claude_bin.clone(),
+                permission_mode: cfg.claude_permission_mode.clone(),
+            }),
+            AgentBackend::Codex => Runner::Codex(codex::Runner {
+                bin: cfg.codex_bin.clone(),
+                sandbox: cfg.codex_sandbox.clone(),
+                approval_policy: cfg.codex_approval_policy.clone(),
+                model: cfg.codex_model.clone(),
+            }),
         });
         let ctx = Ctx {
             store: store.clone(),
@@ -223,7 +234,7 @@ impl Gateway {
             reply_to(
                 &self.ctx,
                 &target,
-                "I'm a bit behind on this thread — resend that in a moment.",
+                "I'm a bit behind on this thread - resend that in a moment.",
             )
             .await;
         }
@@ -243,7 +254,12 @@ async fn handle(ctx: &Ctx, job: Job) {
         return;
     }
 
-    let (session_id, is_new) = match ctx.store.lock().unwrap().session_for(&job.thread) {
+    let initial_session_id = ctx.runner.initial_session_id();
+    let (session_id, is_new) = match ctx.store.lock().unwrap().session_for(
+        &job.thread,
+        ctx.runner.backend(),
+        initial_session_id,
+    ) {
         Ok(v) => v,
         Err(e) => {
             error!("[{}] session error: {e}", job.thread);
@@ -259,10 +275,10 @@ async fn handle(ctx: &Ctx, job: Job) {
 
     let system = memory::load(&ctx.assistant_dir);
 
-    // Mark the session started up front, so a run that fails after Claude has
-    // already created the session never re-attempts `--session-id` and collides.
-    if is_new {
-        let _ = ctx.store.lock().unwrap().mark_started(&job.thread);
+    // Some backends let push choose the session id. Mark those before the run
+    // so a post-create failure does not retry the same create call.
+    if is_new && ctx.runner.mark_started_before_run() {
+        let _ = ctx.store.lock().unwrap().mark_started(&job.thread, None);
     }
 
     let req = |is_new| Request {
@@ -286,11 +302,22 @@ async fn handle(ctx: &Ctx, job: Job) {
     }
 
     match result {
-        Ok(reply) => {
-            reply_to(ctx, &job.target, &reply).await;
+        Ok(out) => {
+            if is_new && !ctx.runner.mark_started_before_run() {
+                if let Err(e) = ctx
+                    .store
+                    .lock()
+                    .unwrap()
+                    .mark_started(&job.thread, out.session_id.as_deref())
+                {
+                    error!("[{}] session save error: {e}", job.thread);
+                    return;
+                }
+            }
+            reply_to(ctx, &job.target, &out.reply).await;
         }
         Err(RunError::Timeout) => {
-            warn!("[{}] claude run timed out", job.thread);
+            warn!("[{}] {} run timed out", job.thread, ctx.runner.label());
             reply_to(
                 ctx,
                 &job.target,
@@ -299,21 +326,25 @@ async fn handle(ctx: &Ctx, job: Job) {
             .await;
         }
         Err(RunError::Failed(msg)) => {
-            error!("[{}] claude error: {msg}", job.thread);
+            error!("[{}] {} error: {msg}", job.thread, ctx.runner.label());
             reply_to(ctx, &job.target, &format!("⚠️ {}", short(&msg))).await;
         }
     }
 }
 
-/// Handles gateway-level slash commands before anything reaches Claude.
+/// Handles gateway-level slash commands before anything reaches the agent.
 fn command(ctx: &Ctx, job: &Job) -> Option<String> {
     match job.text.trim().to_lowercase().as_str() {
-        "/clear" | "/new" | "/reset" => match ctx.store.lock().unwrap().rotate(&job.thread) {
+        "/clear" | "/new" | "/reset" => match ctx.store.lock().unwrap().rotate(
+            &job.thread,
+            ctx.runner.backend(),
+            ctx.runner.initial_session_id(),
+        ) {
             Ok(()) => Some("Started a fresh conversation.".to_string()),
             Err(_) => Some("Couldn't reset the conversation.".to_string()),
         },
         "/help" => {
-            Some("Commands:\n/clear — start a fresh conversation\n/help — this message".to_string())
+            Some("Commands:\n/clear - start a fresh conversation\n/help - this message".to_string())
         }
         _ => None,
     }
@@ -335,7 +366,7 @@ async fn reply_to(ctx: &Ctx, target: &str, text: &str) {
 fn short(msg: &str) -> String {
     let s = msg.rsplit(": ").next().unwrap_or(msg).trim();
     if s.is_empty() {
-        "couldn't reach Claude".to_string()
+        "couldn't reach the agent".to_string()
     } else {
         s.to_string()
     }
@@ -378,7 +409,7 @@ mod tests {
         Filter {
             self_set: ["me@icloud.com".to_string()].into_iter().collect(),
             allow_set: ["+15551234567".to_string()].into_iter().collect(),
-            reply_marker: "\n\n— sent by push".to_string(),
+            reply_marker: "\n\n-- sent by push".to_string(),
         }
     }
 
@@ -423,7 +454,7 @@ mod tests {
 
     #[test]
     fn own_reply_dropped() {
-        let m = msg("me@icloud.com", "", true, "an answer\n\n— sent by push");
+        let m = msg("me@icloud.com", "", true, "an answer\n\n-- sent by push");
         assert_eq!(filter().accept(&m), None);
     }
 

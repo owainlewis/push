@@ -1,5 +1,5 @@
 //! Persisted gateway state: last processed message ROWID and the mapping from
-//! conversation thread to Claude Code session UUID.
+//! conversation thread to the active agent backend session.
 
 use std::collections::HashMap;
 use std::io::ErrorKind;
@@ -7,13 +7,13 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SessionInfo {
     pub uuid: String,
     #[serde(default)]
     pub started: bool,
+    #[serde(default = "default_backend")]
+    pub backend: String,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -53,42 +53,55 @@ impl Store {
         self.save()
     }
 
-    /// Returns the session UUID for a thread, creating one if needed. The second
-    /// value is true when the UUID has not been started yet (use `--session-id`
-    /// rather than `--resume`).
-    pub fn session_for(&mut self, thread: &str) -> Result<(String, bool)> {
+    /// Returns the agent session id for a thread, creating one if needed. The
+    /// second value is true when the backend has not started that session yet.
+    pub fn session_for(
+        &mut self,
+        thread: &str,
+        backend: &str,
+        initial_id: String,
+    ) -> Result<(String, bool)> {
         if let Some(si) = self.state.sessions.get(thread) {
-            return Ok((si.uuid.clone(), !si.started));
+            if si.backend == backend {
+                return Ok((si.uuid.clone(), !si.started));
+            }
         }
-        let uuid = Uuid::new_v4().to_string();
         self.state.sessions.insert(
             thread.to_string(),
             SessionInfo {
-                uuid: uuid.clone(),
+                uuid: initial_id.clone(),
                 started: false,
+                backend: backend.to_string(),
             },
         );
         self.save()?;
-        Ok((uuid, true))
+        Ok((initial_id, true))
     }
 
-    pub fn mark_started(&mut self, thread: &str) -> Result<()> {
+    pub fn mark_started(&mut self, thread: &str, session_id: Option<&str>) -> Result<()> {
         if let Some(si) = self.state.sessions.get_mut(thread) {
+            if let Some(id) = session_id {
+                si.uuid = id.to_string();
+            }
             if !si.started {
                 si.started = true;
+                return self.save();
+            }
+            if session_id.is_some() {
                 return self.save();
             }
         }
         Ok(())
     }
 
-    /// Assigns a fresh session UUID to a thread (the `/clear` behavior).
-    pub fn rotate(&mut self, thread: &str) -> Result<()> {
+    /// Assigns a fresh backend session to a thread (the `/clear` behavior).
+    pub fn rotate(&mut self, thread: &str, backend: &str, initial_id: String) -> Result<()> {
         self.state.sessions.insert(
             thread.to_string(),
             SessionInfo {
-                uuid: Uuid::new_v4().to_string(),
+                uuid: initial_id,
                 started: false,
+                backend: backend.to_string(),
             },
         );
         self.save()
@@ -103,5 +116,61 @@ impl Store {
         std::fs::write(&tmp, data).context("write state")?;
         std::fs::rename(&tmp, &self.path).context("rename state")?;
         Ok(())
+    }
+}
+
+fn default_backend() -> String {
+    "claude".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    fn temp_state_path() -> String {
+        std::env::temp_dir()
+            .join(format!("push-store-test-{}.json", Uuid::new_v4()))
+            .to_string_lossy()
+            .to_string()
+    }
+
+    #[test]
+    fn backend_change_starts_fresh_session() {
+        let path = temp_state_path();
+        let mut store = Store::open(&path).unwrap();
+
+        let first = store
+            .session_for("self:me", "claude", "claude-session".to_string())
+            .unwrap();
+        assert_eq!(first, ("claude-session".to_string(), true));
+        store.mark_started("self:me", None).unwrap();
+
+        let second = store
+            .session_for("self:me", "codex", String::new())
+            .unwrap();
+        assert_eq!(second, (String::new(), true));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn mark_started_can_store_backend_owned_session_id() {
+        let path = temp_state_path();
+        let mut store = Store::open(&path).unwrap();
+
+        store
+            .session_for("self:me", "codex", String::new())
+            .unwrap();
+        store
+            .mark_started("self:me", Some("codex-thread-id"))
+            .unwrap();
+
+        let resumed = store
+            .session_for("self:me", "codex", String::new())
+            .unwrap();
+        assert_eq!(resumed, ("codex-thread-id".to_string(), false));
+
+        let _ = std::fs::remove_file(path);
     }
 }

@@ -1,8 +1,10 @@
-//! push is a tiny iMessage gateway for Claude Code. It polls the macOS Messages
-//! database for new messages, runs each through `claude -p` with persistent
-//! per-conversation sessions and injected memory, and texts the reply back.
+//! push is a tiny iMessage gateway for personal assistant agents. It polls the
+//! macOS Messages database for new messages, sends each through a configured
+//! coding-agent backend, and texts the reply back.
 
+mod agent;
 mod claude;
+mod codex;
 mod config;
 mod gateway;
 mod imessage;
@@ -46,7 +48,7 @@ fn preflight(cfg: &config::Config) -> Result<()> {
         Err(e) => bail!("open {}: {e}", cfg.db_path),
     }
 
-    for bin in [cfg.claude_bin.as_str(), "osascript"] {
+    for bin in [cfg.agent_bin().context("agent")?, "osascript"] {
         if which(bin).is_none() {
             bail!("{bin:?} not found on PATH");
         }

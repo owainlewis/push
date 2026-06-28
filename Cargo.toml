@@ -3,7 +3,7 @@ name = "push"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "A tiny messaging gateway that turns Claude Code into an assistant you text."
+description = "A tiny messaging gateway that turns coding agents into a personal assistant you text."
 repository = "https://github.com/owainlewis/push"
 
 [[bin]]

@@ -17,10 +17,20 @@ pub struct Config {
     pub self_handles: Vec<String>,
     #[serde(default)]
     pub allow_from: Vec<String>,
+    #[serde(default = "default_agent")]
+    pub agent: String,
     #[serde(default = "default_claude_bin")]
     pub claude_bin: String,
-    #[serde(default = "default_permission_mode")]
-    pub permission_mode: String,
+    #[serde(default = "default_claude_permission_mode", alias = "permission_mode")]
+    pub claude_permission_mode: String,
+    #[serde(default = "default_codex_bin")]
+    pub codex_bin: String,
+    #[serde(default = "default_codex_sandbox")]
+    pub codex_sandbox: String,
+    #[serde(default = "default_codex_approval_policy")]
+    pub codex_approval_policy: String,
+    #[serde(default)]
+    pub codex_model: Option<String>,
     #[serde(default = "default_sessions_dir")]
     pub sessions_dir: String,
     #[serde(default = "default_state_path")]
@@ -54,16 +64,53 @@ impl Config {
             .with_context(|| format!("invalid run_timeout {}", self.run_timeout))
     }
 
+    pub fn agent_backend(&self) -> Result<AgentBackend> {
+        match self.agent.as_str() {
+            "claude" => Ok(AgentBackend::Claude),
+            "codex" => Ok(AgentBackend::Codex),
+            other => bail!("invalid agent {other:?}; expected \"claude\" or \"codex\""),
+        }
+    }
+
+    pub fn agent_bin(&self) -> Result<&str> {
+        Ok(match self.agent_backend()? {
+            AgentBackend::Claude => &self.claude_bin,
+            AgentBackend::Codex => &self.codex_bin,
+        })
+    }
+
     fn validate(&self) -> Result<()> {
         if self.self_handles.is_empty() && self.allow_from.is_empty() {
             bail!(
                 "set at least one of self_handles or allow_from, or nobody can reach the assistant"
             );
         }
+        self.agent_backend()?;
+        if !matches!(
+            self.codex_sandbox.as_str(),
+            "read-only" | "workspace-write" | "danger-full-access"
+        ) {
+            bail!("invalid codex_sandbox {}; expected read-only, workspace-write, or danger-full-access", self.codex_sandbox);
+        }
+        if !matches!(
+            self.codex_approval_policy.as_str(),
+            "untrusted" | "on-request" | "never"
+        ) {
+            bail!(
+                "invalid codex_approval_policy {}; expected untrusted, on-request, or never",
+                self.codex_approval_policy
+            );
+        }
         self.poll_interval_dur()?;
         self.run_timeout_dur()?;
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentBackend {
+    Claude,
+    Codex,
 }
 
 fn expand_home(p: &str) -> String {
@@ -84,11 +131,23 @@ fn default_poll_interval() -> String {
 fn default_run_timeout() -> String {
     "120s".to_string()
 }
+fn default_agent() -> String {
+    "claude".to_string()
+}
 fn default_claude_bin() -> String {
     "claude".to_string()
 }
-fn default_permission_mode() -> String {
+fn default_claude_permission_mode() -> String {
     "bypassPermissions".to_string()
+}
+fn default_codex_bin() -> String {
+    "codex".to_string()
+}
+fn default_codex_sandbox() -> String {
+    "workspace-write".to_string()
+}
+fn default_codex_approval_policy() -> String {
+    "never".to_string()
 }
 fn default_sessions_dir() -> String {
     "~/.push/sessions".to_string()
@@ -100,5 +159,5 @@ fn default_assistant_dir() -> String {
     "./assistant".to_string()
 }
 fn default_reply_marker() -> String {
-    "\n\n— sent by push".to_string()
+    "\n\n-- sent by push".to_string()
 }

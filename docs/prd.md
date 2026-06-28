@@ -1,182 +1,176 @@
-# push — v1 PRD
+# push v1 PRD
 
 ## Summary
 
-`push` is a small Rust binary that lets you text a personal assistant. It polls
-iMessage for new messages, runs each one through the Claude Code CLI
-(`claude -p`) with persistent per-conversation sessions and injected memory, and
-sends the reply back over iMessage.
+push is a small Rust binary that turns coding-agent runtimes into a personal
+assistant you can text.
 
-The goal of v1 is the smallest thing that is genuinely useful: text yourself,
-get a real Claude Code agent that remembers the conversation and knows who you
-are.
+It polls iMessage, filters allowed senders, loads user-owned assistant context,
+runs a configured backend, and sends the backend's final reply back over
+iMessage.
+
+The first supported backends are Claude Code and Codex.
+
+## Product Goal
+
+Build the smallest useful personal assistant gateway:
+
+- Message it naturally.
+- Let it use a real coding-agent runtime.
+- Keep your assistant memory and preferences outside any one vendor.
+- Keep backend agents replaceable.
 
 ## Goals
 
-- Receive iMessage messages and respond using Claude Code.
-- Persist conversation context per thread (memory across messages).
-- Inject a personal assistant profile and memory the user owns and can edit.
-- Run as one self-contained binary with no external services.
+- Receive iMessages and reply through Messages.
+- Support Claude Code as a backend.
+- Support Codex as a backend.
+- Persist conversation to backend-session mappings.
+- Inject user-owned assistant context into each run.
+- Keep the binary local and self-contained.
 
-## Non-goals (v1)
+## Non-Goals
 
-- Other channels (Telegram, Discord, Slack, WhatsApp, Signal). Designed for, not
-  built. The poller/sender are behind an interface so a second channel slots in.
-- The Claude API directly. v1 shells out to the Claude Code CLI only.
-- Auto-writing memory. v1 memory is read-only; the user maintains the files.
-- Group chats. v1 handles 1:1 DMs and self-chat.
-- Proactive/outbound messages. v1 is strictly reply-to-inbound.
+- Build a custom agent runtime.
+- Build a plugin system in the gateway.
+- Reimplement MCP, tools, skills, or permission prompts.
+- Auto-write memory.
+- Support group chats.
+- Support proactive messages.
+- Support multiple active backends in one conversation.
 
-## Why not just use Hermes
+## Target User
 
-Hermes (Nous Research) is a multi-channel agent gateway with strong features:
-multi-provider models, FTS5 session search, Honcho user modeling, a skills
-system, cron, personas, parallel subagents. push is deliberately narrower and
-takes a different bet on **memory**:
+The first user is a technical operator who already uses coding agents and wants
+a personal assistant reachable through messages.
 
-| | Hermes | push |
+The assistant should know the user, their business, their projects, and their
+preferences. The selected backend should do the actual work.
+
+## Positioning
+
+Hermes and similar projects build more of the runtime: memory databases,
+summarizers, skills, subagents, schedulers, provider abstractions, and custom
+agent behavior.
+
+push takes a narrower bet:
+
+| Area | Hermes-style product | push |
 |---|---|---|
-| Memory store | Opaque DB + LLM summarization | Plain markdown files you own |
-| Edit a fact | Re-prompt / hope it updates | Open the file, edit, commit |
-| Versioning | None | Git, like any text file |
-| Model | Any provider | Claude Code only (v1) |
-| Footprint | Full framework | One small Rust binary |
+| Runtime | Built into the product | External backend |
+| Tools | Product-owned | Backend-owned |
+| Memory | Opaque or generated store | Plain markdown first |
+| Gateway | One part of the product | The product |
+| Backend choice | Abstracted provider/runtime | Adapter to real CLIs |
+| First backends | Product-specific | Claude Code and Codex |
 
-push's bet: memory that is human-legible, hand-editable, and version-controlled
-beats opaque memory for a single-user personal assistant. It also rides Claude
-Code's native context loading (`--append-system-prompt`, `CLAUDE.md`) instead of
-reimplementing memory injection.
+## Core User Flow
 
-## Architecture
+1. User sends a text.
+2. push reads the new row from `chat.db`.
+3. push filters by allowlist and reply marker.
+4. push loads assistant context.
+5. push resolves the thread's backend session.
+6. push runs Claude Code or Codex.
+7. push sends the final reply back over iMessage.
+8. push stores the latest message row and backend session state.
 
+## Components
+
+- `src/imessage/poller.rs`: reads Messages rows.
+- `src/imessage/sender.rs`: sends replies through AppleScript.
+- `src/gateway.rs`: poll loop, filtering, commands, queues, worker dispatch.
+- `src/agent.rs`: backend boundary.
+- `src/claude.rs`: Claude Code adapter.
+- `src/codex.rs`: Codex adapter.
+- `src/store.rs`: last row and backend session state.
+- `src/memory.rs`: markdown assistant context loading.
+- `src/config.rs`: JSON configuration.
+
+## Backend Behavior
+
+### Claude Code
+
+Claude Code is selected with:
+
+```json
+{ "agent": "claude" }
 ```
-                 +-------------------------------------------------+
-                 |                   push (Rust)                   |
-                 |                                                 |
-  chat.db  --->  |  Poller  -->  Gateway loop  -->  per-thread     |
- (rusqlite)      |  (read)        - filter         worker task     |
-                 |                - control cmds   (serialized)     |
-                 |                                     |           |
-                 |   Store (thread -> session UUID, last ROWID)    |
-                 |   Memory (User.md + Memory.md)                  |
-                 |                                     |           |
-                 |                                     v           |
-  iMessage  <--- |  Sender (osascript)  <--  Claude runner         |
-                 |                            (claude -p)          |
-                 +-------------------------------------------------+
+
+It uses:
+
+- `claude -p`
+- `--session-id` for new conversations
+- `--resume` for existing conversations
+- `--append-system-prompt` for assistant context
+
+### Codex
+
+Codex is selected with:
+
+```json
+{ "agent": "codex" }
 ```
 
-### Components
+It uses:
 
-- **Poller** (`src/imessage/poller.rs`): reads new rows from `chat.db`
-  in-process via `rusqlite` (bundled SQLite, read-only), tracking the last
-  processed `ROWID`. Decodes the `attributedBody` typedstream blob when
-  `message.text` is NULL (common on recent macOS). The query also filters out
-  tapbacks/reactions and system rows.
-- **Sender** (`src/imessage/sender.rs`): sends replies with `osascript`, passing
-  the message and target as `argv` to avoid AppleScript string escaping.
-- **Store** (`src/store.rs`): JSON file holding `last_row_id` and a
-  `thread -> {uuid, started}` map. Generates session UUIDs (v4).
-- **Memory** (`src/memory.rs`): concatenates `assistant/User.md` and
-  `assistant/Memory.md` for injection.
-- **Claude runner** (`src/claude.rs`): builds and runs the `claude -p` command
-  with a timeout, parses the JSON result.
-- **Gateway** (`src/gateway.rs`): the poll loop, sender/handle filtering,
-  control-command routing, and per-thread serialization via tokio tasks.
+- `codex exec --json`
+- `codex exec resume <thread_id>`
+- `--output-last-message` internally for final reply capture
+- JSONL event parsing to store the Codex thread id
 
-### Session model
-
-Each conversation maps to a stable Claude Code session UUID generated by the
-gateway. First message of a session uses `--session-id <uuid>`; every message
-after uses `--resume <uuid>`. This keeps full Claude Code context (including
-tool-call state) without the gateway reimplementing conversation memory.
-
-`/clear` rotates the UUID, which starts a fresh transcript on the next message.
-
-### Memory injection
-
-For every run the gateway loads `assistant/User.md` (who the user is) and
-`assistant/Memory.md` (durable facts) and passes them via
-`--append-system-prompt`. This appends to Claude Code's default system prompt
-rather than replacing it. v1 is read-only. v2: the assistant appends to
-`Memory.md` and the gateway git-commits the change for an audit trail.
-
-### Permission posture
-
-Headless Claude Code has no human to approve tool calls, so push runs with
-`--permission-mode bypassPermissions`. To contain blast radius, each thread runs
-in its own sandbox directory under `sessions/<thread>/`, passed via `--add-dir`
-and set as the process working dir.
-
-This is a real risk surface: an inbound text is an instruction to an agent with
-tool access. Mitigation in v1 is a tight allowlist (below). Do not widen the
-allowlist to untrusted senders.
-
-### Message filtering
-
-A message is processed when:
-
-1. It is newer than the last processed `ROWID`, and its text does not contain
-   the reply marker (so the gateway never answers its own replies), and
-2. either it is in a **self-chat** (chat identifier matches a configured
-   `self_handles` entry — this is you texting yourself), or
-3. it is **inbound** (`is_from_me = 0`) from a handle in `allow_from`.
-
-Messages you send to other people (not the assistant) are `is_from_me = 1` in a
-non-self chat, so they are ignored.
-
-### Self-reply loop prevention
-
-Replies sent to a self-chat also appear in `chat.db` as `is_from_me = 1`. The
-gateway appends a configurable `reply_marker` footer to every outbound message
-and skips any inbound message containing it.
-
-### Concurrency
-
-One worker task (tokio) per thread, fed by a bounded channel. Messages within a thread
-process strictly in order (so two quick texts never run two `claude` processes
-against the same session transcript at once). Different threads run in parallel.
+Codex assistant context is passed as part of the prompt wrapper.
 
 ## Configuration
 
-`config.json` (see `config.example.json`):
-
 | Field | Meaning |
 |---|---|
-| `db_path` | Path to `chat.db` (default `~/Library/Messages/chat.db`). |
-| `poll_interval` | How often to poll, e.g. `"3s"`. |
-| `self_handles` | Your own iMessage handles (enables self-chat). |
-| `allow_from` | Other senders allowed to message the assistant. |
-| `claude_bin` | Path to the `claude` binary (default `claude`). |
-| `permission_mode` | Claude Code permission mode (default `bypassPermissions`). |
-| `sessions_dir` | Root for per-thread sandbox dirs. |
-| `state_path` | Path to the JSON state file. |
-| `assistant_dir` | Directory holding `User.md` and `Memory.md`. |
-| `reply_marker` | Footer appended to replies; used to skip our own messages. |
+| `agent` | `claude` or `codex`. |
+| `db_path` | Path to Messages `chat.db`. |
+| `poll_interval` | How often to poll. |
+| `run_timeout` | Max backend run time. |
+| `self_handles` | User's own iMessage handles. |
+| `allow_from` | Other allowed senders. |
+| `claude_bin` | Claude Code binary. |
+| `claude_permission_mode` | Claude Code permission mode. |
+| `codex_bin` | Codex binary. |
+| `codex_sandbox` | Codex sandbox mode. |
+| `codex_approval_policy` | Codex approval policy. |
+| `codex_model` | Optional Codex model override. |
+| `sessions_dir` | Per-thread working dirs. |
+| `state_path` | JSON state path. |
+| `assistant_dir` | Directory with `User.md` and `Memory.md`. |
+| `reply_marker` | Footer used to skip push's own replies. |
 
-## Control commands
+## Control Commands
 
-Parsed by the gateway before anything reaches Claude:
+- `/clear`, `/new`, `/reset`: rotate the current backend session.
+- `/help`: show available commands.
 
-- `/clear`, `/new`, `/reset` — rotate the session UUID (fresh conversation).
-- `/help` — list commands.
+## Acceptance Criteria
 
-## Data flow (one message)
+- A configured self-chat message gets a reply.
+- Non-allowlisted senders are ignored.
+- push does not answer messages containing the reply marker.
+- `/clear` starts a fresh backend session.
+- Claude backend can create and resume a session.
+- Codex backend can create a session, store the Codex thread id, and resume it.
+- Assistant memory is included in backend runs.
+- Tests cover filtering and backend output parsing.
 
-1. Poller reads rows with `ROWID > last_row_id`.
-2. Gateway filters by sender and reply marker.
-3. Control commands handled directly; otherwise enqueued to the thread worker.
-4. Worker resolves the session UUID, ensures the sandbox dir, loads memory.
-5. `claude -p --resume <uuid> --permission-mode bypassPermissions
-   --add-dir <dir> --append-system-prompt <memory> --output-format json <text>`.
-6. Worker parses `result`, appends the reply marker, sends via `osascript`.
-7. Gateway advances `last_row_id` and saves state.
+## Risks
 
-## Open questions / v2 ideas
+- Messages are currently marked processed after enqueue, not after delivery.
+  This can lose a message if push crashes before the worker replies.
+- Codex resume behavior depends on the Codex CLI session store.
+- Claude `bypassPermissions` and Codex non-interactive automation are powerful
+  local execution modes.
+- iMessage database shape can change across macOS versions.
 
-- Memory write-back: let the assistant append to `Memory.md`, gateway commits.
-- Multi-assistant: route different threads to different personas/configs.
-- Second channel (Telegram) behind the existing channel interface.
-- Streaming partial replies via `--output-format stream-json`.
-- Per-thread "typing" indicator while Claude runs.
-- Cron / proactive messages (gateway-initiated sends).
+## Next Scope
+
+1. Reliable delivery state.
+2. Explicit assistant profile fields.
+3. Runtime routing rules.
+4. A second message channel.
+5. Audited memory write-back.

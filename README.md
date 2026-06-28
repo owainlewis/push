@@ -1,114 +1,130 @@
 # push
 
-A tiny messaging gateway that turns Claude Code into a personal assistant you
-text. It polls iMessage for new messages, runs them through `claude -p`, and
-sends the reply back to your phone.
+push is a tiny personal assistant gateway. You text it, it sends the message to
+a configured coding-agent runtime, then it sends the answer back.
 
-One small Rust binary. No daemon framework, no server, no cloud. It runs on your
-Mac and reads your local Messages history directly.
+The product is the gateway: messaging, allowlists, routing, assistant profile,
+memory, and conversation state. The agent runtime is deliberately disposable.
+Claude Code and Codex are the first two backends.
 
 ## How it works
 
-```
-iMessage (chat.db)  ->  push (poll loop)  ->  claude -p  ->  iMessage reply
+```text
+iMessage -> push gateway -> Claude Code or Codex -> iMessage reply
 ```
 
 1. Poll `~/Library/Messages/chat.db` for new messages.
-2. Keep only messages from allowed senders (yourself, or a config allowlist).
-3. Map each conversation to a stable Claude Code session so context persists.
-4. Run `claude -p` headless, with your assistant memory injected.
-5. Send the answer back over iMessage via AppleScript.
+2. Keep only messages from yourself or configured allowed senders.
+3. Map each conversation to the active backend session.
+4. Load your assistant context from `assistant/User.md` and
+   `assistant/Memory.md`.
+5. Run the configured backend headlessly.
+6. Send the final answer back through Messages.
 
-Memory is plain markdown you own (`assistant/User.md`, `assistant/Memory.md`).
-The gateway injects it into every run with `--append-system-prompt`, so you can
-read, edit, and version your assistant's context by hand.
+Memory is plain markdown you own. The gateway injects it into each run, so you
+can read it, edit it, and version it without learning a custom memory database.
 
-## Why push: it's actually Claude Code
+## The Bet
 
-push is not an agent. It is a thin pipe to the real `claude` binary. Your texted
-assistant *is* Claude Code: same model, same tools, same MCP servers, same
-permission modes, same `CLAUDE.md` loading, same login. When Claude Code ships a
-feature, push has it the same day, for free, with no code change.
+Coding agents are becoming commodity runtimes. Claude Code, Codex, Cursor, AMP,
+Pi-style agents, and independent agents all compete on the same layer: tool use,
+repo edits, command execution, MCP, plugins, model choice, and coding workflow.
 
-This is the opposite of how other gateways work, and it is the point:
+push does not try to win that layer. It treats those agents as workers behind a
+small contract: given this user message and assistant context, produce the reply
+or task result that should be sent back.
 
-- **Hermes** runs its own agent runtime over many providers (OpenRouter, NIM,
-  and so on). You get Hermes' abstractions, Hermes' bugs, and a translation
-  layer between you and the model.
-- **OpenClaw** wraps a third-party agent (`pi`). Again, a layer that is not
-  Claude Code sitting between you and the work.
+push owns the personal assistant layer:
 
-Those layers look like flexibility. In practice they are a disadvantage: you
-inherit someone else's agent loop instead of the one Anthropic builds and
-maintains. push has no agent loop of its own to inherit. It hands your message
-to `claude` and sends back what `claude` says.
+- Message ingress and egress.
+- Sender allowlists and reply loop prevention.
+- User-owned assistant config.
+- Durable memory files.
+- Conversation to backend-session mapping.
+- Routing between channels and runtimes.
 
-A concrete payoff: push bills your **Claude subscription**, because it just runs
-`claude` with your environment. If `ANTHROPIC_API_KEY` is set it uses that;
-otherwise it uses your logged-in subscription. No wrapper, no separate billing,
-no provider config.
+The framing is personal assistant first, coding agent second. The backend may be
+Claude Code today and Codex tomorrow, but the assistant identity, memory, and
+messaging relationship stay with push.
 
-## Strategy: own the gateway, not the assistant
+See [docs/strategy.md](docs/strategy.md) for the full direction.
 
-Personal AI agents are becoming a platform category. Google has Spark. Nous has
-Hermes. OpenAI and Anthropic have agent tools. The risk is betting your whole
-workflow on one assistant app.
+## Backends
 
-push is a hedge against that. The durable layer is the one you own: how messages
-reach you, how your memory is stored, how work is routed. push keeps that layer
-yours and treats the agent as a swappable slot. Today it drives Claude Code
-natively (the best first-party agent, used directly, not wrapped). The gateway
-itself depends on no provider, so the agent stays a choice you can remake.
+### Claude Code
 
-There is no contradiction with "it's actually Claude Code" above: that is the
-agent layer (use the best agent natively), this is the gateway layer (never let
-one app own your workflow). See [docs/strategy.md](docs/strategy.md) for the full
-argument and the honest gap (the agent slot is still Claude-shaped today).
+Claude Code uses `claude -p` with `--session-id` for new conversations and
+`--resume` for existing conversations. Assistant context is passed with
+`--append-system-prompt`, so Claude Code keeps its normal tools, MCP servers,
+permissions, login, and `CLAUDE.md` behavior.
 
-## v1 scope
+### Codex
 
-- iMessage only.
-- Claude Code only (no direct API).
-- Read-only memory (you maintain the files; the gateway injects them).
+Codex uses `codex exec` in non-interactive mode. The first run captures the
+Codex thread id from JSONL output; later turns resume that session with
+`codex exec resume`. Assistant context is included in the prompt because Codex
+does not expose the same `--append-system-prompt` flag as Claude Code.
 
-See [docs/prd.md](docs/prd.md) for the full v1 product spec, and
-[docs/architecture.md](docs/architecture.md) for the design and diagrams
-(including why push's file-based memory beats an opaque memory database).
+## v1 Scope
+
+- iMessage channel.
+- Claude Code backend.
+- Codex backend.
+- Read-only memory files.
+- One configured backend at a time.
 
 ## Requirements
 
 - macOS with iMessage signed in.
-- **Full Disk Access** for your terminal (System Settings -> Privacy &
-  Security -> Full Disk Access) so push can read `chat.db`.
-- `claude` (Claude Code CLI) on your `PATH`.
-- `osascript` (ships with macOS). The Messages database is read in-process via
-  the bundled SQLite, so no `sqlite3` binary is needed.
-- A recent Rust toolchain (`cargo`) to build.
+- Full Disk Access for your terminal so push can read `chat.db`.
+- `osascript`, which ships with macOS.
+- At least one backend on your `PATH`:
+  - `claude` for Claude Code.
+  - `codex` for Codex.
+- A recent Rust toolchain.
 
-## Quick start
+## Quick Start
 
 ```sh
 git clone https://github.com/owainlewis/push.git
 cd push
 cp config.example.json config.json
-# edit config.json: set self_handles to your own iMessage handles
+# edit config.json: set self_handles and choose "agent": "claude" or "codex"
 cargo build --release
 ./target/release/push
 ```
 
-By default it reads `config.json`; pass `--config <path>` to use another.
-
 Then text yourself in Messages. The reply comes back in the same thread.
 
-### Commands you can text
+### Commands You Can Text
 
-- `/clear` (or `/new`, `/reset`) — start a fresh conversation (rotates the session).
-- `/help` — list commands.
+- `/clear`, `/new`, `/reset`: start a fresh backend session.
+- `/help`: list commands.
+
+## Configuration
+
+```json
+{
+  "agent": "codex",
+  "self_handles": ["you@icloud.com", "+15551234567"],
+  "allow_from": [],
+  "claude_bin": "claude",
+  "claude_permission_mode": "bypassPermissions",
+  "codex_bin": "codex",
+  "codex_sandbox": "workspace-write",
+  "codex_approval_policy": "never"
+}
+```
+
+`agent` can be `claude` or `codex`.
 
 ## Safety
 
-push runs Claude Code with `--permission-mode bypassPermissions` so it can act
-without a human to approve each tool call. Each conversation runs in its own
-sandbox directory under `sessions/`. **Only allow senders you trust**: an
-inbound text is an instruction to an agent with tool access. Keep the allowlist
-tight.
+An inbound text is an instruction to an agent with tool access. Keep
+`allow_from` tight.
+
+Claude Code defaults to `bypassPermissions` for headless use. Codex defaults to
+`workspace-write` plus `never` approval for non-interactive use. Both settings
+should be treated as powerful automation. Use the least access that still makes
+the assistant useful, and run broad-access modes only in an environment you
+control.

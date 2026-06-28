@@ -4,10 +4,15 @@
   "run_timeout": "120s",
   "self_handles": ["you@icloud.com", "+15551234567"],
   "allow_from": [],
+  "agent": "claude",
   "claude_bin": "claude",
-  "permission_mode": "bypassPermissions",
+  "claude_permission_mode": "bypassPermissions",
+  "codex_bin": "codex",
+  "codex_sandbox": "workspace-write",
+  "codex_approval_policy": "never",
+  "codex_model": null,
   "sessions_dir": "~/.push/sessions",
   "state_path": "~/.push/state.json",
   "assistant_dir": "./assistant",
-  "reply_marker": "\n\n— sent by push"
+  "reply_marker": "\n\n-- sent by push"
 }

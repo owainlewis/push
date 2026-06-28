@@ -5,26 +5,12 @@ use std::time::Duration;
 use serde::Deserialize;
 use tokio::process::Command;
 
+use crate::agent::{Request, RunError, RunOutput};
+
 /// Runner invokes the `claude` binary in print mode.
 pub struct Runner {
     pub bin: String,
     pub permission_mode: String,
-}
-
-/// One headless turn.
-pub struct Request<'a> {
-    pub session_id: &'a str,
-    /// true => `--session-id`, false => `--resume`.
-    pub is_new: bool,
-    pub work_dir: &'a str,
-    pub system_append: &'a str,
-    pub prompt: &'a str,
-}
-
-/// What went wrong, separated so the gateway can phrase a timeout differently.
-pub enum RunError {
-    Timeout,
-    Failed(String),
 }
 
 #[derive(Deserialize, Default)]
@@ -41,7 +27,7 @@ struct CliResult {
 
 impl Runner {
     /// Executes one turn and returns Claude's reply text, or a RunError.
-    pub async fn run(&self, req: Request<'_>, timeout: Duration) -> Result<String, RunError> {
+    pub async fn run(&self, req: Request<'_>, timeout: Duration) -> Result<RunOutput, RunError> {
         let mut cmd = Command::new(&self.bin);
         cmd.arg("-p")
             .arg(req.prompt)
@@ -79,13 +65,16 @@ impl Runner {
                 };
                 Err(RunError::Failed(msg))
             }
-            Ok(r) => {
-                let _ = r.session_id;
-                Ok(r.result.trim().to_string())
-            }
+            Ok(r) => Ok(RunOutput {
+                reply: r.result.trim().to_string(),
+                session_id: Some(r.session_id),
+            }),
             Err(_) => {
                 if out.status.success() {
-                    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+                    Ok(RunOutput {
+                        reply: String::from_utf8_lossy(&out.stdout).trim().to_string(),
+                        session_id: None,
+                    })
                 } else {
                     Err(RunError::Failed(
                         String::from_utf8_lossy(&out.stderr).trim().to_string(),
