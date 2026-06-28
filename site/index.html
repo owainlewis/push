@@ -3,31 +3,37 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>push - Personal Assistant Gateway</title>
+    <title>push - Text Claude Code or Codex</title>
     <meta
       name="description"
-      content="push is a personal assistant gateway that lets coding-agent runtimes like Claude Code and Codex answer your messages."
+      content="push is a local messaging gateway that lets Claude Code or Codex act as your personal assistant over iMessage."
     >
     <link
       rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230f766e'/%3E%3Cpath d='M18 20h17c8 0 13 5 13 12s-5 12-13 12H27v8h-9V20zm9 8v8h8c3 0 5-1 5-4s-2-4-5-4h-8z' fill='white'/%3E%3C/svg%3E"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23111417'/%3E%3Cpath d='M18 20h17c8 0 13 5 13 12s-5 12-13 12H27v8h-9V20zm9 8v8h8c3 0 5-1 5-4s-2-4-5-4h-8z' fill='%23f7c65f'/%3E%3C/svg%3E"
     >
     <style>
       :root {
         color-scheme: light;
         --ink: #111417;
-        --muted: #5c6670;
-        --line: #d8dee4;
-        --paper: #fbfbf8;
+        --text: #242a31;
+        --muted: #66717d;
+        --line: #dbe1e7;
+        --paper: #f7f8f5;
         --panel: #ffffff;
-        --accent: #0f766e;
-        --accent-dark: #0b4f4a;
-        --warm: #f3b562;
-        --blue: #3b82f6;
+        --green: #12756f;
+        --green-dark: #0b4f4a;
+        --amber: #f7c65f;
+        --blue: #406fed;
+        --red: #c44945;
       }
 
       * {
         box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
       }
 
       body {
@@ -36,132 +42,288 @@
           Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
           "Segoe UI", sans-serif;
         color: var(--ink);
-        background: var(--paper);
-        line-height: 1.55;
+        background:
+          linear-gradient(90deg, rgba(17, 20, 23, 0.035) 1px, transparent 1px),
+          linear-gradient(rgba(17, 20, 23, 0.035) 1px, transparent 1px),
+          var(--paper);
+        background-size: 42px 42px;
+        line-height: 1.5;
       }
 
       a {
-        color: var(--accent-dark);
-        text-decoration-thickness: 2px;
-        text-underline-offset: 3px;
+        color: inherit;
+      }
+
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          "Liberation Mono", monospace;
+        font-size: 0.94em;
       }
 
       .wrap {
-        width: min(1120px, calc(100% - 32px));
+        width: min(1160px, calc(100% - 32px));
         margin: 0 auto;
       }
 
-      header {
-        border-bottom: 1px solid var(--line);
-        background: rgba(251, 251, 248, 0.92);
+      .topbar {
+        border-bottom: 1px solid rgba(17, 20, 23, 0.1);
+        background: rgba(247, 248, 245, 0.9);
         position: sticky;
         top: 0;
-        backdrop-filter: blur(10px);
-        z-index: 10;
+        z-index: 20;
+        backdrop-filter: blur(14px);
       }
 
       nav {
-        height: 64px;
+        min-height: 64px;
         display: flex;
         align-items: center;
         justify-content: space-between;
-        gap: 24px;
+        gap: 22px;
       }
 
       .brand {
-        font-weight: 760;
-        font-size: 22px;
-        letter-spacing: 0;
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        font-weight: 780;
+        font-size: 21px;
+        text-decoration: none;
+      }
+
+      .mark {
+        width: 30px;
+        height: 30px;
+        display: grid;
+        place-items: center;
+        border-radius: 7px;
+        background: var(--ink);
+        color: var(--amber);
+        font-weight: 860;
       }
 
       .navlinks {
         display: flex;
+        align-items: center;
         gap: 18px;
         font-size: 15px;
       }
 
-      .hero {
-        padding: 86px 0 48px;
+      .navlinks a {
+        color: #37404a;
+        text-decoration: none;
       }
 
-      .hero-grid {
+      .navlinks a:hover {
+        color: var(--ink);
+      }
+
+      .hero {
+        padding: 74px 0 38px;
+      }
+
+      .hero-panel {
+        min-height: 640px;
+        border: 1px solid rgba(17, 20, 23, 0.14);
+        border-radius: 8px;
+        background:
+          linear-gradient(135deg, rgba(247, 198, 95, 0.22), transparent 36%),
+          linear-gradient(315deg, rgba(64, 111, 237, 0.12), transparent 38%),
+          #ffffff;
+        overflow: hidden;
         display: grid;
-        grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.95fr);
-        gap: 44px;
+        grid-template-columns: minmax(0, 0.95fr) minmax(320px, 1.05fr);
+        align-items: stretch;
+      }
+
+      .hero-copy {
+        padding: clamp(32px, 6vw, 68px);
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        width: fit-content;
         align-items: center;
+        gap: 8px;
+        margin: 0 0 20px;
+        padding: 6px 10px;
+        border: 1px solid rgba(18, 117, 111, 0.3);
+        border-radius: 999px;
+        color: var(--green-dark);
+        background: rgba(18, 117, 111, 0.08);
+        font-size: 13px;
+        font-weight: 730;
+      }
+
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--green);
       }
 
       h1 {
+        max-width: 760px;
         margin: 0;
-        font-size: clamp(42px, 8vw, 84px);
-        line-height: 0.96;
+        font-size: clamp(45px, 8vw, 86px);
+        line-height: 0.95;
         letter-spacing: 0;
       }
 
       .lead {
+        max-width: 650px;
         margin: 24px 0 0;
-        max-width: 690px;
-        font-size: 21px;
-        color: #2a3036;
+        color: var(--text);
+        font-size: clamp(19px, 2.4vw, 24px);
+        line-height: 1.35;
       }
 
-      .actions {
+      .hero-actions {
         display: flex;
         flex-wrap: wrap;
         gap: 12px;
-        margin-top: 30px;
+        margin-top: 32px;
       }
 
       .button {
         display: inline-flex;
         align-items: center;
-        min-height: 44px;
-        padding: 10px 16px;
+        justify-content: center;
+        min-height: 46px;
+        padding: 11px 17px;
         border: 1px solid var(--ink);
+        border-radius: 6px;
         background: var(--ink);
         color: #fff;
-        border-radius: 6px;
-        font-weight: 680;
+        font-weight: 740;
         text-decoration: none;
       }
 
       .button.secondary {
-        background: transparent;
+        background: #fff;
         color: var(--ink);
       }
 
-      .terminal {
-        background: #101417;
-        color: #eef2f5;
-        border-radius: 8px;
-        padding: 22px;
-        box-shadow: 0 24px 70px rgba(17, 20, 23, 0.18);
-        min-height: 320px;
-        overflow: auto;
+      .note {
+        margin-top: 18px;
+        color: var(--muted);
+        font-size: 15px;
       }
 
-      .terminal pre {
-        margin: 0;
-        white-space: pre-wrap;
-        font: 14px/1.6 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+      .demo {
+        border-left: 1px solid rgba(17, 20, 23, 0.1);
+        background:
+          linear-gradient(rgba(17, 20, 23, 0.03) 1px, transparent 1px),
+          #f2f4f6;
+        background-size: 100% 52px;
+        padding: clamp(24px, 5vw, 50px);
+        display: flex;
+        align-items: center;
+      }
+
+      .phone {
+        width: min(100%, 430px);
+        margin: 0 auto;
+        border: 1px solid #cfd6dd;
+        border-radius: 28px;
+        background: #fbfcfd;
+        box-shadow: 0 24px 70px rgba(17, 20, 23, 0.2);
+        overflow: hidden;
+      }
+
+      .phone-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 15px 18px;
+        border-bottom: 1px solid #e3e7eb;
+        background: #fff;
+      }
+
+      .phone-title {
+        font-weight: 760;
+      }
+
+      .status {
+        color: var(--green);
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .messages {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        padding: 18px;
+      }
+
+      .bubble {
+        max-width: 86%;
+        padding: 12px 14px;
+        border-radius: 18px;
+        font-size: 15px;
+      }
+
+      .bubble.user {
+        align-self: flex-end;
+        color: #fff;
+        background: var(--blue);
+        border-bottom-right-radius: 6px;
+      }
+
+      .bubble.push {
+        align-self: flex-start;
+        background: #e8edf2;
+        color: #1d252c;
+        border-bottom-left-radius: 6px;
+      }
+
+      .route {
+        margin: 6px 0;
+        padding: 12px;
+        border: 1px solid #d9e0e7;
+        border-radius: 8px;
+        background: #fff;
+        font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
           "Liberation Mono", monospace;
+        color: #35404b;
+      }
+
+      .reply-marker {
+        color: #7b8794;
+        font-size: 12px;
       }
 
       section {
-        padding: 48px 0;
+        padding: 54px 0;
+      }
+
+      .section-head {
+        max-width: 780px;
+        margin-bottom: 24px;
       }
 
       h2 {
-        margin: 0 0 18px;
-        font-size: 34px;
-        line-height: 1.12;
+        margin: 0;
+        font-size: clamp(31px, 4vw, 48px);
+        line-height: 1.06;
         letter-spacing: 0;
+      }
+
+      .section-head p,
+      .copy {
+        margin: 14px 0 0;
+        color: var(--muted);
+        font-size: 18px;
       }
 
       .grid {
         display: grid;
         grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 18px;
+        gap: 16px;
       }
 
       .card {
@@ -171,14 +333,48 @@
         padding: 22px;
       }
 
-      .card h3 {
-        margin: 0 0 10px;
-        font-size: 19px;
+      .card strong {
+        display: block;
+        margin-bottom: 8px;
+        font-size: 18px;
       }
 
       .card p {
         margin: 0;
         color: var(--muted);
+      }
+
+      .compare {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+      }
+
+      .compare .card:first-child {
+        border-top: 5px solid var(--red);
+      }
+
+      .compare .card:last-child {
+        border-top: 5px solid var(--green);
+      }
+
+      .list {
+        margin: 14px 0 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .list li {
+        display: flex;
+        gap: 10px;
+        padding: 9px 0;
+        border-top: 1px solid #edf0f3;
+        color: #39424c;
+      }
+
+      .check {
+        color: var(--green);
+        font-weight: 860;
       }
 
       .flow {
@@ -188,70 +384,160 @@
       }
 
       .step {
-        border: 1px solid var(--line);
-        background: #fff;
-        border-radius: 8px;
-        min-height: 96px;
+        min-height: 108px;
         padding: 16px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        text-align: center;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fff;
+      }
+
+      .step span {
+        display: block;
+        color: var(--muted);
+        font-size: 13px;
         font-weight: 720;
       }
 
-      .step:nth-child(2) {
-        border-color: var(--accent);
+      .step strong {
+        display: block;
+        margin-top: 8px;
+        font-size: 17px;
+        line-height: 1.25;
       }
 
-      .step:nth-child(4) {
-        border-color: var(--blue);
-      }
-
-      .split {
+      .install {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        grid-template-columns: minmax(0, 0.8fr) minmax(320px, 1.2fr);
         gap: 22px;
+        align-items: start;
+      }
+
+      .terminal {
+        border: 1px solid #26313b;
+        border-radius: 8px;
+        background: #111417;
+        color: #eef2f6;
+        overflow: auto;
+        box-shadow: 0 20px 60px rgba(17, 20, 23, 0.17);
+      }
+
+      .terminal-bar {
+        display: flex;
+        gap: 7px;
+        padding: 13px 15px;
+        border-bottom: 1px solid #26313b;
+      }
+
+      .light {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #f16c65;
+      }
+
+      .light:nth-child(2) {
+        background: #f7c65f;
+      }
+
+      .light:nth-child(3) {
+        background: #66c083;
+      }
+
+      pre {
+        margin: 0;
+        padding: 18px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font: 14px/1.6 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          "Liberation Mono", monospace;
       }
 
       footer {
+        margin-top: 32px;
         border-top: 1px solid var(--line);
         padding: 28px 0;
         color: var(--muted);
+        background: rgba(255, 255, 255, 0.55);
       }
 
-      @media (max-width: 840px) {
-        .hero {
-          padding-top: 58px;
-        }
-
-        .hero-grid,
-        .split,
-        .grid,
-        .flow {
-          grid-template-columns: 1fr;
+      @media (max-width: 900px) {
+        .topbar {
+          position: static;
         }
 
         nav {
           align-items: flex-start;
-          height: auto;
-          padding: 16px 0;
           flex-direction: column;
+          padding: 15px 0;
         }
 
         .navlinks {
           flex-wrap: wrap;
+          gap: 12px 16px;
+        }
+
+        .hero {
+          padding-top: 34px;
+        }
+
+        .hero-panel,
+        .grid,
+        .compare,
+        .flow,
+        .install {
+          grid-template-columns: 1fr;
+        }
+
+        .hero-panel {
+          min-height: 0;
+        }
+
+        .demo {
+          border-left: 0;
+          border-top: 1px solid rgba(17, 20, 23, 0.1);
+        }
+
+        .flow {
+          gap: 12px;
+        }
+      }
+
+      @media (max-width: 560px) {
+        .wrap {
+          width: min(100% - 24px, 1160px);
+        }
+
+        .hero-copy,
+        .demo {
+          padding: 24px;
+        }
+
+        h1 {
+          font-size: 43px;
+        }
+
+        .phone {
+          border-radius: 20px;
+        }
+
+        .bubble {
+          max-width: 94%;
+          font-size: 14px;
         }
       }
     </style>
   </head>
   <body>
-    <header>
+    <header class="topbar">
       <nav class="wrap" aria-label="Primary">
-        <div class="brand">push</div>
+        <a class="brand" href="#">
+          <span class="mark">p</span>
+          <span>push</span>
+        </a>
         <div class="navlinks">
-          <a href="#why">Why</a>
-          <a href="#backends">Backends</a>
+          <a href="#why">Why care</a>
+          <a href="#how">How it works</a>
+          <a href="#runtimes">Runtimes</a>
           <a href="#install">Install</a>
           <a href="https://github.com/owainlewis/push">GitHub</a>
         </div>
@@ -260,55 +546,74 @@
 
     <main>
       <section class="hero">
-        <div class="wrap hero-grid">
-          <div>
-            <h1>Personal assistant gateway.</h1>
-            <p class="lead">
-              Text your assistant. push routes the message to Claude Code or
-              Codex, keeps your memory in plain files, and sends the answer
-              back over iMessage.
-            </p>
-            <div class="actions">
-              <a class="button" href="https://github.com/owainlewis/push/releases">Download</a>
-              <a class="button secondary" href="https://github.com/owainlewis/push">View source</a>
+        <div class="wrap">
+          <div class="hero-panel">
+            <div class="hero-copy">
+              <p class="eyebrow"><span class="dot"></span> Local assistant gateway for iMessage</p>
+              <h1>Text Claude Code or Codex.</h1>
+              <p class="lead">
+                push lets the coding agents you already use act as a personal
+                assistant over iMessage. It keeps the messaging, memory,
+                routing, and state. The agent runtime stays replaceable.
+              </p>
+              <div class="hero-actions">
+                <a class="button" href="#install">Install push</a>
+                <a class="button secondary" href="https://github.com/owainlewis/push">Read the code</a>
+              </div>
+              <p class="note">
+                Runs locally. Opens no server port. Starts with Claude Code and Codex.
+              </p>
             </div>
-          </div>
-          <div class="terminal" aria-label="push terminal example">
-            <pre>iMessage
-  -> push gateway
-  -> Claude Code or Codex
-  -> iMessage reply
 
-agent = "codex"
-memory = "assistant/User.md"
-state = "~/.push/state.json"</pre>
+            <div class="demo" aria-label="iMessage assistant example">
+              <div class="phone">
+                <div class="phone-top">
+                  <span class="phone-title">push assistant</span>
+                  <span class="status">local</span>
+                </div>
+                <div class="messages">
+                  <div class="bubble user">
+                    Can you check the release workflow and tell me what broke?
+                  </div>
+                  <div class="route">
+                    iMessage -> push -> Codex<br>
+                    memory: assistant/User.md<br>
+                    state: ~/.push/state.json
+                  </div>
+                  <div class="bubble push">
+                    The build passed. Publishing failed because the release job
+                    called gh without a checkout. I patched it and reran v0.1.0.
+                    <div class="reply-marker">sent by push</div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </section>
 
       <section id="why">
         <div class="wrap">
-          <h2>Own the assistant layer, not the runtime.</h2>
-          <div class="grid">
+          <div class="section-head">
+            <h2>The gateway is the product.</h2>
+            <p>
+              Everyone is building agent runtimes. push does not try to beat
+              them. It gives those runtimes a durable personal-assistant layer.
+            </p>
+          </div>
+          <div class="compare">
             <article class="card">
-              <h3>Gateway first</h3>
+              <strong>Do not rebuild the agent</strong>
               <p>
-                push owns messages, allowlists, routing, assistant config,
-                memory, and conversation state.
+                Claude Code, Codex, Cursor, and AMP are already competing on
+                tools, permissions, models, shells, MCP, and repo context.
               </p>
             </article>
             <article class="card">
-              <h3>Runtime disposable</h3>
+              <strong>Own what should survive</strong>
               <p>
-                Claude Code and Codex do the tool work. Future agent runtimes
-                can be adapters, not rewrites.
-              </p>
-            </article>
-            <article class="card">
-              <h3>Memory you can read</h3>
-              <p>
-                User profile and durable memory live in markdown, so you can
-                inspect, edit, and version them.
+                Your assistant identity, memory, message history, allowlist,
+                routing rules, and backend sessions belong in the gateway.
               </p>
             </article>
           </div>
@@ -317,54 +622,131 @@ state = "~/.push/state.json"</pre>
 
       <section>
         <div class="wrap">
-          <h2>How a message moves</h2>
-          <div class="flow" aria-label="Message flow">
-            <div class="step">Text yourself</div>
-            <div class="step">push filters</div>
-            <div class="step">Memory loads</div>
-            <div class="step">Agent runs</div>
-            <div class="step">Reply sends</div>
+          <div class="section-head">
+            <h2>Why it matters</h2>
+            <p>
+              You get a personal assistant without betting the whole product on
+              one agent runtime.
+            </p>
+          </div>
+          <div class="grid">
+            <article class="card">
+              <strong>Use the agents you trust</strong>
+              <p>
+                Let Claude Code or Codex keep doing the hard execution work.
+                Swap runtimes when one gets better.
+              </p>
+            </article>
+            <article class="card">
+              <strong>Keep memory in plain files</strong>
+              <p>
+                Assistant profile and memory live in markdown you can inspect,
+                correct, back up, and version.
+              </p>
+            </article>
+            <article class="card">
+              <strong>Stay local</strong>
+              <p>
+                push polls Messages locally, shells out to local CLIs, and sends
+                replies through Messages.
+              </p>
+            </article>
           </div>
         </div>
       </section>
 
-      <section id="backends">
-        <div class="wrap split">
-          <article class="card">
-            <h3>Claude Code</h3>
+      <section id="how">
+        <div class="wrap">
+          <div class="section-head">
+            <h2>How a text becomes work</h2>
+          </div>
+          <div class="flow" aria-label="Message flow">
+            <div class="step">
+              <span>01</span>
+              <strong>You send an iMessage</strong>
+            </div>
+            <div class="step">
+              <span>02</span>
+              <strong>push checks the allowlist</strong>
+            </div>
+            <div class="step">
+              <span>03</span>
+              <strong>Memory and profile load</strong>
+            </div>
+            <div class="step">
+              <span>04</span>
+              <strong>Claude Code or Codex runs</strong>
+            </div>
+            <div class="step">
+              <span>05</span>
+              <strong>The reply is sent back</strong>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="runtimes">
+        <div class="wrap">
+          <div class="section-head">
+            <h2>Two runtimes today. More later.</h2>
             <p>
-              Uses <code>claude -p</code>, persistent sessions, native tools,
-              MCP, permissions, login, and <code>CLAUDE.md</code> behavior.
+              The adapter contract is intentionally small: message in, assistant
+              context in, backend session in, final reply out.
             </p>
-          </article>
-          <article class="card">
-            <h3>Codex</h3>
-            <p>
-              Uses <code>codex exec</code>, captures the Codex thread id, and
-              resumes later turns with <code>codex exec resume</code>.
-            </p>
-          </article>
+          </div>
+          <div class="grid">
+            <article class="card">
+              <strong>Claude Code</strong>
+              <p>
+                Uses <code>claude -p</code>, persistent sessions, native tools,
+                permissions, MCP, login, and <code>CLAUDE.md</code>.
+              </p>
+            </article>
+            <article class="card">
+              <strong>Codex</strong>
+              <p>
+                Uses <code>codex exec</code>, stores the Codex thread id, and
+                resumes later turns with <code>codex exec resume</code>.
+              </p>
+            </article>
+            <article class="card">
+              <strong>Next adapters</strong>
+              <p>
+                Other coding agents can plug in behind the same gateway without
+                changing the assistant state model.
+              </p>
+            </article>
+          </div>
         </div>
       </section>
 
       <section id="install">
-        <div class="wrap split">
+        <div class="wrap install">
           <div>
-            <h2>Install</h2>
-            <p>
-              Install from the latest release, copy <code>config.example.json</code>
-              to <code>config.json</code>, set your iMessage handles, and choose
-              <code>claude</code> or <code>codex</code>.
+            <h2>Install and text yourself</h2>
+            <p class="copy">
+              Install the binary, copy the example config, set your own
+              iMessage handles, choose <code>claude</code> or <code>codex</code>,
+              then run push on your Mac.
             </p>
+            <ul class="list">
+              <li><span class="check">✓</span><span>macOS with Messages signed in</span></li>
+              <li><span class="check">✓</span><span>Full Disk Access for your terminal</span></li>
+              <li><span class="check">✓</span><span>Claude Code or Codex installed locally</span></li>
+            </ul>
           </div>
-          <div class="terminal">
+          <div class="terminal" aria-label="Install commands">
+            <div class="terminal-bar">
+              <span class="light"></span>
+              <span class="light"></span>
+              <span class="light"></span>
+            </div>
             <pre>curl -fsSL https://raw.githubusercontent.com/owainlewis/push/main/install.sh | sh
 
-cargo build --release
-./target/release/push
+cp config.example.json config.json
+# edit config.json
 
-# or download from releases
-tar -xzf push-v0.1.0-*.tar.gz</pre>
+push --config config.json</pre>
           </div>
         </div>
       </section>
@@ -372,7 +754,8 @@ tar -xzf push-v0.1.0-*.tar.gz</pre>
 
     <footer>
       <div class="wrap">
-        push is MIT licensed and runs locally on your Mac.
+        MIT licensed. Built for people who want a personal assistant gateway,
+        not another custom agent runtime.
       </div>
     </footer>
   </body>
