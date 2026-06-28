@@ -352,14 +352,15 @@ state = "~/.push/state.json"</pre>
           <div>
             <h2>Install</h2>
             <p>
-              Download a release archive from GitHub, copy
-              <code>config.example.json</code> to <code>config.json</code>, set
-              your iMessage handles, and choose <code>claude</code> or
-              <code>codex</code>.
+              Install from the latest release, copy <code>config.example.json</code>
+              to <code>config.json</code>, set your iMessage handles, and choose
+              <code>claude</code> or <code>codex</code>.
             </p>
           </div>
           <div class="terminal">
-            <pre>cargo build --release
+            <pre>curl -fsSL https://raw.githubusercontent.com/owainlewis/push/main/install.sh | sh
+
+cargo build --release
 ./target/release/push
 
 # or download from releases

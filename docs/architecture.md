@@ -92,10 +92,11 @@ sequenceDiagram
     else assistant turn
         G->>W: enqueue job by thread
         W->>W: load assistant memory
-        W->>W: resolve backend session
+        W->>W: resolve routed backend session
         W->>A: run prompt with context
         A-->>W: reply and optional backend session id
         W->>S: send reply
+        W->>G: ack completed row
     end
     S->>DB: osascript send
     DB->>U: delivered reply
@@ -170,6 +171,7 @@ session instead of trying to resume the old runtime's session.
 
 push loads:
 
+- structured `assistant` config fields
 - `assistant/User.md`
 - `assistant/Memory.md`
 
@@ -203,9 +205,9 @@ environments you control.
 The next extension points should be added in this order:
 
 1. More agent adapters.
-2. Per-thread or per-task backend routing.
-3. More channels.
-4. Memory write-back with audit and review.
+2. More channels.
+3. Memory write-back with audit and review.
+4. Per-task backend routing.
 
 Avoid adding a gateway plugin system until there is a specific capability that
 cannot live in the selected backend.

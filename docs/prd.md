@@ -27,6 +27,8 @@ Build the smallest useful personal assistant gateway:
 - Support Codex as a backend.
 - Persist conversation to backend-session mappings.
 - Inject user-owned assistant context into each run.
+- Support simple per-thread backend routing.
+- Support structured assistant profile fields.
 - Keep the binary local and self-contained.
 
 ## Non-Goals
@@ -37,7 +39,7 @@ Build the smallest useful personal assistant gateway:
 - Auto-write memory.
 - Support group chats.
 - Support proactive messages.
-- Support multiple active backends in one conversation.
+- Support multiple active backends in the same conversation at the same time.
 
 ## Target User
 
@@ -126,6 +128,8 @@ Codex assistant context is passed as part of the prompt wrapper.
 | Field | Meaning |
 |---|---|
 | `agent` | `claude` or `codex`. |
+| `routes` | Exact thread to backend overrides. |
+| `assistant` | Structured assistant profile fields. |
 | `db_path` | Path to Messages `chat.db`. |
 | `poll_interval` | How often to poll. |
 | `run_timeout` | Max backend run time. |
@@ -152,16 +156,19 @@ Codex assistant context is passed as part of the prompt wrapper.
 - A configured self-chat message gets a reply.
 - Non-allowlisted senders are ignored.
 - push does not answer messages containing the reply marker.
+- push only advances `last_row_id` after a message is ignored or completed.
 - `/clear` starts a fresh backend session.
 - Claude backend can create and resume a session.
 - Codex backend can create a session, store the Codex thread id, and resume it.
 - Assistant memory is included in backend runs.
+- Assistant profile fields are included in backend runs.
+- Exact thread routes can choose a non-default backend.
 - Tests cover filtering and backend output parsing.
 
 ## Risks
 
-- Messages are currently marked processed after enqueue, not after delivery.
-  This can lose a message if push crashes before the worker replies.
+- A crash during an in-flight run retries that message on restart, which can
+  duplicate backend work but avoids silently losing the message.
 - Codex resume behavior depends on the Codex CLI session store.
 - Claude `bypassPermissions` and Codex non-interactive automation are powerful
   local execution modes.
@@ -169,8 +176,7 @@ Codex assistant context is passed as part of the prompt wrapper.
 
 ## Next Scope
 
-1. Reliable delivery state.
-2. Explicit assistant profile fields.
-3. Runtime routing rules.
-4. A second message channel.
-5. Audited memory write-back.
+1. A second message channel.
+2. Audited memory write-back.
+3. Richer routing rules, such as task-type routing.
+4. Homebrew formula after the release flow is proven.

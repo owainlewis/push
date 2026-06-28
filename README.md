@@ -85,6 +85,14 @@ does not expose the same `--append-system-prompt` flag as Claude Code.
 
 ## Quick Start
 
+Install the latest release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/owainlewis/push/main/install.sh | sh
+```
+
+Or build from source:
+
 ```sh
 git clone https://github.com/owainlewis/push.git
 cd push
@@ -129,6 +137,16 @@ settings, pushes to `main` deploy the site automatically.
 ```json
 {
   "agent": "codex",
+  "routes": [
+    { "thread": "self:you@icloud.com", "agent": "codex" }
+  ],
+  "assistant": {
+    "name": "push",
+    "tone": "short, direct, and useful",
+    "business": "Describe your business or work context here.",
+    "projects": ["push"],
+    "preferences": ["Prefer concise replies."]
+  },
   "self_handles": ["you@icloud.com", "+15551234567"],
   "allow_from": [],
   "claude_bin": "claude",
@@ -140,6 +158,8 @@ settings, pushes to `main` deploy the site automatically.
 ```
 
 `agent` can be `claude` or `codex`.
+`routes` can override the backend for exact thread keys like
+`self:you@icloud.com` or `dm:+15551234567`.
 
 ## Safety
 

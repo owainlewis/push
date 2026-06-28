@@ -1,5 +1,6 @@
 //! Gateway configuration loaded from a JSON file.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -19,6 +20,10 @@ pub struct Config {
     pub allow_from: Vec<String>,
     #[serde(default = "default_agent")]
     pub agent: String,
+    #[serde(default)]
+    pub routes: Vec<RouteRule>,
+    #[serde(default)]
+    pub assistant: AssistantProfile,
     #[serde(default = "default_claude_bin")]
     pub claude_bin: String,
     #[serde(default = "default_claude_permission_mode", alias = "permission_mode")]
@@ -65,18 +70,33 @@ impl Config {
     }
 
     pub fn agent_backend(&self) -> Result<AgentBackend> {
-        match self.agent.as_str() {
-            "claude" => Ok(AgentBackend::Claude),
-            "codex" => Ok(AgentBackend::Codex),
-            other => bail!("invalid agent {other:?}; expected \"claude\" or \"codex\""),
-        }
+        AgentBackend::parse(&self.agent)
     }
 
-    pub fn agent_bin(&self) -> Result<&str> {
-        Ok(match self.agent_backend()? {
-            AgentBackend::Claude => &self.claude_bin,
-            AgentBackend::Codex => &self.codex_bin,
-        })
+    pub fn agent_for_thread(&self, thread: &str) -> Result<AgentBackend> {
+        for route in &self.routes {
+            if route.thread == thread {
+                return AgentBackend::parse(&route.agent);
+            }
+        }
+        self.agent_backend()
+    }
+
+    pub fn required_agent_bins(&self) -> Result<Vec<&str>> {
+        let mut backends = HashSet::new();
+        backends.insert(self.agent_backend()?);
+        for route in &self.routes {
+            backends.insert(AgentBackend::parse(&route.agent)?);
+        }
+
+        let mut bins = Vec::new();
+        for backend in backends {
+            bins.push(match backend {
+                AgentBackend::Claude => self.claude_bin.as_str(),
+                AgentBackend::Codex => self.codex_bin.as_str(),
+            });
+        }
+        Ok(bins)
     }
 
     fn validate(&self) -> Result<()> {
@@ -86,6 +106,13 @@ impl Config {
             );
         }
         self.agent_backend()?;
+        for route in &self.routes {
+            AgentBackend::parse(&route.agent)
+                .with_context(|| format!("invalid route agent for {}", route.thread))?;
+            if route.thread.trim().is_empty() {
+                bail!("route thread cannot be empty");
+            }
+        }
         if !matches!(
             self.codex_sandbox.as_str(),
             "read-only" | "workspace-write" | "danger-full-access"
@@ -107,10 +134,47 @@ impl Config {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct AssistantProfile {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub tone: String,
+    #[serde(default)]
+    pub business: String,
+    #[serde(default)]
+    pub projects: Vec<String>,
+    #[serde(default)]
+    pub preferences: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct RouteRule {
+    pub thread: String,
+    pub agent: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AgentBackend {
     Claude,
     Codex,
+}
+
+impl AgentBackend {
+    pub fn parse(s: &str) -> Result<Self> {
+        match s {
+            "claude" => Ok(AgentBackend::Claude),
+            "codex" => Ok(AgentBackend::Codex),
+            other => bail!("invalid agent {other:?}; expected \"claude\" or \"codex\""),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentBackend::Claude => "claude",
+            AgentBackend::Codex => "codex",
+        }
+    }
 }
 
 fn expand_home(p: &str) -> String {
