@@ -48,6 +48,23 @@ A concrete payoff: push bills your **Claude subscription**, because it just runs
 otherwise it uses your logged-in subscription. No wrapper, no separate billing,
 no provider config.
 
+## Strategy: own the gateway, not the assistant
+
+Personal AI agents are becoming a platform category. Google has Spark. Nous has
+Hermes. OpenAI and Anthropic have agent tools. The risk is betting your whole
+workflow on one assistant app.
+
+push is a hedge against that. The durable layer is the one you own: how messages
+reach you, how your memory is stored, how work is routed. push keeps that layer
+yours and treats the agent as a swappable slot. Today it drives Claude Code
+natively (the best first-party agent, used directly, not wrapped). The gateway
+itself depends on no provider, so the agent stays a choice you can remake.
+
+There is no contradiction with "it's actually Claude Code" above: that is the
+agent layer (use the best agent natively), this is the gateway layer (never let
+one app own your workflow). See [docs/strategy.md](docs/strategy.md) for the full
+argument and the honest gap (the agent slot is still Claude-shaped today).
+
 ## v1 scope
 
 - iMessage only.
