@@ -48,7 +48,11 @@ fn preflight(cfg: &config::Config) -> Result<()> {
         Err(e) => bail!("open {}: {e}", cfg.db_path),
     }
 
-    for bin in [cfg.agent_bin().context("agent")?, "osascript"] {
+    let mut bins = cfg.required_agent_bins().context("agent")?;
+    bins.push("osascript");
+    bins.sort_unstable();
+    bins.dedup();
+    for bin in bins {
         if which(bin).is_none() {
             bail!("{bin:?} not found on PATH");
         }

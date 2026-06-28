@@ -6,7 +6,7 @@
 //! messages. Workers share only the store, behind a mutex, for tiny bookkeeping
 //! writes. Everything else is message passing.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -18,8 +18,7 @@ use tracing::{error, info, warn};
 use crate::agent::{Request, RunError, Runner};
 use crate::claude;
 use crate::codex;
-use crate::config::AgentBackend;
-use crate::config::Config;
+use crate::config::{AgentBackend, AssistantProfile, Config};
 use crate::imessage::{Message, Poller, Sender};
 use crate::memory;
 use crate::store::Store;
@@ -29,8 +28,10 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 
 struct Job {
+    row_id: i64,
     thread: String,
     target: String,
+    backend: AgentBackend,
     text: String,
 }
 
@@ -70,58 +71,63 @@ impl Filter {
 #[derive(Clone)]
 struct Ctx {
     store: Arc<Mutex<Store>>,
-    runner: Arc<Runner>,
+    ack: Arc<Mutex<AckState>>,
+    runners: Arc<HashMap<AgentBackend, Runner>>,
     sender: Sender,
     run_timeout: Duration,
     reply_marker: String,
     sessions_dir: String,
     assistant_dir: String,
+    assistant: AssistantProfile,
 }
 
 pub struct Gateway {
     poller: Poller,
     store: Arc<Mutex<Store>>,
+    ack: Arc<Mutex<AckState>>,
     filter: Filter,
     ctx: Ctx,
+    cfg: Config,
     poll_interval: Duration,
     queues: HashMap<String, mpsc::Sender<Job>>,
+}
+
+#[derive(Default)]
+struct AckState {
+    in_flight: BTreeSet<i64>,
+    completed: BTreeSet<i64>,
 }
 
 impl Gateway {
     pub fn new(cfg: Config) -> Result<Self> {
         let store = Arc::new(Mutex::new(Store::open(&cfg.state_path)?));
-        let runner = Arc::new(match cfg.agent_backend()? {
-            AgentBackend::Claude => Runner::Claude(claude::Runner {
-                bin: cfg.claude_bin.clone(),
-                permission_mode: cfg.claude_permission_mode.clone(),
-            }),
-            AgentBackend::Codex => Runner::Codex(codex::Runner {
-                bin: cfg.codex_bin.clone(),
-                sandbox: cfg.codex_sandbox.clone(),
-                approval_policy: cfg.codex_approval_policy.clone(),
-                model: cfg.codex_model.clone(),
-            }),
-        });
+        let ack = Arc::new(Mutex::new(AckState::default()));
+        let runners = Arc::new(runners(&cfg));
         let ctx = Ctx {
             store: store.clone(),
-            runner,
+            ack: ack.clone(),
+            runners,
             sender: Sender::new(),
             run_timeout: cfg.run_timeout_dur()?,
             reply_marker: cfg.reply_marker.clone(),
             sessions_dir: cfg.sessions_dir.clone(),
             assistant_dir: cfg.assistant_dir.clone(),
+            assistant: cfg.assistant.clone(),
         };
         let filter = Filter {
             self_set: cfg.self_handles.iter().cloned().collect(),
             allow_set: cfg.allow_from.iter().cloned().collect(),
             reply_marker: cfg.reply_marker.clone(),
         };
+        let poll_interval = cfg.poll_interval_dur()?;
         Ok(Self {
             poller: Poller::new(cfg.db_path.clone()),
             store,
+            ack,
             filter,
             ctx,
-            poll_interval: cfg.poll_interval_dur()?,
+            cfg,
+            poll_interval,
             queues: HashMap::new(),
         })
     }
@@ -194,22 +200,42 @@ impl Gateway {
         let mut max_row = 0i64;
         for m in &msgs {
             max_row = max_row.max(m.row_id);
+            if self.ack.lock().unwrap().is_known(m.row_id) {
+                continue;
+            }
             if let Some((thread, target)) = self.filter.accept(m) {
-                self.route(thread, target, m.text.trim().to_string(), handles)
-                    .await;
+                let backend = match self.cfg.agent_for_thread(&thread) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!("[{thread}] route error: {e}");
+                        self.complete_row(m.row_id);
+                        continue;
+                    }
+                };
+                self.route(
+                    m.row_id,
+                    thread,
+                    target,
+                    backend,
+                    m.text.trim().to_string(),
+                    handles,
+                )
+                .await;
+            } else {
+                self.complete_row(m.row_id);
             }
         }
-        if max_row > 0 {
-            if let Err(e) = self.store.lock().unwrap().set_last_row(max_row) {
-                error!("save state error: {e}");
-            }
+        if max_row > 0 && msgs.is_empty() {
+            self.complete_row(max_row);
         }
     }
 
     async fn route(
         &mut self,
+        row_id: i64,
         thread: String,
         target: String,
+        backend: AgentBackend,
         text: String,
         handles: &mut Vec<JoinHandle<()>>,
     ) {
@@ -221,8 +247,10 @@ impl Gateway {
         }
 
         let job = Job {
+            row_id,
             thread: thread.clone(),
             target: target.clone(),
+            backend,
             text,
         };
         let full = matches!(
@@ -231,13 +259,20 @@ impl Gateway {
         );
         if full {
             warn!("[{thread}] queue full, asking sender to resend");
-            reply_to(
+            let _ = reply_to(
                 &self.ctx,
                 &target,
                 "I'm a bit behind on this thread - resend that in a moment.",
             )
             .await;
+            self.complete_row(row_id);
+        } else {
+            self.ack.lock().unwrap().in_flight.insert(row_id);
         }
+    }
+
+    fn complete_row(&self, row_id: i64) {
+        complete_row(&self.store, &self.ack, row_id);
     }
 }
 
@@ -250,14 +285,26 @@ async fn worker(ctx: Ctx, mut rx: mpsc::Receiver<Job>) {
 
 async fn handle(ctx: &Ctx, job: Job) {
     if let Some(reply) = command(ctx, &job) {
-        reply_to(ctx, &job.target, &reply).await;
+        if reply_to(ctx, &job.target, &reply).await {
+            complete_row(&ctx.store, &ctx.ack, job.row_id);
+        }
         return;
     }
 
-    let initial_session_id = ctx.runner.initial_session_id();
+    let Some(runner) = ctx.runners.get(&job.backend) else {
+        error!(
+            "[{}] no runner configured for {}",
+            job.thread,
+            job.backend.as_str()
+        );
+        complete_row(&ctx.store, &ctx.ack, job.row_id);
+        return;
+    };
+
+    let initial_session_id = runner.initial_session_id();
     let (session_id, is_new) = match ctx.store.lock().unwrap().session_for(
         &job.thread,
-        ctx.runner.backend(),
+        runner.backend().as_str(),
         initial_session_id,
     ) {
         Ok(v) => v,
@@ -273,11 +320,11 @@ async fn handle(ctx: &Ctx, job: Job) {
         return;
     }
 
-    let system = memory::load(&ctx.assistant_dir);
+    let system = memory::load(&ctx.assistant_dir, &ctx.assistant);
 
     // Some backends let push choose the session id. Mark those before the run
     // so a post-create failure does not retry the same create call.
-    if is_new && ctx.runner.mark_started_before_run() {
+    if is_new && runner.mark_started_before_run() {
         let _ = ctx.store.lock().unwrap().mark_started(&job.thread, None);
     }
 
@@ -289,21 +336,21 @@ async fn handle(ctx: &Ctx, job: Job) {
         prompt: &job.text,
     };
 
-    let mut result = ctx.runner.run(req(is_new), ctx.run_timeout).await;
+    let mut result = runner.run(req(is_new), ctx.run_timeout).await;
     // If the session id already exists (e.g. left over from a previous run or a
     // different build), resume it instead of trying to create it again.
     if is_new {
         if let Err(RunError::Failed(msg)) = &result {
             if msg.to_lowercase().contains("already in use") {
                 warn!("[{}] session id already existed, resuming", job.thread);
-                result = ctx.runner.run(req(false), ctx.run_timeout).await;
+                result = runner.run(req(false), ctx.run_timeout).await;
             }
         }
     }
 
     match result {
         Ok(out) => {
-            if is_new && !ctx.runner.mark_started_before_run() {
+            if is_new && !runner.mark_started_before_run() {
                 if let Err(e) = ctx
                     .store
                     .lock()
@@ -314,20 +361,27 @@ async fn handle(ctx: &Ctx, job: Job) {
                     return;
                 }
             }
-            reply_to(ctx, &job.target, &out.reply).await;
+            if reply_to(ctx, &job.target, &out.reply).await {
+                complete_row(&ctx.store, &ctx.ack, job.row_id);
+            }
         }
         Err(RunError::Timeout) => {
-            warn!("[{}] {} run timed out", job.thread, ctx.runner.label());
-            reply_to(
+            warn!("[{}] {} run timed out", job.thread, runner.label());
+            if reply_to(
                 ctx,
                 &job.target,
                 "That took too long and was stopped. Try again or simplify the request.",
             )
-            .await;
+            .await
+            {
+                complete_row(&ctx.store, &ctx.ack, job.row_id);
+            }
         }
         Err(RunError::Failed(msg)) => {
-            error!("[{}] {} error: {msg}", job.thread, ctx.runner.label());
-            reply_to(ctx, &job.target, &format!("⚠️ {}", short(&msg))).await;
+            error!("[{}] {} error: {msg}", job.thread, runner.label());
+            if reply_to(ctx, &job.target, &format!("⚠️ {}", short(&msg))).await {
+                complete_row(&ctx.store, &ctx.ack, job.row_id);
+            }
         }
     }
 }
@@ -337,8 +391,11 @@ fn command(ctx: &Ctx, job: &Job) -> Option<String> {
     match job.text.trim().to_lowercase().as_str() {
         "/clear" | "/new" | "/reset" => match ctx.store.lock().unwrap().rotate(
             &job.thread,
-            ctx.runner.backend(),
-            ctx.runner.initial_session_id(),
+            job.backend.as_str(),
+            ctx.runners
+                .get(&job.backend)
+                .map(|r| r.initial_session_id())
+                .unwrap_or_default(),
         ) {
             Ok(()) => Some("Started a fresh conversation.".to_string()),
             Err(_) => Some("Couldn't reset the conversation.".to_string()),
@@ -350,15 +407,74 @@ fn command(ctx: &Ctx, job: &Job) -> Option<String> {
     }
 }
 
-async fn reply_to(ctx: &Ctx, target: &str, text: &str) {
+async fn reply_to(ctx: &Ctx, target: &str, text: &str) -> bool {
     if text.trim().is_empty() {
-        return;
+        return true;
     }
     let out = format!("{text}{}", ctx.reply_marker);
     match tokio::time::timeout(SEND_TIMEOUT, ctx.sender.send(target, &out)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => error!("send error to {target}: {e}"),
-        Err(_) => error!("send to {target} timed out"),
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => {
+            error!("send error to {target}: {e}");
+            false
+        }
+        Err(_) => {
+            error!("send to {target} timed out");
+            false
+        }
+    }
+}
+
+fn complete_row(store: &Arc<Mutex<Store>>, ack: &Arc<Mutex<AckState>>, row_id: i64) {
+    let next = {
+        let mut ack = ack.lock().unwrap();
+        ack.in_flight.remove(&row_id);
+        ack.completed.insert(row_id);
+        ack.advance_to()
+    };
+    if let Some(row_id) = next {
+        if let Err(e) = store.lock().unwrap().set_last_row(row_id) {
+            error!("save state error: {e}");
+        }
+    }
+}
+
+fn runners(cfg: &Config) -> HashMap<AgentBackend, Runner> {
+    let mut runners = HashMap::new();
+    runners.insert(
+        AgentBackend::Claude,
+        Runner::Claude(claude::Runner {
+            bin: cfg.claude_bin.clone(),
+            permission_mode: cfg.claude_permission_mode.clone(),
+        }),
+    );
+    runners.insert(
+        AgentBackend::Codex,
+        Runner::Codex(codex::Runner {
+            bin: cfg.codex_bin.clone(),
+            sandbox: cfg.codex_sandbox.clone(),
+            approval_policy: cfg.codex_approval_policy.clone(),
+            model: cfg.codex_model.clone(),
+        }),
+    );
+    runners
+}
+
+impl AckState {
+    fn is_known(&self, row_id: i64) -> bool {
+        self.in_flight.contains(&row_id) || self.completed.contains(&row_id)
+    }
+
+    fn advance_to(&mut self) -> Option<i64> {
+        let limit = self.in_flight.first().copied().unwrap_or(i64::MAX);
+        let next = self
+            .completed
+            .iter()
+            .copied()
+            .take_while(|id| *id < limit)
+            .max()?;
+        self.completed.retain(|id| *id > next);
+        Some(next)
     }
 }
 
@@ -472,5 +588,38 @@ mod tests {
             filter().accept(&msg("me@icloud.com", "", true, "   ")),
             None
         );
+    }
+
+    #[test]
+    fn ack_does_not_advance_past_in_flight_row() {
+        let mut ack = AckState::default();
+        ack.in_flight.insert(10);
+        ack.completed.insert(11);
+
+        assert_eq!(ack.advance_to(), None);
+    }
+
+    #[test]
+    fn ack_advances_completed_rows_below_first_in_flight() {
+        let mut ack = AckState::default();
+        ack.in_flight.insert(12);
+        ack.completed.insert(10);
+        ack.completed.insert(11);
+        ack.completed.insert(13);
+
+        assert_eq!(ack.advance_to(), Some(11));
+        assert!(ack.completed.contains(&13));
+        assert!(!ack.completed.contains(&10));
+        assert!(!ack.completed.contains(&11));
+    }
+
+    #[test]
+    fn ack_advances_to_highest_completed_when_nothing_in_flight() {
+        let mut ack = AckState::default();
+        ack.completed.insert(10);
+        ack.completed.insert(14);
+
+        assert_eq!(ack.advance_to(), Some(14));
+        assert!(ack.completed.is_empty());
     }
 }

@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
+use crate::config::AgentBackend;
 use crate::{claude, codex};
 
 /// One headless agent turn.
@@ -34,10 +35,10 @@ pub enum Runner {
 }
 
 impl Runner {
-    pub fn backend(&self) -> &'static str {
+    pub fn backend(&self) -> AgentBackend {
         match self {
-            Runner::Claude(_) => "claude",
-            Runner::Codex(_) => "codex",
+            Runner::Claude(_) => AgentBackend::Claude,
+            Runner::Codex(_) => AgentBackend::Codex,
         }
     }
 

@@ -139,12 +139,8 @@ Lock in these choices:
 
 ## Next Actions
 
-1. Make delivery state more reliable: do not mark a message fully processed
-   until the reply path has completed or the failure has been recorded.
-2. Split assistant profile from raw memory: `User.md` and `Memory.md` are good,
-   but the gateway also needs explicit profile fields like tone, business,
-   projects, and preferred runtime.
-3. Add per-thread runtime routing: one default backend is enough now, but the
-   product wants rules like "coding tasks to Codex, personal chat to Claude".
-4. Add a second channel after the backend seam has settled.
-5. Add memory write-back only with an audit trail and explicit user review.
+1. Add a second channel after the backend seam has settled.
+2. Add memory write-back only with an audit trail and explicit user review.
+3. Add richer runtime routing, such as task-type routing.
+4. Publish and test the first binary release.
+5. Add a Homebrew formula after release assets are stable.

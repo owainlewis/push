@@ -5,6 +5,16 @@
   "self_handles": ["you@icloud.com", "+15551234567"],
   "allow_from": [],
   "agent": "claude",
+  "routes": [
+    { "thread": "self:you@icloud.com", "agent": "codex" }
+  ],
+  "assistant": {
+    "name": "push",
+    "tone": "short, direct, and useful",
+    "business": "Describe your business or work context here.",
+    "projects": ["push"],
+    "preferences": ["Prefer concise replies.", "Use the configured agent tools instead of gateway plugins."]
+  },
   "claude_bin": "claude",
   "claude_permission_mode": "bypassPermissions",
   "codex_bin": "codex",
