@@ -258,7 +258,14 @@ async fn handle(ctx: &Ctx, job: Job) {
     }
 
     let system = memory::load(&ctx.assistant_dir);
-    let req = Request {
+
+    // Mark the session started up front, so a run that fails after Claude has
+    // already created the session never re-attempts `--session-id` and collides.
+    if is_new {
+        let _ = ctx.store.lock().unwrap().mark_started(&job.thread);
+    }
+
+    let req = |is_new| Request {
         session_id: &session_id,
         is_new,
         work_dir: &work_dir,
@@ -266,9 +273,20 @@ async fn handle(ctx: &Ctx, job: Job) {
         prompt: &job.text,
     };
 
-    match ctx.runner.run(req, ctx.run_timeout).await {
+    let mut result = ctx.runner.run(req(is_new), ctx.run_timeout).await;
+    // If the session id already exists (e.g. left over from a previous run or a
+    // different build), resume it instead of trying to create it again.
+    if is_new {
+        if let Err(RunError::Failed(msg)) = &result {
+            if msg.to_lowercase().contains("already in use") {
+                warn!("[{}] session id already existed, resuming", job.thread);
+                result = ctx.runner.run(req(false), ctx.run_timeout).await;
+            }
+        }
+    }
+
+    match result {
         Ok(reply) => {
-            let _ = ctx.store.lock().unwrap().mark_started(&job.thread);
             reply_to(ctx, &job.target, &reply).await;
         }
         Err(RunError::Timeout) => {
