@@ -96,6 +96,29 @@ cargo build --release
 
 Then text yourself in Messages. The reply comes back in the same thread.
 
+## Releases
+
+Tagged releases publish binary archives for Linux and macOS on
+[GitHub Releases](https://github.com/owainlewis/push/releases). Release notes
+are generated from the merged pull requests and commits for the tag.
+
+To create a release:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow builds with `cargo build --locked --release`, packages the
+binary with `README.md`, `LICENSE`, and `config.example.json`, uploads checksum
+files, and publishes generated notes.
+
+## Website
+
+The project site is published with GitHub Pages from the static files in
+[`site/`](site/). Once Pages is enabled for GitHub Actions in the repository
+settings, pushes to `main` deploy the site automatically.
+
 ### Commands You Can Text
 
 - `/clear`, `/new`, `/reset`: start a fresh backend session.

@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>push - Personal Assistant Gateway</title>
+    <meta
+      name="description"
+      content="push is a personal assistant gateway that lets coding-agent runtimes like Claude Code and Codex answer your messages."
+    >
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230f766e'/%3E%3Cpath d='M18 20h17c8 0 13 5 13 12s-5 12-13 12H27v8h-9V20zm9 8v8h8c3 0 5-1 5-4s-2-4-5-4h-8z' fill='white'/%3E%3C/svg%3E"
+    >
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #111417;
+        --muted: #5c6670;
+        --line: #d8dee4;
+        --paper: #fbfbf8;
+        --panel: #ffffff;
+        --accent: #0f766e;
+        --accent-dark: #0b4f4a;
+        --warm: #f3b562;
+        --blue: #3b82f6;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        color: var(--ink);
+        background: var(--paper);
+        line-height: 1.55;
+      }
+
+      a {
+        color: var(--accent-dark);
+        text-decoration-thickness: 2px;
+        text-underline-offset: 3px;
+      }
+
+      .wrap {
+        width: min(1120px, calc(100% - 32px));
+        margin: 0 auto;
+      }
+
+      header {
+        border-bottom: 1px solid var(--line);
+        background: rgba(251, 251, 248, 0.92);
+        position: sticky;
+        top: 0;
+        backdrop-filter: blur(10px);
+        z-index: 10;
+      }
+
+      nav {
+        height: 64px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+      }
+
+      .brand {
+        font-weight: 760;
+        font-size: 22px;
+        letter-spacing: 0;
+      }
+
+      .navlinks {
+        display: flex;
+        gap: 18px;
+        font-size: 15px;
+      }
+
+      .hero {
+        padding: 86px 0 48px;
+      }
+
+      .hero-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.95fr);
+        gap: 44px;
+        align-items: center;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(42px, 8vw, 84px);
+        line-height: 0.96;
+        letter-spacing: 0;
+      }
+
+      .lead {
+        margin: 24px 0 0;
+        max-width: 690px;
+        font-size: 21px;
+        color: #2a3036;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 30px;
+      }
+
+      .button {
+        display: inline-flex;
+        align-items: center;
+        min-height: 44px;
+        padding: 10px 16px;
+        border: 1px solid var(--ink);
+        background: var(--ink);
+        color: #fff;
+        border-radius: 6px;
+        font-weight: 680;
+        text-decoration: none;
+      }
+
+      .button.secondary {
+        background: transparent;
+        color: var(--ink);
+      }
+
+      .terminal {
+        background: #101417;
+        color: #eef2f5;
+        border-radius: 8px;
+        padding: 22px;
+        box-shadow: 0 24px 70px rgba(17, 20, 23, 0.18);
+        min-height: 320px;
+        overflow: auto;
+      }
+
+      .terminal pre {
+        margin: 0;
+        white-space: pre-wrap;
+        font: 14px/1.6 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          "Liberation Mono", monospace;
+      }
+
+      section {
+        padding: 48px 0;
+      }
+
+      h2 {
+        margin: 0 0 18px;
+        font-size: 34px;
+        line-height: 1.12;
+        letter-spacing: 0;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 18px;
+      }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 22px;
+      }
+
+      .card h3 {
+        margin: 0 0 10px;
+        font-size: 19px;
+      }
+
+      .card p {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      .flow {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .step {
+        border: 1px solid var(--line);
+        background: #fff;
+        border-radius: 8px;
+        min-height: 96px;
+        padding: 16px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        font-weight: 720;
+      }
+
+      .step:nth-child(2) {
+        border-color: var(--accent);
+      }
+
+      .step:nth-child(4) {
+        border-color: var(--blue);
+      }
+
+      .split {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 22px;
+      }
+
+      footer {
+        border-top: 1px solid var(--line);
+        padding: 28px 0;
+        color: var(--muted);
+      }
+
+      @media (max-width: 840px) {
+        .hero {
+          padding-top: 58px;
+        }
+
+        .hero-grid,
+        .split,
+        .grid,
+        .flow {
+          grid-template-columns: 1fr;
+        }
+
+        nav {
+          align-items: flex-start;
+          height: auto;
+          padding: 16px 0;
+          flex-direction: column;
+        }
+
+        .navlinks {
+          flex-wrap: wrap;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <nav class="wrap" aria-label="Primary">
+        <div class="brand">push</div>
+        <div class="navlinks">
+          <a href="#why">Why</a>
+          <a href="#backends">Backends</a>
+          <a href="#install">Install</a>
+          <a href="https://github.com/owainlewis/push">GitHub</a>
+        </div>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="wrap hero-grid">
+          <div>
+            <h1>Personal assistant gateway.</h1>
+            <p class="lead">
+              Text your assistant. push routes the message to Claude Code or
+              Codex, keeps your memory in plain files, and sends the answer
+              back over iMessage.
+            </p>
+            <div class="actions">
+              <a class="button" href="https://github.com/owainlewis/push/releases">Download</a>
+              <a class="button secondary" href="https://github.com/owainlewis/push">View source</a>
+            </div>
+          </div>
+          <div class="terminal" aria-label="push terminal example">
+            <pre>iMessage
+  -> push gateway
+  -> Claude Code or Codex
+  -> iMessage reply
+
+agent = "codex"
+memory = "assistant/User.md"
+state = "~/.push/state.json"</pre>
+          </div>
+        </div>
+      </section>
+
+      <section id="why">
+        <div class="wrap">
+          <h2>Own the assistant layer, not the runtime.</h2>
+          <div class="grid">
+            <article class="card">
+              <h3>Gateway first</h3>
+              <p>
+                push owns messages, allowlists, routing, assistant config,
+                memory, and conversation state.
+              </p>
+            </article>
+            <article class="card">
+              <h3>Runtime disposable</h3>
+              <p>
+                Claude Code and Codex do the tool work. Future agent runtimes
+                can be adapters, not rewrites.
+              </p>
+            </article>
+            <article class="card">
+              <h3>Memory you can read</h3>
+              <p>
+                User profile and durable memory live in markdown, so you can
+                inspect, edit, and version them.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="wrap">
+          <h2>How a message moves</h2>
+          <div class="flow" aria-label="Message flow">
+            <div class="step">Text yourself</div>
+            <div class="step">push filters</div>
+            <div class="step">Memory loads</div>
+            <div class="step">Agent runs</div>
+            <div class="step">Reply sends</div>
+          </div>
+        </div>
+      </section>
+
+      <section id="backends">
+        <div class="wrap split">
+          <article class="card">
+            <h3>Claude Code</h3>
+            <p>
+              Uses <code>claude -p</code>, persistent sessions, native tools,
+              MCP, permissions, login, and <code>CLAUDE.md</code> behavior.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Codex</h3>
+            <p>
+              Uses <code>codex exec</code>, captures the Codex thread id, and
+              resumes later turns with <code>codex exec resume</code>.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section id="install">
+        <div class="wrap split">
+          <div>
+            <h2>Install</h2>
+            <p>
+              Download a release archive from GitHub, copy
+              <code>config.example.json</code> to <code>config.json</code>, set
+              your iMessage handles, and choose <code>claude</code> or
+              <code>codex</code>.
+            </p>
+          </div>
+          <div class="terminal">
+            <pre>cargo build --release
+./target/release/push
+
+# or download from releases
+tar -xzf push-v0.1.0-*.tar.gz</pre>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="wrap">
+        push is MIT licensed and runs locally on your Mac.
+      </div>
+    </footer>
+  </body>
+</html>
