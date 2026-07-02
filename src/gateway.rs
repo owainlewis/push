@@ -253,21 +253,31 @@ impl Gateway {
             backend,
             text,
         };
-        let full = matches!(
-            self.queues.get(&thread).unwrap().try_send(job),
-            Err(mpsc::error::TrySendError::Full(_))
-        );
-        if full {
-            warn!("[{thread}] queue full, asking sender to resend");
-            let _ = reply_to(
-                &self.ctx,
-                &target,
-                "I'm a bit behind on this thread - resend that in a moment.",
-            )
-            .await;
-            self.complete_row(row_id);
-        } else {
-            self.ack.lock().unwrap().in_flight.insert(row_id);
+        match try_enqueue(self.queues.get(&thread).unwrap(), job) {
+            QueueSend::Sent => {
+                self.ack.lock().unwrap().in_flight.insert(row_id);
+            }
+            QueueSend::Full => {
+                warn!("[{thread}] queue full, asking sender to resend");
+                let _ = reply_to(
+                    &self.ctx,
+                    &target,
+                    "I'm a bit behind on this thread - resend that in a moment.",
+                )
+                .await;
+                self.complete_row(row_id);
+            }
+            QueueSend::Closed => {
+                warn!("[{thread}] queue closed, asking sender to resend");
+                self.queues.remove(&thread);
+                let _ = reply_to(
+                    &self.ctx,
+                    &target,
+                    "I hit an internal queue error - resend that in a moment.",
+                )
+                .await;
+                self.complete_row(row_id);
+            }
         }
     }
 
@@ -280,6 +290,21 @@ impl Gateway {
 async fn worker(ctx: Ctx, mut rx: mpsc::Receiver<Job>) {
     while let Some(job) = rx.recv().await {
         handle(&ctx, job).await;
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum QueueSend {
+    Sent,
+    Full,
+    Closed,
+}
+
+fn try_enqueue(tx: &mpsc::Sender<Job>, job: Job) -> QueueSend {
+    match tx.try_send(job) {
+        Ok(()) => QueueSend::Sent,
+        Err(mpsc::error::TrySendError::Full(_)) => QueueSend::Full,
+        Err(mpsc::error::TrySendError::Closed(_)) => QueueSend::Closed,
     }
 }
 
@@ -539,6 +564,16 @@ mod tests {
         }
     }
 
+    fn job(row_id: i64) -> Job {
+        Job {
+            row_id,
+            thread: "self:me@icloud.com".to_string(),
+            target: "me@icloud.com".to_string(),
+            backend: AgentBackend::Claude,
+            text: "hi".to_string(),
+        }
+    }
+
     #[test]
     fn self_chat_accepted() {
         let got = filter().accept(&msg("me@icloud.com", "", true, "hi"));
@@ -588,6 +623,29 @@ mod tests {
             filter().accept(&msg("me@icloud.com", "", true, "   ")),
             None
         );
+    }
+
+    #[test]
+    fn enqueue_reports_sent() {
+        let (tx, _rx) = mpsc::channel(1);
+
+        assert_eq!(try_enqueue(&tx, job(1)), QueueSend::Sent);
+    }
+
+    #[test]
+    fn enqueue_reports_full_channel() {
+        let (tx, _rx) = mpsc::channel(1);
+
+        assert_eq!(try_enqueue(&tx, job(1)), QueueSend::Sent);
+        assert_eq!(try_enqueue(&tx, job(2)), QueueSend::Full);
+    }
+
+    #[test]
+    fn enqueue_reports_closed_channel() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+
+        assert_eq!(try_enqueue(&tx, job(1)), QueueSend::Closed);
     }
 
     #[test]
