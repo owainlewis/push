@@ -393,6 +393,83 @@ mod tests {
     }
 
     #[test]
+    fn doctor_reports_empty_claude_tool_filter() {
+        let path = temp_path("empty-claude-tool-config");
+        std::fs::write(
+            &path,
+            r#"{
+  "self_handles": ["me@icloud.com"],
+  "claude_allowed_tools": ["Read", " "]
+}"#,
+        )
+        .unwrap();
+
+        let err = doctor(path.to_str().unwrap()).unwrap_err();
+
+        assert!(err.to_string().contains("doctor found 1 failed check"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn doctor_reports_empty_claude_tools_list() {
+        let path = temp_path("empty-claude-tools-config");
+        std::fs::write(
+            &path,
+            r#"{
+  "self_handles": ["me@icloud.com"],
+  "claude_tools": []
+}"#,
+        )
+        .unwrap();
+
+        let err = doctor(path.to_str().unwrap()).unwrap_err();
+
+        assert!(err.to_string().contains("doctor found 1 failed check"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn doctor_accepts_unprefixed_claude_tool_filter_aliases() {
+        let path = temp_path("claude-tool-alias-config");
+        std::fs::write(
+            &path,
+            r#"{
+  "self_handles": ["me@icloud.com"],
+  "allowed_tools": ["Read"],
+  "disallowed_tools": ["Edit"]
+}"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(cfg.claude_allowed_tools, vec!["Read"]);
+        assert_eq!(cfg.claude_disallowed_tools, vec!["Edit"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn doctor_accepts_unprefixed_claude_tools_alias() {
+        let path = temp_path("claude-tools-alias-config");
+        std::fs::write(
+            &path,
+            r#"{
+  "self_handles": ["me@icloud.com"],
+  "tools": ["Read", "Grep"]
+}"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(
+            cfg.claude_tools,
+            Some(vec!["Read".to_string(), "Grep".to_string()])
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn binary_checks_report_present_and_missing_bins() {
         let cfg = test_config();
         let mut checks = Vec::new();
@@ -463,6 +540,9 @@ mod tests {
             assistant: AssistantProfile::default(),
             claude_bin: "/fake/claude".to_string(),
             claude_permission_mode: "bypassPermissions".to_string(),
+            claude_tools: None,
+            claude_allowed_tools: Vec::new(),
+            claude_disallowed_tools: Vec::new(),
             codex_bin: "/fake/codex".to_string(),
             codex_sandbox: "workspace-write".to_string(),
             codex_approval_policy: "never".to_string(),

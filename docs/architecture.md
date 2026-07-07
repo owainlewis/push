@@ -189,12 +189,17 @@ backend session.
 
 ## Security Posture
 
-An allowed inbound message can cause an agent to run tools. The allowlist is the
-main control.
+An allowed inbound message can cause an agent to run tools. The sender filter is
+the trust boundary: `self_handles` and `allow_from` decide who can ask a
+backend to read files, edit files, run shell commands, call MCP servers, or use
+other backend-owned tools.
 
 Backend permissions are adapter-specific:
 
 - Claude Code currently defaults to `bypassPermissions` for headless use.
+  `claude_tools` controls the available Claude Code tool set.
+  `claude_allowed_tools` and `claude_disallowed_tools` pass permission allow
+  and deny rules through to Claude Code.
 - Codex currently defaults to `workspace-write` with approval policy `never`.
 
 Both should be treated as powerful local automation. Use broader modes only in

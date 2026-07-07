@@ -28,6 +28,12 @@ pub struct Config {
     pub claude_bin: String,
     #[serde(default = "default_claude_permission_mode", alias = "permission_mode")]
     pub claude_permission_mode: String,
+    #[serde(default, alias = "tools")]
+    pub claude_tools: Option<Vec<String>>,
+    #[serde(default, alias = "allowed_tools")]
+    pub claude_allowed_tools: Vec<String>,
+    #[serde(default, alias = "disallowed_tools")]
+    pub claude_disallowed_tools: Vec<String>,
     #[serde(default = "default_codex_bin")]
     pub codex_bin: String,
     #[serde(default = "default_codex_sandbox")]
@@ -112,6 +118,18 @@ impl Config {
             if route.thread.trim().is_empty() {
                 bail!("route thread cannot be empty");
             }
+        }
+        for tool in self
+            .claude_allowed_tools
+            .iter()
+            .chain(self.claude_disallowed_tools.iter())
+        {
+            if tool.trim().is_empty() {
+                bail!("claude tool filters cannot contain empty entries");
+            }
+        }
+        if self.claude_tools.as_ref().is_some_and(Vec::is_empty) {
+            bail!("claude_tools must be null or contain at least one entry");
         }
         if !matches!(
             self.codex_sandbox.as_str(),

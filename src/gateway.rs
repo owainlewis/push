@@ -559,6 +559,9 @@ fn runners(cfg: &Config) -> HashMap<AgentBackend, Runner> {
         Runner::Claude(claude::Runner {
             bin: cfg.claude_bin.clone(),
             permission_mode: cfg.claude_permission_mode.clone(),
+            tools: cfg.claude_tools.clone(),
+            allowed_tools: cfg.claude_allowed_tools.clone(),
+            disallowed_tools: cfg.claude_disallowed_tools.clone(),
         }),
     );
     runners.insert(
@@ -689,6 +692,9 @@ mod tests {
             Runner::Claude(claude::Runner {
                 bin: "claude".to_string(),
                 permission_mode: "bypassPermissions".to_string(),
+                tools: None,
+                allowed_tools: Vec::new(),
+                disallowed_tools: Vec::new(),
             }),
         );
         Ctx {
@@ -1061,6 +1067,9 @@ mod tests {
             assistant: AssistantProfile::default(),
             claude_bin: "claude".to_string(),
             claude_permission_mode: "bypassPermissions".to_string(),
+            claude_tools: None,
+            claude_allowed_tools: Vec::new(),
+            claude_disallowed_tools: Vec::new(),
             codex_bin: "codex".to_string(),
             codex_sandbox: "workspace-write".to_string(),
             codex_approval_policy: "never".to_string(),

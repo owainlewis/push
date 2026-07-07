@@ -172,6 +172,9 @@ settings, pushes to `main` deploy the site automatically.
   "allow_from": [],
   "claude_bin": "claude",
   "claude_permission_mode": "bypassPermissions",
+  "claude_tools": null,
+  "claude_allowed_tools": [],
+  "claude_disallowed_tools": [],
   "codex_bin": "codex",
   "codex_sandbox": "workspace-write",
   "codex_approval_policy": "never"
@@ -184,11 +187,23 @@ settings, pushes to `main` deploy the site automatically.
 
 ## Safety
 
-An inbound text is an instruction to an agent with tool access. Keep
-`allow_from` tight.
+An inbound text is an instruction to an agent with tool access. The trust
+boundary is the sender filter: `self_handles` and `allow_from` decide who can
+ask the configured backend to read files, edit files, run shell commands, call
+MCP servers, or use any other backend tool. Keep `allow_from` tight, and treat a
+lost or shared phone, forwarded iMessage account, or compromised allowed sender
+as able to instruct the agent.
 
 Claude Code defaults to `bypassPermissions` for headless use. Codex defaults to
 `workspace-write` plus `never` approval for non-interactive use. Both settings
 should be treated as powerful automation. Use the least access that still makes
 the assistant useful, and run broad-access modes only in an environment you
 control.
+
+For Claude Code, `claude_tools` maps to `--tools`, which controls which tools
+are available to the model. Set entries such as `"Read"` and `"Grep"` for a
+read-only assistant, or `[""]` to disable tools for pure text replies.
+`claude_allowed_tools` maps to `--allowed-tools`, which lets matching tools run
+without a prompt, and `claude_disallowed_tools` maps to `--disallowed-tools`,
+which denies matching tools. The shorter `tools`, `allowed_tools`, and
+`disallowed_tools` names are also accepted.
