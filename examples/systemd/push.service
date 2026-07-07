@@ -1,0 +1,15 @@
+[Unit]
+Description=push personal assistant gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/push --config %h/.config/push/config.json
+WorkingDirectory=%h/.push
+Restart=on-failure
+RestartSec=10
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target
