@@ -11,10 +11,18 @@ pub struct FakeCli {
 
 impl FakeCli {
     pub fn new(name: &str, script: &str) -> Self {
+        use std::io::Write;
+
         let root = temp_dir(&format!("fake-{name}"));
         let bin = root.join(name);
-        std::fs::write(&bin, script).unwrap();
-        make_executable(&bin);
+        let tmp = root.join(format!("{name}.tmp"));
+        {
+            let mut file = std::fs::File::create(&tmp).unwrap();
+            file.write_all(script.as_bytes()).unwrap();
+            file.sync_all().unwrap();
+        }
+        make_executable(&tmp);
+        std::fs::rename(&tmp, &bin).unwrap();
         Self { root, bin }
     }
 

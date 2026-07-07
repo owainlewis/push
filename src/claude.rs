@@ -28,6 +28,29 @@ struct CliResult {
 impl Runner {
     /// Executes one turn and returns Claude's reply text, or a RunError.
     pub async fn run(&self, req: Request<'_>, timeout: Duration) -> Result<RunOutput, RunError> {
+        let out = match tokio::time::timeout(timeout, self.output_with_retry(req)).await {
+            Err(_) => return Err(RunError::Timeout),
+            Ok(Err(e)) => return Err(RunError::Failed(format!("spawn claude: {e}"))),
+            Ok(Ok(o)) => o,
+        };
+
+        self.parse_output(out)
+    }
+
+    async fn output_with_retry(&self, req: Request<'_>) -> std::io::Result<std::process::Output> {
+        let mut attempts = 0;
+        loop {
+            match self.command(&req).output().await {
+                Err(e) if e.raw_os_error() == Some(26) && attempts < 3 => {
+                    attempts += 1;
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    fn command(&self, req: &Request<'_>) -> Command {
         let mut cmd = Command::new(&self.bin);
         cmd.arg("-p")
             .arg(req.prompt)
@@ -47,13 +70,10 @@ impl Runner {
         }
         cmd.current_dir(req.work_dir);
         cmd.kill_on_drop(true);
+        cmd
+    }
 
-        let out = match tokio::time::timeout(timeout, cmd.output()).await {
-            Err(_) => return Err(RunError::Timeout),
-            Ok(Err(e)) => return Err(RunError::Failed(format!("spawn claude: {e}"))),
-            Ok(Ok(o)) => o,
-        };
-
+    fn parse_output(&self, out: std::process::Output) -> Result<RunOutput, RunError> {
         // claude prints its JSON envelope to stdout even when it exits non-zero
         // (e.g. an API error), so parse stdout regardless of exit status.
         match serde_json::from_slice::<CliResult>(&out.stdout) {

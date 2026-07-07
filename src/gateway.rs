@@ -6,7 +6,7 @@
 //! messages. Workers share only the store, behind a mutex, for tiny bookkeeping
 //! writes. Everything else is message passing.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -42,14 +42,17 @@ struct Job {
 
 /// Decides which messages to act on. Kept separate so it is trivially testable.
 struct Filter {
-    self_set: HashSet<String>,
-    allow_set: HashSet<String>,
+    self_set: HashMap<String, String>,
+    allow_set: HashMap<String, String>,
     reply_marker: String,
 }
 
 impl Filter {
     /// Returns `(thread_key, reply_target)` for an accepted message.
     fn accept(&self, m: &Message) -> Option<(String, String)> {
+        if m.is_group {
+            return None;
+        }
         if m.text.trim().is_empty() {
             return None;
         }
@@ -57,18 +60,54 @@ impl Filter {
         if !self.reply_marker.is_empty() && m.text.contains(&self.reply_marker) {
             return None;
         }
+        let chat = normalize_handle(&m.chat_identifier);
+        let handle = normalize_handle(&m.handle);
         // Self-chat: you texting yourself.
-        if self.self_set.contains(&m.chat_identifier) {
-            return Some((
-                format!("self:{}", m.chat_identifier),
-                m.chat_identifier.clone(),
-            ));
+        if let Some(thread_handle) = self.self_set.get(&chat) {
+            return Some((format!("self:{thread_handle}"), m.chat_identifier.clone()));
         }
         // Inbound DM from an allowed sender.
-        if !m.is_from_me && self.allow_set.contains(&m.handle) {
-            return Some((format!("dm:{}", m.handle), m.handle.clone()));
+        if !m.is_from_me {
+            if let Some(thread_handle) = self.allow_set.get(&handle) {
+                return Some((format!("dm:{thread_handle}"), m.handle.clone()));
+            }
         }
         None
+    }
+}
+
+fn normalize_handle(s: &str) -> String {
+    let trimmed = s.trim();
+    if trimmed.contains('@') {
+        return trimmed.to_ascii_lowercase();
+    }
+    let mut out = String::new();
+    for c in trimmed.chars() {
+        if c.is_ascii_digit() {
+            out.push(c);
+        }
+    }
+    if out.is_empty() {
+        trimmed.to_ascii_lowercase()
+    } else {
+        out
+    }
+}
+
+fn thread_handle(s: &str) -> String {
+    let trimmed = s.trim();
+    if trimmed.contains('@') {
+        return trimmed.to_ascii_lowercase();
+    }
+    let mut out = String::new();
+    if trimmed.starts_with('+') {
+        out.push('+');
+    }
+    out.push_str(&normalize_handle(trimmed));
+    if out == "+" {
+        trimmed.to_ascii_lowercase()
+    } else {
+        out
     }
 }
 
@@ -128,8 +167,16 @@ impl Gateway {
             sent_replies: Arc::new(Mutex::new(Vec::new())),
         };
         let filter = Filter {
-            self_set: cfg.self_handles.iter().cloned().collect(),
-            allow_set: cfg.allow_from.iter().cloned().collect(),
+            self_set: cfg
+                .self_handles
+                .iter()
+                .map(|s| (normalize_handle(s), thread_handle(s)))
+                .collect(),
+            allow_set: cfg
+                .allow_from
+                .iter()
+                .map(|s| (normalize_handle(s), thread_handle(s)))
+                .collect(),
             reply_marker: cfg.reply_marker.clone(),
         };
         let poll_interval = cfg.poll_interval_dur()?;
@@ -592,8 +639,12 @@ mod tests {
 
     fn filter() -> Filter {
         Filter {
-            self_set: ["me@icloud.com".to_string()].into_iter().collect(),
-            allow_set: ["+15551234567".to_string()].into_iter().collect(),
+            self_set: [("me@icloud.com".to_string(), "me@icloud.com".to_string())]
+                .into_iter()
+                .collect(),
+            allow_set: [("15551234567".to_string(), "+15551234567".to_string())]
+                .into_iter()
+                .collect(),
             reply_marker: "\n\n-- sent by push".to_string(),
         }
     }
@@ -605,6 +656,14 @@ mod tests {
             chat_identifier: chat.to_string(),
             text: text.to_string(),
             is_from_me: from_me,
+            is_group: false,
+        }
+    }
+
+    fn group_msg(chat: &str, handle: &str, from_me: bool, text: &str) -> Message {
+        Message {
+            is_group: true,
+            ..msg(chat, handle, from_me, text)
         }
     }
 
@@ -679,6 +738,71 @@ mod tests {
     }
 
     #[test]
+    fn formatted_phone_allowlist_matches_normalized_handle() {
+        let got = filter().accept(&msg("+1 (555) 123-4567", "+1 (555) 123-4567", false, "hi"));
+        assert_eq!(
+            got,
+            Some((
+                "dm:+15551234567".to_string(),
+                "+1 (555) 123-4567".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn bare_phone_matches_allowlist_with_plus() {
+        let filter = Filter {
+            self_set: HashMap::new(),
+            allow_set: ["+15551234567"]
+                .into_iter()
+                .map(|s| (normalize_handle(s), thread_handle(s)))
+                .collect(),
+            reply_marker: String::new(),
+        };
+
+        let got = filter.accept(&msg("15551234567", "15551234567", false, "hi"));
+
+        assert_eq!(
+            got,
+            Some(("dm:+15551234567".to_string(), "15551234567".to_string()))
+        );
+    }
+
+    #[test]
+    fn plus_phone_matches_bare_allowlist() {
+        let filter = Filter {
+            self_set: HashMap::new(),
+            allow_set: ["15551234567"]
+                .into_iter()
+                .map(|s| (normalize_handle(s), thread_handle(s)))
+                .collect(),
+            reply_marker: String::new(),
+        };
+
+        let got = filter.accept(&msg("+1 (555) 123-4567", "+1 (555) 123-4567", false, "hi"));
+
+        assert_eq!(
+            got,
+            Some((
+                "dm:15551234567".to_string(),
+                "+1 (555) 123-4567".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn email_self_chat_matching_is_case_insensitive() {
+        let got = filter().accept(&msg("ME@ICLOUD.COM", "", true, "hi"));
+        assert_eq!(
+            got,
+            Some((
+                "self:me@icloud.com".to_string(),
+                "ME@ICLOUD.COM".to_string()
+            ))
+        );
+    }
+
+    #[test]
     fn non_allowlisted_dropped() {
         assert_eq!(
             filter().accept(&msg("+19998887777", "+19998887777", false, "hi")),
@@ -704,6 +828,14 @@ mod tests {
     fn empty_text_dropped() {
         assert_eq!(
             filter().accept(&msg("me@icloud.com", "", true, "   ")),
+            None
+        );
+    }
+
+    #[test]
+    fn group_chat_dropped_even_from_allowlisted_sender() {
+        assert_eq!(
+            filter().accept(&group_msg("chat123456789", "+15551234567", false, "hi")),
             None
         );
     }
@@ -960,6 +1092,7 @@ mod tests {
             chat_identifier: chat.to_string(),
             text: text.to_string(),
             is_from_me,
+            is_group: false,
         }
     }
 }
