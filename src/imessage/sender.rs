@@ -15,6 +15,7 @@ impl Sender {
     ///
     /// The message and target are passed as AppleScript argv rather than
     /// interpolated into the script, so no escaping is needed.
+    #[cfg_attr(test, allow(dead_code))]
     pub async fn send(&self, target: &str, text: &str) -> Result<()> {
         let out = Command::new("osascript")
             .args([
