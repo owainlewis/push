@@ -108,6 +108,23 @@ Then text yourself in Messages. The reply comes back in the same thread.
 `push doctor` checks the config, state and session directories, iMessage
 database access, `osascript`, and the configured backend binary.
 
+## iMessage Support
+
+push supports one-to-one iMessage conversations: self-chat and allowlisted
+direct messages. Group chats are not supported in v1 and are ignored.
+
+The iMessage channel reads `~/Library/Messages/chat.db` directly, so the process
+needs Full Disk Access on macOS. It assumes the recent macOS Messages schema with
+`message`, `handle`, `chat`, `chat_message_join`, and `chat_handle_join` tables;
+`push doctor` and the runtime report database access or query failures. Tapbacks,
+system rows, blank messages, messages from non-allowlisted senders, and push's
+own marked replies are ignored. Phone numbers are matched after removing
+formatting, and email handles are matched case-insensitively.
+
+`state.json` stores the last completed Messages row and backend sessions. On
+restart, push resumes after the last completed row and keeps existing backend
+sessions when the selected backend has not changed.
+
 ## Releases
 
 Tagged releases publish binary archives for Linux and macOS on
