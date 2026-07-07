@@ -63,6 +63,18 @@ impl Store {
     ) -> Result<(String, bool)> {
         if let Some(si) = self.state.sessions.get(thread) {
             if si.backend == backend {
+                if si.uuid.trim().is_empty() {
+                    self.state.sessions.insert(
+                        thread.to_string(),
+                        SessionInfo {
+                            uuid: initial_id.clone(),
+                            started: false,
+                            backend: backend.to_string(),
+                        },
+                    );
+                    self.save()?;
+                    return Ok((initial_id, true));
+                }
                 return Ok((si.uuid.clone(), !si.started));
             }
         }
@@ -80,10 +92,14 @@ impl Store {
 
     pub fn mark_started(&mut self, thread: &str, session_id: Option<&str>) -> Result<()> {
         if let Some(si) = self.state.sessions.get_mut(thread) {
+            let session_id = session_id.and_then(non_empty_session_id);
             if let Some(id) = session_id {
                 si.uuid = id.to_string();
             }
             if !si.started {
+                if si.uuid.trim().is_empty() {
+                    return Ok(());
+                }
                 si.started = true;
                 return self.save();
             }
@@ -121,6 +137,11 @@ impl Store {
 
 fn default_backend() -> String {
     "claude".to_string()
+}
+
+fn non_empty_session_id(id: &str) -> Option<&str> {
+    let trimmed = id.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 #[cfg(test)]
@@ -170,6 +191,94 @@ mod tests {
             .session_for("self:me", "codex", String::new())
             .unwrap();
         assert_eq!(resumed, ("codex-thread-id".to_string(), false));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn mark_started_ignores_empty_backend_session_id() {
+        let path = temp_state_path();
+        let mut store = Store::open(&path).unwrap();
+
+        store
+            .session_for("self:me", "claude", "initial-session".to_string())
+            .unwrap();
+        store.mark_started("self:me", Some(" \t\n ")).unwrap();
+
+        let resumed = store
+            .session_for("self:me", "claude", "unused-session".to_string())
+            .unwrap();
+        assert_eq!(resumed, ("initial-session".to_string(), false));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn existing_empty_backend_session_id_starts_fresh_session() {
+        let path = temp_state_path();
+        std::fs::write(
+            &path,
+            r#"{
+  "sessions": {
+    "self:me": {
+      "uuid": "",
+      "started": true,
+      "backend": "claude"
+    }
+  }
+}"#,
+        )
+        .unwrap();
+        let mut store = Store::open(&path).unwrap();
+
+        let fresh = store
+            .session_for("self:me", "claude", "fresh-session".to_string())
+            .unwrap();
+        assert_eq!(fresh, ("fresh-session".to_string(), true));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn existing_empty_unstarted_backend_session_id_starts_fresh_session() {
+        let path = temp_state_path();
+        std::fs::write(
+            &path,
+            r#"{
+  "sessions": {
+    "self:me": {
+      "uuid": "",
+      "started": false,
+      "backend": "claude"
+    }
+  }
+}"#,
+        )
+        .unwrap();
+        let mut store = Store::open(&path).unwrap();
+
+        let fresh = store
+            .session_for("self:me", "claude", "fresh-session".to_string())
+            .unwrap();
+        assert_eq!(fresh, ("fresh-session".to_string(), true));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn mark_started_does_not_activate_empty_backend_session_id() {
+        let path = temp_state_path();
+        let mut store = Store::open(&path).unwrap();
+
+        store
+            .session_for("self:me", "codex", String::new())
+            .unwrap();
+        store.mark_started("self:me", Some("")).unwrap();
+
+        let fresh = store
+            .session_for("self:me", "codex", String::new())
+            .unwrap();
+        assert_eq!(fresh, (String::new(), true));
 
         let _ = std::fs::remove_file(path);
     }

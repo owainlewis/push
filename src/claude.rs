@@ -67,7 +67,7 @@ impl Runner {
             }
             Ok(r) => Ok(RunOutput {
                 reply: r.result.trim().to_string(),
-                session_id: Some(r.session_id),
+                session_id: non_empty_session_id(&r.session_id).map(str::to_string),
             }),
             Err(_) => {
                 if out.status.success() {
@@ -82,5 +82,29 @@ impl Runner {
                 }
             }
         }
+    }
+}
+
+fn non_empty_session_id(id: &str) -> Option<&str> {
+    let trimmed = id.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ignores_empty_session_id() {
+        assert_eq!(non_empty_session_id(""), None);
+        assert_eq!(non_empty_session_id(" \t\n "), None);
+    }
+
+    #[test]
+    fn keeps_valid_session_id() {
+        assert_eq!(
+            non_empty_session_id(" claude-session "),
+            Some("claude-session")
+        );
     }
 }
