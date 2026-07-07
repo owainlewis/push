@@ -108,6 +108,10 @@ Then text yourself in Messages. The reply comes back in the same thread.
 `push doctor` checks the config, state and session directories, iMessage
 database access, `osascript`, and the configured backend binary.
 
+To run push continuously, see [Running push as a Service](docs/services.md) for
+macOS `launchd`, Linux `systemd` where supported, logs, restart behavior, and
+headless security notes.
+
 ## iMessage Support
 
 push supports one-to-one iMessage conversations: self-chat and allowlisted
