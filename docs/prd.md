@@ -137,6 +137,9 @@ Codex assistant context is passed as part of the prompt wrapper.
 | `allow_from` | Other allowed senders. |
 | `claude_bin` | Claude Code binary. |
 | `claude_permission_mode` | Claude Code permission mode. |
+| `claude_tools` | Optional Claude Code available tool list. |
+| `claude_allowed_tools` | Optional Claude Code permission allow rules. |
+| `claude_disallowed_tools` | Optional Claude Code permission deny rules. |
 | `codex_bin` | Codex binary. |
 | `codex_sandbox` | Codex sandbox mode. |
 | `codex_approval_policy` | Codex approval policy. |

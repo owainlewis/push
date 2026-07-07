@@ -11,6 +11,9 @@ use crate::agent::{Request, RunError, RunOutput};
 pub struct Runner {
     pub bin: String,
     pub permission_mode: String,
+    pub tools: Option<Vec<String>>,
+    pub allowed_tools: Vec<String>,
+    pub disallowed_tools: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -67,6 +70,16 @@ impl Runner {
         }
         if !req.system_append.trim().is_empty() {
             cmd.arg("--append-system-prompt").arg(req.system_append);
+        }
+        if let Some(tools) = &self.tools {
+            cmd.arg("--tools");
+            cmd.args(tools);
+        }
+        for tool in &self.allowed_tools {
+            cmd.arg("--allowed-tools").arg(tool);
+        }
+        for tool in &self.disallowed_tools {
+            cmd.arg("--disallowed-tools").arg(tool);
         }
         cmd.current_dir(req.work_dir);
         cmd.kill_on_drop(true);
@@ -170,6 +183,9 @@ mod tests {
         let runner = Runner {
             bin: cli.bin(),
             permission_mode: "bypassPermissions".to_string(),
+            tools: Some(vec!["Read".to_string(), "Grep".to_string()]),
+            allowed_tools: vec!["Read".to_string(), "Bash(git status:*)".to_string()],
+            disallowed_tools: vec!["Edit".to_string()],
         };
 
         let out = runner
@@ -192,6 +208,11 @@ mod tests {
         assert_arg_pair(&args, "--session-id", "push-session");
         assert_arg_pair(&args, "--permission-mode", "bypassPermissions");
         assert_arg_pair(&args, "--append-system-prompt", "assistant context");
+        assert_arg_pair(&args, "--tools", "Read");
+        assert_arg_pair(&args, "--allowed-tools", "Read");
+        assert_arg_pair(&args, "--disallowed-tools", "Edit");
+        assert!(args.contains(&"Grep".to_string()));
+        assert!(args.contains(&"Bash(git status:*)".to_string()));
         assert!(!args.contains(&"--resume".to_string()));
     }
 
@@ -207,6 +228,9 @@ mod tests {
         let runner = Runner {
             bin: cli.bin(),
             permission_mode: "default".to_string(),
+            tools: None,
+            allowed_tools: Vec::new(),
+            disallowed_tools: Vec::new(),
         };
 
         let out = runner
@@ -240,6 +264,9 @@ mod tests {
         let runner = Runner {
             bin: cli.bin(),
             permission_mode: "default".to_string(),
+            tools: None,
+            allowed_tools: Vec::new(),
+            disallowed_tools: Vec::new(),
         };
 
         let err = match runner
@@ -260,6 +287,9 @@ mod tests {
         let runner = Runner {
             bin: cli.bin(),
             permission_mode: "default".to_string(),
+            tools: None,
+            allowed_tools: Vec::new(),
+            disallowed_tools: Vec::new(),
         };
 
         let err = match runner
@@ -328,6 +358,9 @@ mod tests {
             runner: Box::new(Runner {
                 bin,
                 permission_mode: "default".to_string(),
+                tools: None,
+                allowed_tools: Vec::new(),
+                disallowed_tools: Vec::new(),
             }),
             request: contract_request(work_dir, true),
             timeout: Duration::from_secs(5),
@@ -346,6 +379,9 @@ mod tests {
             runner: Box::new(Runner {
                 bin,
                 permission_mode: "default".to_string(),
+                tools: None,
+                allowed_tools: Vec::new(),
+                disallowed_tools: Vec::new(),
             }),
             request: contract_request(work_dir, false),
             timeout: Duration::from_secs(5),
@@ -364,6 +400,9 @@ mod tests {
             runner: Box::new(Runner {
                 bin,
                 permission_mode: "default".to_string(),
+                tools: None,
+                allowed_tools: Vec::new(),
+                disallowed_tools: Vec::new(),
             }),
             request: contract_request(work_dir, true),
             timeout: Duration::from_secs(5),
@@ -379,6 +418,9 @@ mod tests {
             runner: Box::new(Runner {
                 bin,
                 permission_mode: "default".to_string(),
+                tools: None,
+                allowed_tools: Vec::new(),
+                disallowed_tools: Vec::new(),
             }),
             request: contract_request(work_dir, true),
             timeout: Duration::from_millis(10),
