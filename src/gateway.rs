@@ -24,6 +24,7 @@ use crate::memory;
 use crate::store::Store;
 
 const QUEUE_DEPTH: usize = 32;
+#[cfg(not(test))]
 const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 const SESSION_SETUP_FAILURE: &str =
@@ -85,6 +86,8 @@ struct Ctx {
     assistant: AssistantProfile,
     #[cfg(test)]
     setup_failure_replies: Arc<Mutex<Vec<String>>>,
+    #[cfg(test)]
+    sent_replies: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 pub struct Gateway {
@@ -121,6 +124,8 @@ impl Gateway {
             assistant: cfg.assistant.clone(),
             #[cfg(test)]
             setup_failure_replies: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(test)]
+            sent_replies: Arc::new(Mutex::new(Vec::new())),
         };
         let filter = Filter {
             self_set: cfg.self_handles.iter().cloned().collect(),
@@ -205,8 +210,21 @@ impl Gateway {
             }
         };
 
+        self.process_messages(msgs, handles).await;
+    }
+
+    #[cfg(test)]
+    async fn tick_fake(&mut self, msgs: Vec<Message>, handles: &mut Vec<JoinHandle<()>>) {
+        self.process_messages(msgs, handles).await;
+    }
+
+    async fn process_messages(&mut self, msgs: Vec<Message>, handles: &mut Vec<JoinHandle<()>>) {
+        let since = self.store.lock().unwrap().last_row();
         let mut max_row = 0i64;
         for m in &msgs {
+            if m.row_id <= since {
+                continue;
+            }
             max_row = max_row.max(m.row_id);
             if self.ack.lock().unwrap().is_known(m.row_id) {
                 continue;
@@ -448,15 +466,27 @@ async fn reply_to(ctx: &Ctx, target: &str, text: &str) -> bool {
         return true;
     }
     let out = format!("{text}{}", ctx.reply_marker);
-    match tokio::time::timeout(SEND_TIMEOUT, ctx.sender.send(target, &out)).await {
-        Ok(Ok(())) => true,
-        Ok(Err(e)) => {
-            error!("send error to {target}: {e}");
-            false
-        }
-        Err(_) => {
-            error!("send to {target} timed out");
-            false
+    #[cfg(test)]
+    {
+        let _ = &ctx.sender;
+        ctx.sent_replies
+            .lock()
+            .unwrap()
+            .push((target.to_string(), out));
+        true
+    }
+    #[cfg(not(test))]
+    {
+        match tokio::time::timeout(SEND_TIMEOUT, ctx.sender.send(target, &out)).await {
+            Ok(Ok(())) => true,
+            Ok(Err(e)) => {
+                error!("send error to {target}: {e}");
+                false
+            }
+            Err(_) => {
+                error!("send to {target} timed out");
+                false
+            }
         }
     }
 }
@@ -556,6 +586,7 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::{FakeRunCall, FakeRunner};
     use std::path::PathBuf;
     use uuid::Uuid;
 
@@ -612,6 +643,7 @@ mod tests {
             assistant_dir: String::new(),
             assistant: AssistantProfile::default(),
             setup_failure_replies: Arc::new(Mutex::new(Vec::new())),
+            sent_replies: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -794,5 +826,140 @@ mod tests {
 
         let _ = std::fs::remove_file(state_path);
         let _ = std::fs::remove_file(sessions_blocker);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fake_channel_e2e_replies_once_ignores_unallowlisted_and_reuses_session() {
+        let state_path = temp_state_path();
+        let sessions_dir = temp_path("e2e-sessions");
+        let assistant_dir = temp_path("e2e-assistant");
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut gateway = Gateway::new(test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        ))
+        .unwrap();
+        gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+
+        let mut handles = Vec::new();
+        gateway
+            .tick_fake(
+                vec![
+                    message(1, "+19998887777", "+19998887777", false, "ignore me"),
+                    message(2, "+15551234567", "+15551234567", false, "first"),
+                    message(3, "+15551234567", "+15551234567", false, "second"),
+                ],
+                &mut handles,
+            )
+            .await;
+        gateway.queues.clear();
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        assert_eq!(gateway.store.lock().unwrap().last_row(), 3);
+        assert_eq!(
+            gateway.ctx.sent_replies.lock().unwrap().as_slice(),
+            [
+                (
+                    "+15551234567".to_string(),
+                    "fake reply: first\n\n-- sent by push".to_string()
+                ),
+                (
+                    "+15551234567".to_string(),
+                    "fake reply: second\n\n-- sent by push".to_string()
+                )
+            ]
+        );
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [
+                FakeRunCall {
+                    session_id: String::new(),
+                    is_new: true,
+                    prompt: "first".to_string(),
+                },
+                FakeRunCall {
+                    session_id: "fake-session".to_string(),
+                    is_new: false,
+                    prompt: "second".to_string(),
+                }
+            ]
+        );
+
+        let replay_calls = Arc::new(Mutex::new(Vec::new()));
+        let mut replay_gateway = Gateway::new(test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        ))
+        .unwrap();
+        replay_gateway.ctx.runners = Arc::new(fake_runners(replay_calls.clone()));
+        let mut replay_handles = Vec::new();
+        replay_gateway
+            .tick_fake(
+                vec![message(3, "+15551234567", "+15551234567", false, "second")],
+                &mut replay_handles,
+            )
+            .await;
+        replay_gateway.queues.clear();
+        for handle in replay_handles {
+            handle.await.unwrap();
+        }
+
+        assert!(replay_gateway.ctx.sent_replies.lock().unwrap().is_empty());
+        assert!(replay_calls.lock().unwrap().is_empty());
+
+        let _ = std::fs::remove_file(state_path);
+        let _ = std::fs::remove_dir_all(sessions_dir);
+        let _ = std::fs::remove_dir_all(assistant_dir);
+    }
+
+    fn test_config(state_path: &str, sessions_dir: &str, assistant_dir: &str) -> Config {
+        Config {
+            db_path: "fake-chat.db".to_string(),
+            poll_interval: "1s".to_string(),
+            run_timeout: "1s".to_string(),
+            self_handles: vec!["me@icloud.com".to_string()],
+            allow_from: vec!["+15551234567".to_string()],
+            agent: "codex".to_string(),
+            routes: Vec::new(),
+            assistant: AssistantProfile::default(),
+            claude_bin: "claude".to_string(),
+            claude_permission_mode: "bypassPermissions".to_string(),
+            codex_bin: "codex".to_string(),
+            codex_sandbox: "workspace-write".to_string(),
+            codex_approval_policy: "never".to_string(),
+            codex_model: None,
+            sessions_dir: sessions_dir.to_string(),
+            state_path: state_path.to_string(),
+            assistant_dir: assistant_dir.to_string(),
+            reply_marker: "\n\n-- sent by push".to_string(),
+        }
+    }
+
+    fn fake_runners(calls: Arc<Mutex<Vec<FakeRunCall>>>) -> HashMap<AgentBackend, Runner> {
+        let mut runners = HashMap::new();
+        runners.insert(
+            AgentBackend::Codex,
+            Runner::Fake(FakeRunner {
+                backend: AgentBackend::Codex,
+                session_id: "fake-session".to_string(),
+                calls,
+            }),
+        );
+        runners
+    }
+
+    fn message(row_id: i64, chat: &str, handle: &str, is_from_me: bool, text: &str) -> Message {
+        Message {
+            row_id,
+            handle: handle.to_string(),
+            chat_identifier: chat.to_string(),
+            text: text.to_string(),
+            is_from_me,
+        }
     }
 }

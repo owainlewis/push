@@ -33,6 +33,8 @@ pub enum RunError {
 pub enum Runner {
     Claude(claude::Runner),
     Codex(codex::Runner),
+    #[cfg(test)]
+    Fake(FakeRunner),
 }
 
 impl Runner {
@@ -40,6 +42,8 @@ impl Runner {
         match self {
             Runner::Claude(_) => AgentBackend::Claude,
             Runner::Codex(_) => AgentBackend::Codex,
+            #[cfg(test)]
+            Runner::Fake(r) => r.backend,
         }
     }
 
@@ -47,6 +51,8 @@ impl Runner {
         match self {
             Runner::Claude(_) => "Claude",
             Runner::Codex(_) => "Codex",
+            #[cfg(test)]
+            Runner::Fake(_) => "Fake",
         }
     }
 
@@ -54,6 +60,8 @@ impl Runner {
         match self {
             Runner::Claude(_) => Uuid::new_v4().to_string(),
             Runner::Codex(_) => String::new(),
+            #[cfg(test)]
+            Runner::Fake(_) => String::new(),
         }
     }
 
@@ -65,6 +73,39 @@ impl Runner {
         match self {
             Runner::Claude(r) => r.run(req, timeout).await,
             Runner::Codex(r) => r.run(req, timeout).await,
+            #[cfg(test)]
+            Runner::Fake(r) => r.run(req, timeout).await,
         }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub struct FakeRunner {
+    pub backend: AgentBackend,
+    pub session_id: String,
+    pub calls: std::sync::Arc<std::sync::Mutex<Vec<FakeRunCall>>>,
+}
+
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct FakeRunCall {
+    pub session_id: String,
+    pub is_new: bool,
+    pub prompt: String,
+}
+
+#[cfg(test)]
+impl FakeRunner {
+    async fn run(&self, req: Request<'_>, _timeout: Duration) -> Result<RunOutput, RunError> {
+        self.calls.lock().unwrap().push(FakeRunCall {
+            session_id: req.session_id.to_string(),
+            is_new: req.is_new,
+            prompt: req.prompt.to_string(),
+        });
+        Ok(RunOutput {
+            reply: format!("fake reply: {}", req.prompt),
+            session_id: req.is_new.then(|| self.session_id.clone()),
+        })
     }
 }
