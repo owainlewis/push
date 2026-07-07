@@ -99,10 +99,14 @@ cd push
 cp config.example.json config.json
 # edit config.json: set self_handles and choose "agent": "claude" or "codex"
 cargo build --release
+./target/release/push doctor --config config.json
 ./target/release/push
 ```
 
 Then text yourself in Messages. The reply comes back in the same thread.
+
+`push doctor` checks the config, state and session directories, iMessage
+database access, `osascript`, and the configured backend binary.
 
 ## Releases
 
