@@ -10,6 +10,8 @@ mod gateway;
 mod imessage;
 mod memory;
 mod store;
+#[cfg(test)]
+mod test_support;
 
 use std::path::{Path, PathBuf};
 
