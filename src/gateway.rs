@@ -16,6 +16,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::agent::{Request, RunError, Runner};
+use crate::audit::{AuditEvent, AuditLog};
 use crate::claude;
 use crate::codex;
 use crate::config::{AgentBackend, AssistantProfile, Config};
@@ -74,6 +75,20 @@ impl Filter {
         }
         None
     }
+
+    fn reject_reason(&self, m: &Message) -> &'static str {
+        if m.is_group {
+            "group_chat"
+        } else if m.text.trim().is_empty() {
+            "empty_text"
+        } else if !self.reply_marker.is_empty() && m.text.contains(&self.reply_marker) {
+            "reply_marker"
+        } else if m.is_from_me {
+            "from_me_to_other"
+        } else {
+            "not_allowlisted"
+        }
+    }
 }
 
 fn normalize_handle(s: &str) -> String {
@@ -123,6 +138,7 @@ struct Ctx {
     sessions_dir: String,
     assistant_dir: String,
     assistant: AssistantProfile,
+    audit: Arc<AuditLog>,
     #[cfg(test)]
     setup_failure_replies: Arc<Mutex<Vec<String>>>,
     #[cfg(test)]
@@ -151,6 +167,10 @@ impl Gateway {
         let store = Arc::new(Mutex::new(Store::open(&cfg.state_path)?));
         let ack = Arc::new(Mutex::new(AckState::default()));
         let runners = Arc::new(runners(&cfg));
+        let audit = Arc::new(AuditLog::new(
+            cfg.audit_log_path.clone(),
+            cfg.audit_log_content,
+        ));
         let ctx = Ctx {
             store: store.clone(),
             ack: ack.clone(),
@@ -161,6 +181,7 @@ impl Gateway {
             sessions_dir: cfg.sessions_dir.clone(),
             assistant_dir: cfg.assistant_dir.clone(),
             assistant: cfg.assistant.clone(),
+            audit,
             #[cfg(test)]
             setup_failure_replies: Arc::new(Mutex::new(Vec::new())),
             #[cfg(test)]
@@ -281,10 +302,18 @@ impl Gateway {
                     Ok(v) => v,
                     Err(e) => {
                         error!("[{thread}] route error: {e}");
-                        self.complete_row(m.row_id);
+                        self.audit(self.ctx.audit.failed(
+                            "message_route_failed",
+                            m.row_id,
+                            &thread,
+                            None,
+                            e.to_string(),
+                        ));
+                        self.complete_row(m.row_id, "route_error");
                         continue;
                     }
                 };
+                self.audit(self.ctx.audit.accepted(m, &thread, backend));
                 self.route(
                     m.row_id,
                     thread,
@@ -295,11 +324,12 @@ impl Gateway {
                 )
                 .await;
             } else {
-                self.complete_row(m.row_id);
+                self.audit(self.ctx.audit.ignored(m, self.filter.reject_reason(m)));
+                self.complete_row(m.row_id, "ignored");
             }
         }
         if max_row > 0 && msgs.is_empty() {
-            self.complete_row(max_row);
+            self.complete_row(max_row, "empty_poll");
         }
     }
 
@@ -332,20 +362,50 @@ impl Gateway {
         );
         if full {
             warn!("[{thread}] queue full, asking sender to resend");
-            let _ = reply_to(
+            self.audit(self.ctx.audit.failed(
+                "message_queue_failed",
+                row_id,
+                &thread,
+                Some(backend),
+                "queue full",
+            ));
+            if reply_to(
                 &self.ctx,
                 &target,
                 "I'm a bit behind on this thread - resend that in a moment.",
             )
-            .await;
-            self.complete_row(row_id);
+            .await
+            {
+                self.audit(self.ctx.audit.reply_sent(
+                    row_id,
+                    &thread,
+                    &target,
+                    Some(backend),
+                    "I'm a bit behind on this thread - resend that in a moment.",
+                ));
+                self.complete_row(row_id, "queue_full");
+            } else {
+                self.audit(self.ctx.audit.reply_failed(
+                    row_id,
+                    &thread,
+                    &target,
+                    Some(backend),
+                    "queue full reply failed",
+                ));
+                self.complete_row(row_id, "queue_full_reply_failed");
+            }
         } else {
             self.ack.lock().unwrap().in_flight.insert(row_id);
         }
     }
 
-    fn complete_row(&self, row_id: i64) {
+    fn complete_row(&self, row_id: i64, reason: &str) {
+        self.audit(self.ctx.audit.completed(row_id, reason));
         complete_row(&self.store, &self.ack, row_id);
+    }
+
+    fn audit(&self, event: AuditEvent) {
+        audit(&self.ctx, event);
     }
 }
 
@@ -359,7 +419,28 @@ async fn worker(ctx: Ctx, mut rx: mpsc::Receiver<Job>) {
 async fn handle(ctx: &Ctx, job: Job) {
     if let Some(reply) = command(ctx, &job) {
         if reply_to(ctx, &job.target, &reply).await {
-            complete_row(&ctx.store, &ctx.ack, job.row_id);
+            audit(
+                ctx,
+                ctx.audit.reply_sent(
+                    job.row_id,
+                    &job.thread,
+                    &job.target,
+                    Some(job.backend),
+                    &reply,
+                ),
+            );
+            complete_job(ctx, &job, "command");
+        } else {
+            audit(
+                ctx,
+                ctx.audit.reply_failed(
+                    job.row_id,
+                    &job.thread,
+                    &job.target,
+                    Some(job.backend),
+                    "command reply failed",
+                ),
+            );
         }
         return;
     }
@@ -370,7 +451,17 @@ async fn handle(ctx: &Ctx, job: Job) {
             job.thread,
             job.backend.as_str()
         );
-        complete_row(&ctx.store, &ctx.ack, job.row_id);
+        audit(
+            ctx,
+            ctx.audit.failed(
+                "backend_run_failed",
+                job.row_id,
+                &job.thread,
+                Some(job.backend),
+                "no runner configured",
+            ),
+        );
+        complete_job(ctx, &job, "missing_runner");
         return;
     };
 
@@ -386,6 +477,16 @@ async fn handle(ctx: &Ctx, job: Job) {
         Ok(v) => v,
         Err(e) => {
             error!("[{}] session error: {e}", job.thread);
+            audit(
+                ctx,
+                ctx.audit.failed(
+                    "backend_setup_failed",
+                    job.row_id,
+                    &job.thread,
+                    Some(job.backend),
+                    e.to_string(),
+                ),
+            );
             complete_setup_failure(ctx, &job, SESSION_SETUP_FAILURE).await;
             return;
         }
@@ -394,6 +495,16 @@ async fn handle(ctx: &Ctx, job: Job) {
     let work_dir = sandbox(&ctx.sessions_dir, &job.thread);
     if let Err(e) = std::fs::create_dir_all(&work_dir) {
         error!("[{}] sandbox error: {e}", job.thread);
+        audit(
+            ctx,
+            ctx.audit.failed(
+                "backend_setup_failed",
+                job.row_id,
+                &job.thread,
+                Some(job.backend),
+                e.to_string(),
+            ),
+        );
         complete_setup_failure(ctx, &job, SANDBOX_SETUP_FAILURE).await;
         return;
     }
@@ -414,6 +525,11 @@ async fn handle(ctx: &Ctx, job: Job) {
         prompt: &job.text,
     };
 
+    audit(
+        ctx,
+        ctx.audit
+            .backend_started(job.row_id, &job.thread, job.backend, is_new),
+    );
     let mut result = runner.run(req(is_new), ctx.run_timeout).await;
     // If the session id already exists (e.g. left over from a previous run or a
     // different build), resume it instead of trying to create it again.
@@ -428,6 +544,11 @@ async fn handle(ctx: &Ctx, job: Job) {
 
     match result {
         Ok(out) => {
+            audit(
+                ctx,
+                ctx.audit
+                    .backend_completed(job.row_id, &job.thread, job.backend, &out.reply),
+            );
             if let Err(e) = ctx
                 .store
                 .lock()
@@ -435,14 +556,55 @@ async fn handle(ctx: &Ctx, job: Job) {
                 .mark_started(&job.thread, out.session_id.as_deref())
             {
                 error!("[{}] session save error: {e}", job.thread);
+                audit(
+                    ctx,
+                    ctx.audit.failed(
+                        "backend_session_save_failed",
+                        job.row_id,
+                        &job.thread,
+                        Some(job.backend),
+                        e.to_string(),
+                    ),
+                );
                 return;
             }
             if reply_to(ctx, &job.target, &out.reply).await {
-                complete_row(&ctx.store, &ctx.ack, job.row_id);
+                audit(
+                    ctx,
+                    ctx.audit.reply_sent(
+                        job.row_id,
+                        &job.thread,
+                        &job.target,
+                        Some(job.backend),
+                        &out.reply,
+                    ),
+                );
+                complete_job(ctx, &job, "completed");
+            } else {
+                audit(
+                    ctx,
+                    ctx.audit.reply_failed(
+                        job.row_id,
+                        &job.thread,
+                        &job.target,
+                        Some(job.backend),
+                        "backend reply failed",
+                    ),
+                );
             }
         }
         Err(RunError::Timeout) => {
             warn!("[{}] {} run timed out", job.thread, runner.label());
+            audit(
+                ctx,
+                ctx.audit.failed(
+                    "backend_run_failed",
+                    job.row_id,
+                    &job.thread,
+                    Some(job.backend),
+                    format!("{} run timed out", runner.label()),
+                ),
+            );
             if reply_to(
                 ctx,
                 &job.target,
@@ -450,13 +612,65 @@ async fn handle(ctx: &Ctx, job: Job) {
             )
             .await
             {
-                complete_row(&ctx.store, &ctx.ack, job.row_id);
+                audit(
+                    ctx,
+                    ctx.audit.reply_sent(
+                        job.row_id,
+                        &job.thread,
+                        &job.target,
+                        Some(job.backend),
+                        "That took too long and was stopped. Try again or simplify the request.",
+                    ),
+                );
+                complete_job(ctx, &job, "timeout");
+            } else {
+                audit(
+                    ctx,
+                    ctx.audit.reply_failed(
+                        job.row_id,
+                        &job.thread,
+                        &job.target,
+                        Some(job.backend),
+                        "timeout reply failed",
+                    ),
+                );
             }
         }
         Err(RunError::Failed(msg)) => {
             error!("[{}] {} error: {msg}", job.thread, runner.label());
+            audit(
+                ctx,
+                ctx.audit.failed(
+                    "backend_run_failed",
+                    job.row_id,
+                    &job.thread,
+                    Some(job.backend),
+                    msg.clone(),
+                ),
+            );
             if reply_to(ctx, &job.target, &format!("⚠️ {}", short(&msg))).await {
-                complete_row(&ctx.store, &ctx.ack, job.row_id);
+                audit(
+                    ctx,
+                    ctx.audit.reply_sent(
+                        job.row_id,
+                        &job.thread,
+                        &job.target,
+                        Some(job.backend),
+                        &format!("⚠️ {}", short(&msg)),
+                    ),
+                );
+                complete_job(ctx, &job, "backend_failed");
+            } else {
+                audit(
+                    ctx,
+                    ctx.audit.reply_failed(
+                        job.row_id,
+                        &job.thread,
+                        &job.target,
+                        Some(job.backend),
+                        "failure reply failed",
+                    ),
+                );
             }
         }
     }
@@ -474,17 +688,52 @@ async fn complete_setup_failure(ctx: &Ctx, job: &Job, reply: &str) {
         .push(reply.to_string());
 
     #[cfg(not(test))]
-    if !reply_to(ctx, &job.target, reply).await {
-        warn!(
-            "[{}] setup failure reply was not sent; completing row {}",
-            job.thread, job.row_id
-        );
+    {
+        if reply_to(ctx, &job.target, reply).await {
+            audit(
+                ctx,
+                ctx.audit.reply_sent(
+                    job.row_id,
+                    &job.thread,
+                    &job.target,
+                    Some(job.backend),
+                    reply,
+                ),
+            );
+        } else {
+            audit(
+                ctx,
+                ctx.audit.reply_failed(
+                    job.row_id,
+                    &job.thread,
+                    &job.target,
+                    Some(job.backend),
+                    "setup failure reply failed",
+                ),
+            );
+            warn!(
+                "[{}] setup failure reply was not sent; completing row {}",
+                job.thread, job.row_id
+            );
+        }
     }
+    audit(ctx, ctx.audit.completed(job.row_id, "setup_failed"));
     complete_setup_failure_row(&ctx.store, &ctx.ack, job.row_id);
 }
 
 fn complete_setup_failure_row(store: &Arc<Mutex<Store>>, ack: &Arc<Mutex<AckState>>, row_id: i64) {
     complete_row(store, ack, row_id);
+}
+
+fn complete_job(ctx: &Ctx, job: &Job, reason: &str) {
+    audit(ctx, ctx.audit.completed(job.row_id, reason));
+    complete_row(&ctx.store, &ctx.ack, job.row_id);
+}
+
+fn audit(ctx: &Ctx, event: AuditEvent) {
+    if let Err(e) = ctx.audit.record(event) {
+        error!("audit log error: {e}");
+    }
 }
 
 /// Handles gateway-level slash commands before anything reaches the agent.
@@ -707,6 +956,12 @@ mod tests {
             sessions_dir,
             assistant_dir: String::new(),
             assistant: AssistantProfile::default(),
+            audit: Arc::new(AuditLog::new(
+                temp_path("setup-failure-audit")
+                    .to_string_lossy()
+                    .to_string(),
+                false,
+            )),
             setup_failure_replies: Arc::new(Mutex::new(Vec::new())),
             sent_replies: Arc::new(Mutex::new(Vec::new())),
         }
@@ -969,6 +1224,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn fake_channel_e2e_replies_once_ignores_unallowlisted_and_reuses_session() {
         let state_path = temp_state_path();
+        let audit_path = format!("{state_path}.audit.jsonl");
         let sessions_dir = temp_path("e2e-sessions");
         let assistant_dir = temp_path("e2e-assistant");
         std::fs::create_dir_all(&assistant_dir).unwrap();
@@ -1026,6 +1282,29 @@ mod tests {
                 }
             ]
         );
+        let events = audit_events(&audit_path);
+        assert!(events.iter().any(|e| {
+            e.event == "message_ignored"
+                && e.row_id == Some(1)
+                && e.reason.as_deref() == Some("not_allowlisted")
+        }));
+        assert!(events.iter().any(|e| {
+            e.event == "message_accepted"
+                && e.row_id == Some(2)
+                && e.thread.as_deref() == Some("dm:+15551234567")
+                && e.backend.as_deref() == Some("codex")
+        }));
+        assert!(events.iter().any(|e| {
+            e.event == "backend_run_completed"
+                && e.row_id == Some(2)
+                && e.reply.as_ref().is_some_and(|c| c.text.is_none())
+        }));
+        assert!(events
+            .iter()
+            .any(|e| e.event == "reply_sent" && e.row_id == Some(2)));
+        assert!(events
+            .iter()
+            .any(|e| e.event == "message_completed" && e.row_id == Some(3)));
 
         let replay_calls = Arc::new(Mutex::new(Vec::new()));
         let mut replay_gateway = Gateway::new(test_config(
@@ -1051,6 +1330,7 @@ mod tests {
         assert!(replay_calls.lock().unwrap().is_empty());
 
         let _ = std::fs::remove_file(state_path);
+        let _ = std::fs::remove_file(audit_path);
         let _ = std::fs::remove_dir_all(sessions_dir);
         let _ = std::fs::remove_dir_all(assistant_dir);
     }
@@ -1076,9 +1356,19 @@ mod tests {
             codex_model: None,
             sessions_dir: sessions_dir.to_string(),
             state_path: state_path.to_string(),
+            audit_log_path: format!("{state_path}.audit.jsonl"),
+            audit_log_content: false,
             assistant_dir: assistant_dir.to_string(),
             reply_marker: "\n\n-- sent by push".to_string(),
         }
+    }
+
+    fn audit_events(path: &str) -> Vec<crate::audit::AuditEvent> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
     }
 
     fn fake_runners(calls: Arc<Mutex<Vec<FakeRunCall>>>) -> HashMap<AgentBackend, Runner> {

@@ -146,6 +146,8 @@ Codex assistant context is passed as part of the prompt wrapper.
 | `codex_model` | Optional Codex model override. |
 | `sessions_dir` | Per-thread working dirs. |
 | `state_path` | JSON state path. |
+| `audit_log_path` | Local JSONL audit log path. |
+| `audit_log_content` | Whether audit events include message and reply text. |
 | `assistant_dir` | Directory with `User.md` and `Memory.md`. |
 | `reply_marker` | Footer used to skip push's own replies. |
 

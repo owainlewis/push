@@ -22,6 +22,7 @@ Use absolute paths in service files. The service user needs:
 
 - access to the configured `config.json`
 - write access to `state_path`
+- write access to `audit_log_path`
 - write access to `sessions_dir`
 - read access to `assistant_dir`
 - access to `claude` or `codex` on `PATH`
@@ -169,6 +170,7 @@ settings. Keep `allow_from` narrow, use the least-powerful backend permissions
 that still work, and consider Claude Code `claude_tools`,
 `claude_allowed_tools`, and `claude_disallowed_tools` when running headlessly.
 
-Store config files, state files, backend credentials, and logs with permissions
-appropriate for the service user. Logs may contain prompts, backend errors, file
-paths, or message text.
+Store config files, state files, audit logs, backend credentials, and service
+logs with permissions appropriate for the service user. Logs may contain
+prompts, backend errors, file paths, handles, or message text when content
+logging is enabled.

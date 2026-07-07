@@ -181,7 +181,9 @@ settings, pushes to `main` deploy the site automatically.
   "claude_disallowed_tools": [],
   "codex_bin": "codex",
   "codex_sandbox": "workspace-write",
-  "codex_approval_policy": "never"
+  "codex_approval_policy": "never",
+  "audit_log_path": "~/.push/audit.jsonl",
+  "audit_log_content": false
 }
 ```
 
@@ -211,3 +213,17 @@ read-only assistant, or `[""]` to disable tools for pure text replies.
 without a prompt, and `claude_disallowed_tools` maps to `--disallowed-tools`,
 which denies matching tools. The shorter `tools`, `allowed_tools`, and
 `disallowed_tools` names are also accepted.
+
+## Audit Log
+
+push writes a structured JSONL audit log to `audit_log_path`, which defaults to
+`~/.push/audit.jsonl`. Each line is one event, such as `message_accepted`,
+`message_ignored`, `backend_run_started`, `backend_run_failed`, `reply_sent`, or
+`message_completed`.
+
+By default, audit events include metadata only: row id, channel, thread,
+backend, routing or error reason, target handle, and message or reply character
+count. Message and reply text are not stored unless `audit_log_content` is set
+to `true`. Keep the audit log local and protect it like service logs because it
+can still contain handles, thread ids, file paths, backend errors, and optional
+message content.

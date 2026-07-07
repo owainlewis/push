@@ -3,6 +3,7 @@
 //! coding-agent backend, and texts the reply back.
 
 mod agent;
+mod audit;
 mod claude;
 mod codex;
 mod config;
@@ -115,6 +116,7 @@ fn run_checks(cfg: &config::Config) -> CheckReport {
     check_config(cfg, &mut checks);
     check_state_dir(cfg, &mut checks);
     check_sessions_dir(cfg, &mut checks);
+    check_audit_log_dir(cfg, &mut checks);
     check_imessage_db(cfg, &mut checks);
     check_bins(cfg, &mut checks);
     CheckReport { checks }
@@ -168,6 +170,29 @@ fn check_sessions_dir(cfg: &config::Config, checks: &mut Vec<Check>) {
                 cfg.sessions_dir
             ),
         )),
+    }
+}
+
+fn check_audit_log_dir(cfg: &config::Config, checks: &mut Vec<Check>) {
+    if let Some(parent) = Path::new(&cfg.audit_log_path).parent() {
+        match ensure_writable_dir(parent) {
+            Ok(()) => checks.push(Check::pass(
+                "audit log directory",
+                format!("{} is writable", parent.display()),
+            )),
+            Err(e) => checks.push(Check::fail(
+                "audit log directory",
+                format!(
+                    "cannot create {}: {e}. Create it or choose a writable audit_log_path.",
+                    parent.display()
+                ),
+            )),
+        }
+    } else {
+        checks.push(Check::pass(
+            "audit log directory",
+            "audit_log_path has no parent directory",
+        ));
     }
 }
 
@@ -495,6 +520,10 @@ mod tests {
         let mut cfg = test_config();
         cfg.db_path = db_path.to_string_lossy().to_string();
         cfg.state_path = state_path.to_string_lossy().to_string();
+        cfg.audit_log_path = state_path
+            .with_extension("audit.jsonl")
+            .to_string_lossy()
+            .to_string();
         cfg.sessions_dir = sessions_dir.to_string_lossy().to_string();
 
         let report = run_checks(&cfg);
@@ -510,11 +539,15 @@ mod tests {
             check.name == "sessions directory" && matches!(check.status, CheckStatus::Pass)
         }));
         assert!(report.checks.iter().any(|check| {
+            check.name == "audit log directory" && matches!(check.status, CheckStatus::Pass)
+        }));
+        assert!(report.checks.iter().any(|check| {
             check.name == "iMessage database" && matches!(check.status, CheckStatus::Pass)
         }));
 
         let _ = std::fs::remove_file(db_path);
         let _ = std::fs::remove_file(state_path);
+        let _ = std::fs::remove_file(cfg.audit_log_path);
         let _ = std::fs::remove_dir_all(sessions_dir);
     }
 
@@ -549,6 +582,8 @@ mod tests {
             codex_model: None,
             sessions_dir: "/fake/sessions".to_string(),
             state_path: "/fake/state.json".to_string(),
+            audit_log_path: "/fake/audit.jsonl".to_string(),
+            audit_log_content: false,
             assistant_dir: "/fake/assistant".to_string(),
             reply_marker: "\n\n-- sent by push".to_string(),
         }
