@@ -167,6 +167,11 @@ now means "backend session id".
 If the configured backend changes for a thread, push starts a fresh backend
 session instead of trying to resume the old runtime's session.
 
+`audit_log_path` stores a local JSONL event stream for production debugging.
+Audit events record message metadata, routing decisions, backend run starts and
+failures, reply delivery metadata, and row completion. Message and reply text
+are redacted by default; `audit_log_content` opts into content logging.
+
 ## Assistant Context
 
 push loads:

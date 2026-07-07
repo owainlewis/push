@@ -26,6 +26,8 @@
   "codex_model": null,
   "sessions_dir": "~/.push/sessions",
   "state_path": "~/.push/state.json",
+  "audit_log_path": "~/.push/audit.jsonl",
+  "audit_log_content": false,
   "assistant_dir": "./assistant",
   "reply_marker": "\n\n-- sent by push"
 }
