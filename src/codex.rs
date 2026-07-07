@@ -122,9 +122,12 @@ fn prompt(req: &Request<'_>) -> String {
 fn session_id_from_jsonl(s: &str) -> Option<String> {
     s.lines().find_map(|line| {
         let ev: JsonEvent = serde_json::from_str(line).ok()?;
-        (ev.kind == "thread.started")
-            .then_some(ev.thread_id)
-            .flatten()
+        if ev.kind != "thread.started" {
+            return None;
+        }
+        let thread_id = ev.thread_id?;
+        let thread_id = thread_id.trim();
+        (!thread_id.is_empty()).then(|| thread_id.to_string())
     })
 }
 
@@ -151,6 +154,12 @@ mod tests {
     fn extracts_thread_id() {
         let s = r#"{"type":"thread.started","thread_id":"abc"}"#;
         assert_eq!(session_id_from_jsonl(s), Some("abc".to_string()));
+    }
+
+    #[test]
+    fn ignores_empty_thread_id() {
+        let s = r#"{"type":"thread.started","thread_id":" \t\n "}"#;
+        assert_eq!(session_id_from_jsonl(s), None);
     }
 
     #[test]

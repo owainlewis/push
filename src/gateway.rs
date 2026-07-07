@@ -350,16 +350,14 @@ async fn handle(ctx: &Ctx, job: Job) {
 
     match result {
         Ok(out) => {
-            if is_new && !runner.mark_started_before_run() {
-                if let Err(e) = ctx
-                    .store
-                    .lock()
-                    .unwrap()
-                    .mark_started(&job.thread, out.session_id.as_deref())
-                {
-                    error!("[{}] session save error: {e}", job.thread);
-                    return;
-                }
+            if let Err(e) = ctx
+                .store
+                .lock()
+                .unwrap()
+                .mark_started(&job.thread, out.session_id.as_deref())
+            {
+                error!("[{}] session save error: {e}", job.thread);
+                return;
             }
             if reply_to(ctx, &job.target, &out.reply).await {
                 complete_row(&ctx.store, &ctx.ack, job.row_id);
