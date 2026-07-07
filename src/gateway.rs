@@ -26,6 +26,10 @@ use crate::store::Store;
 const QUEUE_DEPTH: usize = 32;
 const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+const SESSION_SETUP_FAILURE: &str =
+    "Push could not prepare this conversation. Check the local logs, then resend.";
+const SANDBOX_SETUP_FAILURE: &str =
+    "Push could not create its session workspace. Check the local logs, then resend.";
 
 struct Job {
     row_id: i64,
@@ -79,6 +83,8 @@ struct Ctx {
     sessions_dir: String,
     assistant_dir: String,
     assistant: AssistantProfile,
+    #[cfg(test)]
+    setup_failure_replies: Arc<Mutex<Vec<String>>>,
 }
 
 pub struct Gateway {
@@ -113,6 +119,8 @@ impl Gateway {
             sessions_dir: cfg.sessions_dir.clone(),
             assistant_dir: cfg.assistant_dir.clone(),
             assistant: cfg.assistant.clone(),
+            #[cfg(test)]
+            setup_failure_replies: Arc::new(Mutex::new(Vec::new())),
         };
         let filter = Filter {
             self_set: cfg.self_handles.iter().cloned().collect(),
@@ -301,15 +309,19 @@ async fn handle(ctx: &Ctx, job: Job) {
         return;
     };
 
-    let initial_session_id = runner.initial_session_id();
-    let (session_id, is_new) = match ctx.store.lock().unwrap().session_for(
-        &job.thread,
-        runner.backend().as_str(),
-        initial_session_id,
-    ) {
+    let session_result = {
+        let initial_session_id = runner.initial_session_id();
+        ctx.store.lock().unwrap().session_for(
+            &job.thread,
+            runner.backend().as_str(),
+            initial_session_id,
+        )
+    };
+    let (session_id, is_new) = match session_result {
         Ok(v) => v,
         Err(e) => {
             error!("[{}] session error: {e}", job.thread);
+            complete_setup_failure(ctx, &job, SESSION_SETUP_FAILURE).await;
             return;
         }
     };
@@ -317,6 +329,7 @@ async fn handle(ctx: &Ctx, job: Job) {
     let work_dir = sandbox(&ctx.sessions_dir, &job.thread);
     if let Err(e) = std::fs::create_dir_all(&work_dir) {
         error!("[{}] sandbox error: {e}", job.thread);
+        complete_setup_failure(ctx, &job, SANDBOX_SETUP_FAILURE).await;
         return;
     }
 
@@ -382,6 +395,31 @@ async fn handle(ctx: &Ctx, job: Job) {
             }
         }
     }
+}
+
+/// Setup failures are terminal for the current row. Try to tell the user what
+/// happened, then complete the row so one bad setup step cannot wedge ack state.
+/// If notification delivery also fails, the row is still completed and the
+/// failed notification is logged.
+async fn complete_setup_failure(ctx: &Ctx, job: &Job, reply: &str) {
+    #[cfg(test)]
+    ctx.setup_failure_replies
+        .lock()
+        .unwrap()
+        .push(reply.to_string());
+
+    #[cfg(not(test))]
+    if !reply_to(ctx, &job.target, reply).await {
+        warn!(
+            "[{}] setup failure reply was not sent; completing row {}",
+            job.thread, job.row_id
+        );
+    }
+    complete_setup_failure_row(&ctx.store, &ctx.ack, job.row_id);
+}
+
+fn complete_setup_failure_row(store: &Arc<Mutex<Store>>, ack: &Arc<Mutex<AckState>>, row_id: i64) {
+    complete_row(store, ack, row_id);
 }
 
 /// Handles gateway-level slash commands before anything reaches the agent.
@@ -518,6 +556,8 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use uuid::Uuid;
 
     fn filter() -> Filter {
         Filter {
@@ -534,6 +574,54 @@ mod tests {
             chat_identifier: chat.to_string(),
             text: text.to_string(),
             is_from_me: from_me,
+        }
+    }
+
+    fn temp_state_path() -> String {
+        std::env::temp_dir()
+            .join(format!("push-gateway-test-{}.json", Uuid::new_v4()))
+            .to_string_lossy()
+            .to_string()
+    }
+
+    fn temp_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("push-gateway-{name}-{}", Uuid::new_v4()))
+    }
+
+    fn setup_failure_ctx(
+        store: Arc<Mutex<Store>>,
+        ack: Arc<Mutex<AckState>>,
+        sessions_dir: String,
+    ) -> Ctx {
+        let mut runners = HashMap::new();
+        runners.insert(
+            AgentBackend::Claude,
+            Runner::Claude(claude::Runner {
+                bin: "claude".to_string(),
+                permission_mode: "bypassPermissions".to_string(),
+            }),
+        );
+        Ctx {
+            store,
+            ack,
+            runners: Arc::new(runners),
+            sender: Sender::new(),
+            run_timeout: Duration::from_secs(1),
+            reply_marker: String::new(),
+            sessions_dir,
+            assistant_dir: String::new(),
+            assistant: AssistantProfile::default(),
+            setup_failure_replies: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn setup_failure_job(row_id: i64) -> Job {
+        Job {
+            row_id,
+            thread: "self:me".to_string(),
+            target: "me@icloud.com".to_string(),
+            backend: AgentBackend::Claude,
+            text: "hello".to_string(),
         }
     }
 
@@ -619,5 +707,92 @@ mod tests {
 
         assert_eq!(ack.advance_to(), Some(14));
         assert!(ack.completed.is_empty());
+    }
+
+    #[test]
+    fn setup_failure_completion_unblocks_later_completed_rows() {
+        let path = temp_state_path();
+        let store = Arc::new(Mutex::new(Store::open(&path).unwrap()));
+        let ack = Arc::new(Mutex::new(AckState::default()));
+        {
+            let mut ack = ack.lock().unwrap();
+            ack.in_flight.insert(10);
+            ack.completed.insert(11);
+        }
+
+        complete_setup_failure_row(&store, &ack, 10);
+
+        assert_eq!(store.lock().unwrap().last_row(), 11);
+        let ack = ack.lock().unwrap();
+        assert!(ack.in_flight.is_empty());
+        assert!(ack.completed.is_empty());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn session_lookup_failure_completes_in_flight_row() {
+        let blocker = temp_path("state-blocker");
+        let state_path = blocker.join("state.json");
+        let store = Arc::new(Mutex::new(
+            Store::open(state_path.to_str().unwrap()).unwrap(),
+        ));
+        std::fs::write(&blocker, "not a directory").unwrap();
+        let ack = Arc::new(Mutex::new(AckState::default()));
+        {
+            let mut ack = ack.lock().unwrap();
+            ack.in_flight.insert(10);
+            ack.completed.insert(11);
+        }
+        let ctx = setup_failure_ctx(
+            store,
+            ack.clone(),
+            temp_path("sessions").to_string_lossy().to_string(),
+        );
+
+        handle(&ctx, setup_failure_job(10)).await;
+
+        assert_eq!(
+            ctx.setup_failure_replies.lock().unwrap().as_slice(),
+            [SESSION_SETUP_FAILURE]
+        );
+        let ack = ack.lock().unwrap();
+        assert!(ack.in_flight.is_empty());
+        assert!(ack.completed.is_empty());
+
+        let _ = std::fs::remove_file(blocker);
+    }
+
+    #[tokio::test]
+    async fn sandbox_setup_failure_completes_in_flight_row_and_advances_cursor() {
+        let state_path = temp_state_path();
+        let store = Arc::new(Mutex::new(Store::open(&state_path).unwrap()));
+        let sessions_blocker = temp_path("sessions-blocker");
+        std::fs::write(&sessions_blocker, "not a directory").unwrap();
+        let ack = Arc::new(Mutex::new(AckState::default()));
+        {
+            let mut ack = ack.lock().unwrap();
+            ack.in_flight.insert(10);
+            ack.completed.insert(11);
+        }
+        let ctx = setup_failure_ctx(
+            store.clone(),
+            ack.clone(),
+            sessions_blocker.to_string_lossy().to_string(),
+        );
+
+        handle(&ctx, setup_failure_job(10)).await;
+
+        assert_eq!(
+            ctx.setup_failure_replies.lock().unwrap().as_slice(),
+            [SANDBOX_SETUP_FAILURE]
+        );
+        assert_eq!(store.lock().unwrap().last_row(), 11);
+        let ack = ack.lock().unwrap();
+        assert!(ack.in_flight.is_empty());
+        assert!(ack.completed.is_empty());
+
+        let _ = std::fs::remove_file(state_path);
+        let _ = std::fs::remove_file(sessions_blocker);
     }
 }
