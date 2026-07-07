@@ -24,6 +24,7 @@ pub struct RunOutput {
 }
 
 /// What went wrong, separated so the gateway can phrase timeouts differently.
+#[derive(Debug)]
 pub enum RunError {
     Timeout,
     Failed(String),
