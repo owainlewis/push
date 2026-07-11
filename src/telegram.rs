@@ -160,6 +160,23 @@ impl Telegram {
         }
         Ok(())
     }
+
+    pub async fn send_typing(&self, target: &str) -> Result<()> {
+        let value = self
+            .transport
+            .post(
+                &self.token,
+                "sendChatAction",
+                json!({"chat_id": target, "action": "typing"}),
+            )
+            .await?;
+        let response: ApiResponse<Value> = serde_json::from_value(value)
+            .map_err(|_| anyhow::anyhow!("Telegram sendChatAction returned an invalid response"))?;
+        if !response.ok {
+            bail!("Telegram sendChatAction was rejected by the Bot API");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]
@@ -422,6 +439,28 @@ mod tests {
             [(
                 "sendMessage".to_string(),
                 json!({"chat_id": "7", "text": "reply"})
+            )]
+        );
+        assert!(!calls[0].1.to_string().contains("do-not-log"));
+    }
+
+    #[tokio::test]
+    async fn typing_path_posts_chat_action_without_token_in_payload() {
+        let fake = Arc::new(FakeTransport::with_responses(vec![json!({
+            "ok": true,
+            "result": true
+        })]));
+        let telegram =
+            Telegram::with_transport("do-not-log".to_string(), vec![7], vec![], fake.clone());
+
+        telegram.send_typing("7").await.unwrap();
+
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(
+            calls.as_slice(),
+            [(
+                "sendChatAction".to_string(),
+                json!({"chat_id": "7", "action": "typing"})
             )]
         );
         assert!(!calls[0].1.to_string().contains("do-not-log"));

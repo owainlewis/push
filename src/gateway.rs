@@ -7,6 +7,7 @@
 //! writes. Everything else is message passing.
 
 use std::collections::{BTreeSet, HashMap};
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -28,6 +29,7 @@ const QUEUE_DEPTH: usize = 32;
 #[cfg(not(test))]
 const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+const TYPING_REFRESH: Duration = Duration::from_secs(4);
 const SESSION_SETUP_FAILURE: &str =
     "Push could not prepare this conversation. Check the local logs, then resend.";
 const SANDBOX_SETUP_FAILURE: &str =
@@ -219,6 +221,10 @@ impl Gateway {
                     }
                 };
                 self.audit(self.ctx.audit.accepted(m, &thread, backend));
+                info!(
+                    "[{thread}] new message accepted; routing to {}",
+                    backend.as_str()
+                );
                 self.route(
                     m.row_id,
                     thread,
@@ -324,6 +330,11 @@ async fn worker(ctx: Ctx, mut rx: mpsc::Receiver<Job>) {
 async fn handle(ctx: &Ctx, job: Job) {
     if let Some(reply) = command(ctx, &job) {
         if reply_to(ctx, &job.target, &reply).await {
+            info!(
+                "[{}] command reply sent via {}",
+                job.thread,
+                ctx.channel.id()
+            );
             audit(
                 ctx,
                 ctx.audit.reply_sent(
@@ -435,20 +446,52 @@ async fn handle(ctx: &Ctx, job: Job) {
         ctx.audit
             .backend_started(job.row_id, &job.thread, job.backend, is_new),
     );
-    let mut result = runner.run(req(is_new), ctx.run_timeout).await;
-    // If the session id already exists (e.g. left over from a previous run or a
-    // different build), resume it instead of trying to create it again.
-    if is_new {
-        if let Err(RunError::Failed(msg)) = &result {
-            if msg.to_lowercase().contains("already in use") {
-                warn!("[{}] session id already existed, resuming", job.thread);
-                result = runner.run(req(false), ctx.run_timeout).await;
+    info!(
+        "[{}] sending message to {} (new_session={is_new})",
+        job.thread,
+        runner.label()
+    );
+    let run = async {
+        let mut result = runner.run(req(is_new), ctx.run_timeout).await;
+        // If the session id already exists (e.g. left over from a previous run
+        // or a different build), resume it instead of trying to create it again.
+        if is_new {
+            if let Err(RunError::Failed(msg)) = &result {
+                if msg.to_lowercase().contains("already in use") {
+                    warn!("[{}] session id already existed, resuming", job.thread);
+                    result = runner.run(req(false), ctx.run_timeout).await;
+                }
             }
         }
-    }
+        result
+    };
+    let result = if ctx.channel.supports_typing() {
+        let channel = ctx.channel.clone();
+        let target = job.target.clone();
+        let thread = job.thread.clone();
+        run_with_periodic_activity(run, TYPING_REFRESH, move || {
+            let channel = channel.clone();
+            let target = target.clone();
+            let thread = thread.clone();
+            async move {
+                if let Err(e) = channel.send_typing(&target).await {
+                    warn!("[{thread}] Telegram typing update failed: {e}");
+                }
+            }
+        })
+        .await
+    } else {
+        run.await
+    };
 
     match result {
         Ok(out) => {
+            info!(
+                "[{}] {} completed; reply_chars={}",
+                job.thread,
+                runner.label(),
+                out.reply.chars().count()
+            );
             audit(
                 ctx,
                 ctx.audit
@@ -474,6 +517,7 @@ async fn handle(ctx: &Ctx, job: Job) {
                 return;
             }
             if reply_to(ctx, &job.target, &out.reply).await {
+                info!("[{}] reply sent via {}", job.thread, ctx.channel.id());
                 audit(
                     ctx,
                     ctx.audit.reply_sent(
@@ -576,6 +620,34 @@ async fn handle(ctx: &Ctx, job: Job) {
                         "failure reply failed",
                     ),
                 );
+            }
+        }
+    }
+}
+
+async fn run_with_periodic_activity<O, A, AF>(
+    operation: O,
+    refresh: Duration,
+    mut activity: A,
+) -> O::Output
+where
+    O: Future,
+    A: FnMut() -> AF,
+    AF: Future<Output = ()>,
+{
+    tokio::pin!(operation);
+    let mut ticker = tokio::time::interval(refresh);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            output = &mut operation => return output,
+            _ = ticker.tick() => {
+                let activity = activity();
+                tokio::pin!(activity);
+                tokio::select! {
+                    output = &mut operation => return output,
+                    _ = &mut activity => {}
+                }
             }
         }
     }
@@ -799,7 +871,59 @@ mod tests {
     use crate::channel::{normalize_handle, thread_handle};
     use crate::imessage::{Poller, Sender};
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn periodic_activity_refreshes_until_operation_completes() {
+        let (complete, completed) = tokio::sync::oneshot::channel();
+        let complete = Arc::new(Mutex::new(Some(complete)));
+        let activity_count = Arc::new(AtomicUsize::new(0));
+        let count = activity_count.clone();
+
+        let output = tokio::time::timeout(
+            Duration::from_secs(1),
+            run_with_periodic_activity(completed, Duration::from_millis(1), move || {
+                let complete = complete.clone();
+                let count = count.clone();
+                async move {
+                    if count.fetch_add(1, Ordering::SeqCst) + 1 == 3 {
+                        if let Some(complete) = complete.lock().unwrap().take() {
+                            let _ = complete.send("done");
+                        }
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("activity loop should finish")
+        .expect("operation should complete");
+
+        assert_eq!(output, "done");
+        assert!(activity_count.load(Ordering::SeqCst) >= 3);
+        let final_count = activity_count.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert_eq!(activity_count.load(Ordering::SeqCst), final_count);
+    }
+
+    #[tokio::test]
+    async fn stalled_activity_does_not_delay_operation() {
+        let output = tokio::time::timeout(
+            Duration::from_millis(100),
+            run_with_periodic_activity(
+                async {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    "done"
+                },
+                Duration::from_secs(1),
+                std::future::pending::<()>,
+            ),
+        )
+        .await
+        .expect("stalled activity should not block the operation");
+
+        assert_eq!(output, "done");
+    }
 
     fn filter() -> Channel {
         Channel::IMessage {

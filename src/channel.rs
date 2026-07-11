@@ -177,6 +177,17 @@ impl Channel {
             Self::Telegram(telegram) => telegram.send(target, text).await,
         }
     }
+
+    pub fn supports_typing(&self) -> bool {
+        matches!(self, Self::Telegram(_))
+    }
+
+    pub async fn send_typing(&self, target: &str) -> Result<()> {
+        match self {
+            Self::IMessage { .. } => Ok(()),
+            Self::Telegram(telegram) => telegram.send_typing(target).await,
+        }
+    }
 }
 
 pub(crate) fn normalize_handle(value: &str) -> String {
@@ -232,6 +243,7 @@ mod tests {
 
     #[test]
     fn telegram_accepts_allowlisted_private_user_or_chat() {
+        assert!(telegram().supports_typing());
         assert_eq!(
             telegram().accept(&telegram_message(7, 7, false)),
             Some(("telegram:dm:7".to_string(), "7".to_string()))
