@@ -206,8 +206,9 @@ backend session.
 ## Security Posture
 
 An allowed inbound message can cause an agent to run tools. The sender filter is
-the trust boundary. iMessage uses `self_handles` and `allow_from`; Telegram uses
-stable numeric `telegram_allow_user_ids` and `telegram_allow_chat_ids`.
+the trust boundary. iMessage uses `imessage.self_handles` and
+`imessage.allow_from`; Telegram uses stable numeric `telegram.allow_user_ids`
+and `telegram.allow_chat_ids`.
 
 Backend permissions are adapter-specific:
 

@@ -171,7 +171,7 @@ is completed.
 
 Managed services run without a person watching the terminal. An allowed sender
 can instruct the configured backend to use its tools, subject to your backend
-settings. Keep `allow_from` narrow, use the least-powerful backend permissions
+settings. Keep `imessage.allow_from` narrow, use the least-powerful backend permissions
 that still work, and consider Claude Code `claude_tools`,
 `claude_allowed_tools`, and `claude_disallowed_tools` when running headlessly.
 

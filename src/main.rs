@@ -132,7 +132,7 @@ fn check_config(cfg: &config::Config, checks: &mut Vec<Check>) {
     checks.push(Check::pass(
         "config",
         format!(
-            "channel={}, agent={}, self_handles={}, allow_from={}, telegram_allow_user_ids={}, telegram_allow_chat_ids={}",
+            "channel={}, agent={}, imessage.self_handles={}, imessage.allow_from={}, telegram.allow_user_ids={}, telegram.allow_chat_ids={}",
             cfg.channel,
             cfg.agent,
             cfg.self_handles.len(),
@@ -221,14 +221,14 @@ fn check_imessage_db(cfg: &config::Config, checks: &mut Vec<Check>) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => checks.push(Check::fail(
             "iMessage database",
             format!(
-                "Messages database not found at {}. Sign in to iMessage or set db_path.",
+                "Messages database not found at {}. Sign in to iMessage or set imessage.db_path.",
                 cfg.db_path
             ),
         )),
         Err(e) => checks.push(Check::fail(
             "iMessage database",
             format!(
-                "cannot open {}: {e}. Check db_path and Messages permissions, then rerun doctor.",
+                "cannot open {}: {e}. Check imessage.db_path and Messages permissions, then rerun doctor.",
                 cfg.db_path
             ),
         )),
@@ -245,7 +245,7 @@ fn check_telegram_config(cfg: &config::Config, checks: &mut Vec<Check>) {
         checks.push(Check::fail(
             "Telegram bot token",
             format!(
-                "not configured. Set {} or telegram_bot_token without printing the token.",
+                "not configured. Set {} or telegram.bot_token without printing the token.",
                 cfg.telegram_bot_token_env
             ),
         ));
@@ -413,19 +413,89 @@ mod tests {
     }
 
     #[test]
-    fn example_toml_loads_routes_and_assistant_profile() {
+    fn example_toml_is_a_minimal_telegram_config() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.toml.example");
 
         let cfg = Config::load(path.to_str().unwrap()).unwrap();
 
-        assert_eq!(cfg.channel, "imessage");
-        assert_eq!(cfg.routes.len(), 1);
-        assert_eq!(cfg.routes[0].agent, "codex");
-        assert_eq!(cfg.assistant.name, "push");
-        assert_eq!(cfg.assistant.projects, ["push"]);
+        assert_eq!(cfg.channel, "telegram");
+        assert_eq!(cfg.agent, "codex");
         assert_eq!(cfg.telegram_bot_token_env, "TELEGRAM_BOT_TOKEN");
-        assert!(cfg.telegram_allow_user_ids.is_empty());
+        assert_eq!(cfg.telegram_allow_user_ids, [123456789]);
         assert!(cfg.telegram_allow_chat_ids.is_empty());
+    }
+
+    #[test]
+    fn provider_sections_load_channel_settings() {
+        let path = temp_path("provider-section-config");
+        std::fs::write(
+            &path,
+            r#"channel = "telegram"
+agent = "codex"
+
+[imessage]
+db_path = "/tmp/messages.db"
+self_handles = ["me@example.com"]
+
+[telegram]
+bot_token_env = "PUSH_TEST_TOKEN"
+allow_user_ids = [7]
+allow_chat_ids = [9]
+"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(cfg.db_path, "/tmp/messages.db");
+        assert_eq!(cfg.self_handles, ["me@example.com"]);
+        assert_eq!(cfg.telegram_bot_token_env, "PUSH_TEST_TOKEN");
+        assert_eq!(cfg.telegram_allow_user_ids, [7]);
+        assert_eq!(cfg.telegram_allow_chat_ids, [9]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn provider_sections_reject_duplicate_flat_settings() {
+        let path = temp_path("duplicate-provider-config");
+        std::fs::write(
+            &path,
+            r#"channel = "telegram"
+agent = "codex"
+telegram_allow_user_ids = [7]
+
+[telegram]
+allow_user_ids = [9]
+"#,
+        )
+        .unwrap();
+
+        let err = Config::load(path.to_str().unwrap()).unwrap_err();
+
+        assert!(err.to_string().contains("not both"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn legacy_flat_telegram_settings_remain_supported() {
+        let path = temp_path("legacy-flat-telegram-config");
+        std::fs::write(
+            &path,
+            r#"channel = "telegram"
+agent = "codex"
+telegram_bot_token_env = "LEGACY_TOKEN"
+telegram_allow_user_ids = [7]
+telegram_allow_chat_ids = [9]
+"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(cfg.telegram_bot_token_env, "LEGACY_TOKEN");
+        assert_eq!(cfg.telegram_allow_user_ids, [7]);
+        assert_eq!(cfg.telegram_allow_chat_ids, [9]);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

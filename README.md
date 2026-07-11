@@ -97,7 +97,8 @@ Or build from source:
 git clone https://github.com/owainlewis/push.git
 cd push
 cp config.toml.example config.toml
-# edit config.toml: set self_handles and choose agent = "claude" or "codex"
+# edit config.toml: replace the Telegram user ID
+export TELEGRAM_BOT_TOKEN='your-bot-token'
 cargo build --release
 ./target/release/push doctor --config config.toml
 ./target/release/push
@@ -146,10 +147,10 @@ mutable and are not accepted as security identities. Keep the bot token in the
 
 ```toml
 channel = "telegram"
-telegram_bot_token_env = "TELEGRAM_BOT_TOKEN"
-telegram_allow_user_ids = [123456789]
-telegram_allow_chat_ids = []
 agent = "codex"
+
+[telegram]
+allow_user_ids = [123456789]
 ```
 
 See [Telegram Setup and Security](docs/telegram.md) for BotFather setup, finding
@@ -189,11 +190,8 @@ settings, pushes to `main` deploy the site automatically.
 ```toml
 channel = "imessage"
 agent = "codex"
-self_handles = ["you@icloud.com", "+15551234567"]
-allow_from = []
-telegram_bot_token_env = "TELEGRAM_BOT_TOKEN"
-telegram_allow_user_ids = []
-telegram_allow_chat_ids = []
+
+# Advanced shared and backend settings use their existing top-level names.
 claude_bin = "claude"
 claude_permission_mode = "bypassPermissions"
 claude_allowed_tools = []
@@ -203,6 +201,15 @@ codex_sandbox = "workspace-write"
 codex_approval_policy = "never"
 audit_log_path = "~/.push/audit.jsonl"
 audit_log_content = false
+
+[imessage]
+self_handles = ["you@icloud.com"]
+allow_from = ["+15551234567"]
+
+[telegram]
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+allow_user_ids = [123456789]
+allow_chat_ids = []
 
 [[routes]]
 thread = "imessage:self:you@icloud.com"
@@ -217,6 +224,9 @@ preferences = ["Prefer concise replies."]
 ```
 
 `channel` can be `imessage` or `telegram`. `agent` can be `claude` or `codex`.
+Channel settings belong under `[imessage]` and `[telegram]`. Existing flat
+channel keys remain accepted for compatibility, but do not set the same option
+in both places.
 Routes can override the backend by channel or exact channel-qualified thread:
 
 ```toml
@@ -240,11 +250,12 @@ of committing a config that contains credentials.
 ## Safety
 
 An inbound text is an instruction to an agent with tool access. The trust
-boundary is the sender filter: iMessage uses `self_handles` and `allow_from`;
-Telegram uses stable numeric `telegram_allow_user_ids` and
-`telegram_allow_chat_ids`. These fields decide who can
+boundary is the sender filter: iMessage uses `imessage.self_handles` and
+`imessage.allow_from`;
+Telegram uses stable numeric `telegram.allow_user_ids` and
+`telegram.allow_chat_ids`. These fields decide who can
 ask the configured backend to read files, edit files, run shell commands, call
-MCP servers, or use any other backend tool. Keep `allow_from` tight, and treat a
+MCP servers, or use any other backend tool. Keep `imessage.allow_from` tight, and treat a
 lost or shared phone, forwarded iMessage account, or compromised allowed sender
 as able to instruct the agent.
 
