@@ -129,7 +129,11 @@ impl Config {
     pub fn required_agent_bins(&self) -> Result<Vec<&str>> {
         let mut backends = HashSet::new();
         backends.insert(self.agent_backend()?);
-        for route in &self.routes {
+        for route in self
+            .routes
+            .iter()
+            .filter(|route| route.can_match_channel(&self.channel))
+        {
             backends.insert(AgentBackend::parse(&route.agent)?);
         }
 
@@ -239,12 +243,12 @@ pub struct RouteRule {
 }
 
 impl RouteRule {
+    fn can_match_channel(&self, channel: &str) -> bool {
+        self.channel.as_deref().is_none_or(|value| value == channel)
+    }
+
     fn matches(&self, channel: &str, thread: &str) -> bool {
-        if self
-            .channel
-            .as_deref()
-            .is_some_and(|value| value != channel)
-        {
+        if !self.can_match_channel(channel) {
             return false;
         }
         self.thread.as_deref().is_none_or(|value| {

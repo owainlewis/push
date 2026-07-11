@@ -568,6 +568,11 @@ tools = ["Read", "Grep"]
         cfg.self_handles.clear();
         cfg.telegram_bot_token = Some("secret".to_string());
         cfg.telegram_allow_user_ids = vec![7];
+        cfg.routes = vec![config::RouteRule {
+            thread: None,
+            channel: Some("imessage".to_string()),
+            agent: "claude".to_string(),
+        }];
         let mut checks = Vec::new();
 
         check_bins_with(&cfg, &mut checks, |bin| {
@@ -577,6 +582,9 @@ tools = ["Read", "Grep"]
         assert!(checks.iter().any(|check| {
             check.name == "binary /fake/codex" && matches!(check.status, CheckStatus::Pass)
         }));
+        assert!(!checks
+            .iter()
+            .any(|check| check.name == "binary /fake/claude"));
         assert!(!checks.iter().any(|check| check.name.contains("osascript")));
     }
 
