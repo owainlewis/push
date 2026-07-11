@@ -96,7 +96,7 @@ fn doctor(config_path: &str) -> Result<()> {
                 checks: vec![Check::fail(
                     "config",
                     format!(
-                        "cannot load {config_path}: {e}. Create the file from config.example.toml or fix the invalid value."
+                        "cannot load {config_path}: {e}. Create the file from config.toml.example or fix the invalid value."
                     ),
                 )],
             };
@@ -414,7 +414,7 @@ mod tests {
 
     #[test]
     fn example_toml_loads_routes_and_assistant_profile() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.toml.example");
 
         let cfg = Config::load(path.to_str().unwrap()).unwrap();
 

@@ -96,7 +96,7 @@ Or build from source:
 ```sh
 git clone https://github.com/owainlewis/push.git
 cd push
-cp config.example.toml config.toml
+cp config.toml.example config.toml
 # edit config.toml: set self_handles and choose agent = "claude" or "codex"
 cargo build --release
 ./target/release/push doctor --config config.toml
@@ -170,7 +170,7 @@ git push origin v0.1.0
 ```
 
 The release workflow builds with `cargo build --locked --release`, packages the
-binary with `README.md`, `LICENSE`, and `config.example.toml`, uploads checksum
+binary with `README.md`, `LICENSE`, and `config.toml.example`, uploads checksum
 files, and publishes generated notes.
 
 ## Website
