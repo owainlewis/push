@@ -21,6 +21,8 @@ struct State {
     #[serde(default)]
     last_row_id: i64,
     #[serde(default)]
+    cursors: HashMap<String, i64>,
+    #[serde(default)]
     sessions: HashMap<String, SessionInfo>,
 }
 
@@ -41,15 +43,34 @@ impl Store {
         Ok(Store { path: p, state })
     }
 
+    #[cfg(test)]
     pub fn last_row(&self) -> i64 {
-        self.state.last_row_id
+        self.cursor("imessage")
     }
 
-    pub fn set_last_row(&mut self, id: i64) -> Result<()> {
-        if id <= self.state.last_row_id {
+    pub fn has_cursor(&self, channel: &str) -> bool {
+        self.state.cursors.contains_key(channel)
+            || (channel == "imessage" && self.state.last_row_id != 0)
+    }
+
+    pub fn cursor(&self, channel: &str) -> i64 {
+        self.state.cursors.get(channel).copied().unwrap_or_else(|| {
+            if channel == "imessage" {
+                self.state.last_row_id
+            } else {
+                0
+            }
+        })
+    }
+
+    pub fn set_cursor(&mut self, channel: &str, id: i64) -> Result<()> {
+        if self.has_cursor(channel) && id <= self.cursor(channel) {
             return Ok(());
         }
-        self.state.last_row_id = id;
+        self.state.cursors.insert(channel.to_string(), id);
+        if channel == "imessage" {
+            self.state.last_row_id = id;
+        }
         self.save()
     }
 
@@ -61,6 +82,7 @@ impl Store {
         backend: &str,
         initial_id: String,
     ) -> Result<(String, bool)> {
+        self.migrate_legacy_imessage_session(thread)?;
         if let Some(si) = self.state.sessions.get(thread) {
             if si.backend == backend {
                 if si.uuid.trim().is_empty() {
@@ -121,6 +143,20 @@ impl Store {
             },
         );
         self.save()
+    }
+
+    fn migrate_legacy_imessage_session(&mut self, thread: &str) -> Result<()> {
+        let Some(legacy) = thread.strip_prefix("imessage:") else {
+            return Ok(());
+        };
+        if self.state.sessions.contains_key(thread) {
+            return Ok(());
+        }
+        if let Some(session) = self.state.sessions.remove(legacy) {
+            self.state.sessions.insert(thread.to_string(), session);
+            self.save()?;
+        }
+        Ok(())
     }
 
     fn save(&self) -> Result<()> {
@@ -280,6 +316,68 @@ mod tests {
             .unwrap();
         assert_eq!(fresh, (String::new(), true));
 
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn legacy_last_row_id_remains_the_imessage_cursor() {
+        let path = temp_state_path();
+        std::fs::write(&path, r#"{"last_row_id":42,"sessions":{}}"#).unwrap();
+        let store = Store::open(&path).unwrap();
+
+        assert!(store.has_cursor("imessage"));
+        assert_eq!(store.cursor("imessage"), 42);
+        assert_eq!(store.cursor("telegram"), 0);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn channel_cursors_persist_independently() {
+        let path = temp_state_path();
+        let mut store = Store::open(&path).unwrap();
+
+        store.set_cursor("imessage", 12).unwrap();
+        store.set_cursor("telegram", 99).unwrap();
+        store.set_cursor("imessage", 13).unwrap();
+        drop(store);
+
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.cursor("imessage"), 13);
+        assert_eq!(reopened.cursor("telegram"), 99);
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("\"last_row_id\": 13"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn legacy_imessage_session_moves_to_channel_qualified_key() {
+        let path = temp_state_path();
+        std::fs::write(
+            &path,
+            r#"{
+  "sessions": {
+    "dm:+15551234567": {
+      "uuid": "existing-session",
+      "started": true,
+      "backend": "claude"
+    }
+  }
+}"#,
+        )
+        .unwrap();
+        let mut store = Store::open(&path).unwrap();
+
+        let session = store
+            .session_for("imessage:dm:+15551234567", "claude", "unused".to_string())
+            .unwrap();
+
+        assert_eq!(session, ("existing-session".to_string(), false));
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("imessage:dm:+15551234567"));
+        assert!(!raw.contains("\"dm:+15551234567\""));
         let _ = std::fs::remove_file(path);
     }
 }

@@ -4,6 +4,7 @@
 
 mod agent;
 mod audit;
+mod channel;
 mod claude;
 mod codex;
 mod config;
@@ -11,6 +12,7 @@ mod gateway;
 mod imessage;
 mod memory;
 mod store;
+mod telegram;
 #[cfg(test)]
 mod test_support;
 
@@ -117,7 +119,11 @@ fn run_checks(cfg: &config::Config) -> CheckReport {
     check_state_dir(cfg, &mut checks);
     check_sessions_dir(cfg, &mut checks);
     check_audit_log_dir(cfg, &mut checks);
-    check_imessage_db(cfg, &mut checks);
+    match cfg.channel_kind() {
+        Ok(config::ChannelKind::IMessage) => check_imessage_db(cfg, &mut checks),
+        Ok(config::ChannelKind::Telegram) => check_telegram_config(cfg, &mut checks),
+        Err(e) => checks.push(Check::fail("channel", e.to_string())),
+    }
     check_bins(cfg, &mut checks);
     CheckReport { checks }
 }
@@ -126,10 +132,13 @@ fn check_config(cfg: &config::Config, checks: &mut Vec<Check>) {
     checks.push(Check::pass(
         "config",
         format!(
-            "agent={}, self_handles={}, allow_from={}",
+            "channel={}, agent={}, self_handles={}, allow_from={}, telegram_allow_user_ids={}, telegram_allow_chat_ids={}",
+            cfg.channel,
             cfg.agent,
             cfg.self_handles.len(),
-            cfg.allow_from.len()
+            cfg.allow_from.len(),
+            cfg.telegram_allow_user_ids.len(),
+            cfg.telegram_allow_chat_ids.len()
         ),
     ));
 }
@@ -226,6 +235,23 @@ fn check_imessage_db(cfg: &config::Config, checks: &mut Vec<Check>) {
     }
 }
 
+fn check_telegram_config(cfg: &config::Config, checks: &mut Vec<Check>) {
+    if cfg.telegram_token().is_some() {
+        checks.push(Check::pass(
+            "Telegram bot token",
+            format!("loaded from config or {}", cfg.telegram_bot_token_env),
+        ));
+    } else {
+        checks.push(Check::fail(
+            "Telegram bot token",
+            format!(
+                "not configured. Set {} or telegram_bot_token without printing the token.",
+                cfg.telegram_bot_token_env
+            ),
+        ));
+    }
+}
+
 fn ensure_writable_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let probe = dir.join(format!(".push-doctor-write-test-{}", std::process::id()));
@@ -250,7 +276,9 @@ fn check_bins_with(
             return;
         }
     };
-    bins.push("osascript");
+    if matches!(cfg.channel_kind(), Ok(config::ChannelKind::IMessage)) {
+        bins.push("osascript");
+    }
     bins.sort_unstable();
     bins.dedup();
     for bin in bins {
@@ -512,6 +540,80 @@ mod tests {
     }
 
     #[test]
+    fn telegram_binary_checks_do_not_require_osascript() {
+        let mut cfg = test_config();
+        cfg.channel = "telegram".to_string();
+        cfg.self_handles.clear();
+        cfg.telegram_bot_token = Some("secret".to_string());
+        cfg.telegram_allow_user_ids = vec![7];
+        let mut checks = Vec::new();
+
+        check_bins_with(&cfg, &mut checks, |bin| {
+            (bin == "/fake/codex").then(|| PathBuf::from(bin))
+        });
+
+        assert!(checks.iter().any(|check| {
+            check.name == "binary /fake/codex" && matches!(check.status, CheckStatus::Pass)
+        }));
+        assert!(!checks.iter().any(|check| check.name.contains("osascript")));
+    }
+
+    #[test]
+    fn telegram_preflight_checks_token_without_imessage_database() {
+        let mut cfg = test_config();
+        cfg.channel = "telegram".to_string();
+        cfg.self_handles.clear();
+        cfg.telegram_bot_token = Some("secret".to_string());
+        cfg.telegram_allow_user_ids = vec![7];
+        let mut checks = Vec::new();
+
+        check_telegram_config(&cfg, &mut checks);
+
+        assert!(checks.iter().any(|check| {
+            check.name == "Telegram bot token" && matches!(check.status, CheckStatus::Pass)
+        }));
+        assert!(!checks.iter().any(|check| check.name == "iMessage database"));
+        assert!(!format!("{:?}", checks[0].message).contains("secret"));
+    }
+
+    #[test]
+    fn routes_support_channel_override_exact_thread_and_legacy_imessage_key() {
+        let mut cfg = test_config();
+        cfg.agent = "claude".to_string();
+        cfg.routes = vec![
+            config::RouteRule {
+                thread: None,
+                channel: Some("telegram".to_string()),
+                agent: "codex".to_string(),
+            },
+            config::RouteRule {
+                thread: Some("telegram:dm:7".to_string()),
+                channel: None,
+                agent: "claude".to_string(),
+            },
+            config::RouteRule {
+                thread: Some("self:me@icloud.com".to_string()),
+                channel: None,
+                agent: "codex".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            cfg.agent_for_message("telegram", "telegram:dm:7").unwrap(),
+            config::AgentBackend::Claude
+        );
+        assert_eq!(
+            cfg.agent_for_message("telegram", "telegram:dm:8").unwrap(),
+            config::AgentBackend::Codex
+        );
+        assert_eq!(
+            cfg.agent_for_message("imessage", "imessage:self:me@icloud.com")
+                .unwrap(),
+            config::AgentBackend::Codex
+        );
+    }
+
+    #[test]
     fn run_checks_reports_config_and_writable_paths() {
         let db_path = temp_path("chat-db");
         std::fs::write(&db_path, "").unwrap();
@@ -563,11 +665,16 @@ mod tests {
 
     fn test_config() -> Config {
         Config {
+            channel: "imessage".to_string(),
             db_path: "/fake/chat.db".to_string(),
             poll_interval: "1s".to_string(),
             run_timeout: "1s".to_string(),
             self_handles: vec!["me@icloud.com".to_string()],
             allow_from: Vec::new(),
+            telegram_bot_token: None,
+            telegram_bot_token_env: "TELEGRAM_BOT_TOKEN".to_string(),
+            telegram_allow_user_ids: Vec::new(),
+            telegram_allow_chat_ids: Vec::new(),
             agent: "codex".to_string(),
             routes: Vec::new(),
             assistant: AssistantProfile::default(),

@@ -4,5 +4,5 @@ mod attributed_body;
 mod poller;
 mod sender;
 
-pub use poller::{Message, Poller};
+pub use poller::Poller;
 pub use sender::Sender;

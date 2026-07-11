@@ -1,12 +1,17 @@
 {
+  "channel": "imessage",
   "db_path": "~/Library/Messages/chat.db",
   "poll_interval": "3s",
   "run_timeout": "120s",
   "self_handles": ["you@icloud.com", "+15551234567"],
   "allow_from": [],
+  "telegram_bot_token": null,
+  "telegram_bot_token_env": "TELEGRAM_BOT_TOKEN",
+  "telegram_allow_user_ids": [],
+  "telegram_allow_chat_ids": [],
   "agent": "claude",
   "routes": [
-    { "thread": "self:you@icloud.com", "agent": "codex" }
+    { "thread": "imessage:self:you@icloud.com", "agent": "codex" }
   ],
   "assistant": {
     "name": "push",
