@@ -2,11 +2,9 @@
 
 This guide covers running `push` continuously under a process manager.
 
-For v1, the iMessage channel is macOS-only because it reads
-`~/Library/Messages/chat.db` and sends replies with `osascript`. Use the
-`launchd` setup for daily iMessage use. The `systemd` example is useful only for
-environments where the configured channel and credentials are available on
-Linux.
+The iMessage channel is macOS-only because it reads
+`~/Library/Messages/chat.db` and sends replies with `osascript`. Telegram uses
+outbound HTTPS long polling and can run under `systemd` on Linux or a VM.
 
 ## Before Installing a Service
 
@@ -15,12 +13,12 @@ own the service:
 
 ```sh
 mkdir -p ~/.config/push ~/.push
-push doctor --config /Users/YOU/.config/push/config.json
+push doctor --config /Users/YOU/.config/push/config.toml
 ```
 
 Use absolute paths in service files. The service user needs:
 
-- access to the configured `config.json`
+- access to the configured `config.toml`
 - write access to `state_path`
 - write access to `audit_log_path`
 - write access to `sessions_dir`
@@ -28,8 +26,10 @@ Use absolute paths in service files. The service user needs:
 - access to `claude` or `codex` on `PATH`
 - backend login, tokens, settings, MCP config, and project credentials
 - for iMessage on macOS, Full Disk Access and `osascript`
+- for Telegram, `TELEGRAM_BOT_TOKEN` in the service environment and network
+  access to `api.telegram.org`
 
-`state_path` stores the last completed channel row. `sessions_dir` stores
+`state_path` stores independent cursors for each channel. `sessions_dir` stores
 per-thread backend work directories, and `state.json` stores backend session
 ids. Keep both paths on durable storage. Restarting the service resumes after
 the last completed row and reuses existing backend sessions when the backend for
@@ -60,7 +60,7 @@ and replace `YOU` with your macOS user name:
   <array>
     <string>/Users/YOU/.local/bin/push</string>
     <string>--config</string>
-    <string>/Users/YOU/.config/push/config.json</string>
+    <string>/Users/YOU/.config/push/config.toml</string>
   </array>
 
   <key>WorkingDirectory</key>
@@ -105,8 +105,8 @@ launchctl kickstart -k gui/$(id -u)/com.owainlewis.push
 
 ## Linux systemd
 
-Use this only when your configured channel can run on Linux. The v1 iMessage
-channel still requires macOS.
+Use this for Telegram-only deployments. The iMessage channel still requires
+macOS.
 
 Create the service directories:
 
@@ -125,11 +125,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/push --config %h/.config/push/config.json
+ExecStart=%h/.local/bin/push --config %h/.config/push/config.toml
 WorkingDirectory=%h/.push
 Restart=on-failure
 RestartSec=10
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=%h/.config/push/telegram.env
 
 [Install]
 WantedBy=default.target
@@ -144,6 +145,10 @@ systemctl --user status push.service
 journalctl --user -u push.service -f
 ```
 
+Create `~/.config/push/telegram.env` with mode `0600` and a single
+`TELEGRAM_BOT_TOKEN=...` entry. Do not commit this file or print it in service
+logs.
+
 For a user service that survives logout, enable lingering:
 
 ```sh
@@ -152,11 +157,11 @@ loginctl enable-linger "$USER"
 
 ## Restart Behavior
 
-`push` only advances `last_row_id` after a message is ignored or completed. If
-the process stops during an in-flight backend run, that message can be retried
-after restart. This avoids silently losing accepted messages, but it can repeat
-backend work or send a duplicate reply if the backend finished and the process
-stopped before state was saved.
+`push` only advances the selected channel cursor after a message is ignored or
+completed. If the process stops during an in-flight backend run, that message
+can be retried after restart. This avoids silently losing accepted messages,
+but it can repeat backend work or send a duplicate reply if the backend
+finished and the process stopped before state was saved.
 
 Ignored messages, completed rows, and setup failures advance the cursor. Rows
 newer than an in-flight row do not push the cursor past it until the earlier row

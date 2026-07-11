@@ -10,16 +10,16 @@ Claude Code and Codex are the first two backends.
 ## How it works
 
 ```text
-iMessage -> push gateway -> Claude Code or Codex -> iMessage reply
+iMessage or Telegram -> push gateway -> Claude Code or Codex -> same-channel reply
 ```
 
-1. Poll `~/Library/Messages/chat.db` for new messages.
+1. Poll `~/Library/Messages/chat.db` or the Telegram Bot API for new messages.
 2. Keep only messages from yourself or configured allowed senders.
 3. Map each conversation to the active backend session.
 4. Load your assistant context from `assistant/User.md` and
    `assistant/Memory.md`.
 5. Run the configured backend headlessly.
-6. Send the final answer back through Messages.
+6. Send the final answer back to the originating channel and conversation.
 
 Memory is plain markdown you own. The gateway injects it into each run, so you
 can read it, edit it, and version it without learning a custom memory database.
@@ -67,7 +67,7 @@ does not expose the same `--append-system-prompt` flag as Claude Code.
 
 ## v1 Scope
 
-- iMessage channel.
+- iMessage and Telegram private-chat channels.
 - Claude Code backend.
 - Codex backend.
 - Read-only memory files.
@@ -75,9 +75,9 @@ does not expose the same `--append-system-prompt` flag as Claude Code.
 
 ## Requirements
 
-- macOS with iMessage signed in.
-- Full Disk Access for your terminal so push can read `chat.db`.
-- `osascript`, which ships with macOS.
+- For iMessage: macOS with iMessage signed in, Full Disk Access for your
+  terminal, and `osascript`.
+- For Telegram: a bot token and an allowlisted private-chat user or chat id.
 - At least one backend on your `PATH`:
   - `claude` for Claude Code.
   - `codex` for Codex.
@@ -96,17 +96,19 @@ Or build from source:
 ```sh
 git clone https://github.com/owainlewis/push.git
 cd push
-cp config.example.json config.json
-# edit config.json: set self_handles and choose "agent": "claude" or "codex"
+cp config.toml.example config.toml
+# edit config.toml: set self_handles and choose agent = "claude" or "codex"
 cargo build --release
-./target/release/push doctor --config config.json
+./target/release/push doctor --config config.toml
 ./target/release/push
 ```
 
-Then text yourself in Messages. The reply comes back in the same thread.
+Then message the configured iMessage account or Telegram bot. The reply comes
+back through the same channel and conversation.
 
-`push doctor` checks the config, state and session directories, iMessage
-database access, `osascript`, and the configured backend binary.
+`push doctor` checks shared paths and backend binaries, then only the selected
+channel's requirements. Telegram-only use does not need Messages, `chat.db`, or
+`osascript`.
 
 To run push continuously, see [Running push as a Service](docs/services.md) for
 macOS `launchd`, Linux `systemd` where supported, logs, restart behavior, and
@@ -129,6 +131,31 @@ formatting, and email handles are matched case-insensitively.
 restart, push resumes after the last completed row and keeps existing backend
 sessions when the selected backend has not changed.
 
+## Telegram Support
+
+Telegram uses Bot API long polling, so push opens no public port and needs no
+webhook server. Private chats are supported first. Group chats, forum topics,
+and non-text updates are ignored before they can reach the agent. Replies go to
+the chat that originated the accepted message, and replies over Telegram's
+4,096-character text limit are sent as ordered Unicode-safe chunks.
+
+Use stable numeric Telegram user or chat ids in the allowlist. Usernames are
+mutable and are not accepted as security identities. Keep the bot token in the
+`TELEGRAM_BOT_TOKEN` environment variable rather than committing it to
+`config.toml`:
+
+```toml
+channel = "telegram"
+telegram_bot_token_env = "TELEGRAM_BOT_TOKEN"
+telegram_allow_user_ids = [123456789]
+telegram_allow_chat_ids = []
+agent = "codex"
+```
+
+See [Telegram Setup and Security](docs/telegram.md) for BotFather setup, finding
+numeric ids, routes, first-run cursor behavior, Linux service configuration,
+and credential handling.
+
 ## Releases
 
 Tagged releases publish binary archives for Linux and macOS on
@@ -143,7 +170,7 @@ git push origin v0.1.0
 ```
 
 The release workflow builds with `cargo build --locked --release`, packages the
-binary with `README.md`, `LICENSE`, and `config.example.json`, uploads checksum
+binary with `README.md`, `LICENSE`, and `config.toml.example`, uploads checksum
 files, and publishes generated notes.
 
 ## Website
@@ -159,42 +186,63 @@ settings, pushes to `main` deploy the site automatically.
 
 ## Configuration
 
-```json
-{
-  "agent": "codex",
-  "routes": [
-    { "thread": "self:you@icloud.com", "agent": "codex" }
-  ],
-  "assistant": {
-    "name": "push",
-    "tone": "short, direct, and useful",
-    "business": "Describe your business or work context here.",
-    "projects": ["push"],
-    "preferences": ["Prefer concise replies."]
-  },
-  "self_handles": ["you@icloud.com", "+15551234567"],
-  "allow_from": [],
-  "claude_bin": "claude",
-  "claude_permission_mode": "bypassPermissions",
-  "claude_tools": null,
-  "claude_allowed_tools": [],
-  "claude_disallowed_tools": [],
-  "codex_bin": "codex",
-  "codex_sandbox": "workspace-write",
-  "codex_approval_policy": "never",
-  "audit_log_path": "~/.push/audit.jsonl",
-  "audit_log_content": false
-}
+```toml
+channel = "imessage"
+agent = "codex"
+self_handles = ["you@icloud.com", "+15551234567"]
+allow_from = []
+telegram_bot_token_env = "TELEGRAM_BOT_TOKEN"
+telegram_allow_user_ids = []
+telegram_allow_chat_ids = []
+claude_bin = "claude"
+claude_permission_mode = "bypassPermissions"
+claude_allowed_tools = []
+claude_disallowed_tools = []
+codex_bin = "codex"
+codex_sandbox = "workspace-write"
+codex_approval_policy = "never"
+audit_log_path = "~/.push/audit.jsonl"
+audit_log_content = false
+
+[[routes]]
+thread = "imessage:self:you@icloud.com"
+agent = "codex"
+
+[assistant]
+name = "push"
+tone = "short, direct, and useful"
+business = "Describe your business or work context here."
+projects = ["push"]
+preferences = ["Prefer concise replies."]
 ```
 
-`agent` can be `claude` or `codex`.
-`routes` can override the backend for exact thread keys like
-`self:you@icloud.com` or `dm:+15551234567`.
+`channel` can be `imessage` or `telegram`. `agent` can be `claude` or `codex`.
+Routes can override the backend by channel or exact channel-qualified thread:
+
+```toml
+[[routes]]
+channel = "telegram"
+agent = "codex"
+
+[[routes]]
+thread = "telegram:dm:123456789"
+agent = "claude"
+```
+
+iMessage thread keys are `imessage:self:<handle>` and
+`imessage:dm:<handle>`. Telegram private-chat keys are
+`telegram:dm:<chat_id>`. Legacy unqualified iMessage route keys remain accepted.
+
+push reads TOML only. Convert any earlier `config.json` file to `config.toml`
+before upgrading. The old JSON filename remains gitignored to reduce the risk
+of committing a config that contains credentials.
 
 ## Safety
 
 An inbound text is an instruction to an agent with tool access. The trust
-boundary is the sender filter: `self_handles` and `allow_from` decide who can
+boundary is the sender filter: iMessage uses `self_handles` and `allow_from`;
+Telegram uses stable numeric `telegram_allow_user_ids` and
+`telegram_allow_chat_ids`. These fields decide who can
 ask the configured backend to read files, edit files, run shell commands, call
 MCP servers, or use any other backend tool. Keep `allow_from` tight, and treat a
 lost or shared phone, forwarded iMessage account, or compromised allowed sender

@@ -10,17 +10,17 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::agent::{Request, RunError, Runner};
 use crate::audit::{AuditEvent, AuditLog};
+use crate::channel::{Channel, RawMessage};
 use crate::claude;
 use crate::codex;
 use crate::config::{AgentBackend, AssistantProfile, Config};
-use crate::imessage::{Message, Poller, Sender};
 use crate::memory;
 use crate::store::Store;
 
@@ -41,98 +41,13 @@ struct Job {
     text: String,
 }
 
-/// Decides which messages to act on. Kept separate so it is trivially testable.
-struct Filter {
-    self_set: HashMap<String, String>,
-    allow_set: HashMap<String, String>,
-    reply_marker: String,
-}
-
-impl Filter {
-    /// Returns `(thread_key, reply_target)` for an accepted message.
-    fn accept(&self, m: &Message) -> Option<(String, String)> {
-        if m.is_group {
-            return None;
-        }
-        if m.text.trim().is_empty() {
-            return None;
-        }
-        // Never react to our own replies.
-        if !self.reply_marker.is_empty() && m.text.contains(&self.reply_marker) {
-            return None;
-        }
-        let chat = normalize_handle(&m.chat_identifier);
-        let handle = normalize_handle(&m.handle);
-        // Self-chat: you texting yourself.
-        if let Some(thread_handle) = self.self_set.get(&chat) {
-            return Some((format!("self:{thread_handle}"), m.chat_identifier.clone()));
-        }
-        // Inbound DM from an allowed sender.
-        if !m.is_from_me {
-            if let Some(thread_handle) = self.allow_set.get(&handle) {
-                return Some((format!("dm:{thread_handle}"), m.handle.clone()));
-            }
-        }
-        None
-    }
-
-    fn reject_reason(&self, m: &Message) -> &'static str {
-        if m.is_group {
-            "group_chat"
-        } else if m.text.trim().is_empty() {
-            "empty_text"
-        } else if !self.reply_marker.is_empty() && m.text.contains(&self.reply_marker) {
-            "reply_marker"
-        } else if m.is_from_me {
-            "from_me_to_other"
-        } else {
-            "not_allowlisted"
-        }
-    }
-}
-
-fn normalize_handle(s: &str) -> String {
-    let trimmed = s.trim();
-    if trimmed.contains('@') {
-        return trimmed.to_ascii_lowercase();
-    }
-    let mut out = String::new();
-    for c in trimmed.chars() {
-        if c.is_ascii_digit() {
-            out.push(c);
-        }
-    }
-    if out.is_empty() {
-        trimmed.to_ascii_lowercase()
-    } else {
-        out
-    }
-}
-
-fn thread_handle(s: &str) -> String {
-    let trimmed = s.trim();
-    if trimmed.contains('@') {
-        return trimmed.to_ascii_lowercase();
-    }
-    let mut out = String::new();
-    if trimmed.starts_with('+') {
-        out.push('+');
-    }
-    out.push_str(&normalize_handle(trimmed));
-    if out == "+" {
-        trimmed.to_ascii_lowercase()
-    } else {
-        out
-    }
-}
-
 /// Shared, cheaply cloneable context handed to each worker task.
 #[derive(Clone)]
 struct Ctx {
     store: Arc<Mutex<Store>>,
     ack: Arc<Mutex<AckState>>,
     runners: Arc<HashMap<AgentBackend, Runner>>,
-    sender: Sender,
+    channel: Channel,
     run_timeout: Duration,
     reply_marker: String,
     sessions_dir: String,
@@ -146,10 +61,9 @@ struct Ctx {
 }
 
 pub struct Gateway {
-    poller: Poller,
+    channel: Channel,
     store: Arc<Mutex<Store>>,
     ack: Arc<Mutex<AckState>>,
-    filter: Filter,
     ctx: Ctx,
     cfg: Config,
     poll_interval: Duration,
@@ -167,15 +81,17 @@ impl Gateway {
         let store = Arc::new(Mutex::new(Store::open(&cfg.state_path)?));
         let ack = Arc::new(Mutex::new(AckState::default()));
         let runners = Arc::new(runners(&cfg));
+        let channel = Channel::new(&cfg)?;
         let audit = Arc::new(AuditLog::new(
             cfg.audit_log_path.clone(),
             cfg.audit_log_content,
+            channel.id(),
         ));
         let ctx = Ctx {
             store: store.clone(),
             ack: ack.clone(),
             runners,
-            sender: Sender::new(),
+            channel: channel.clone(),
             run_timeout: cfg.run_timeout_dur()?,
             reply_marker: cfg.reply_marker.clone(),
             sessions_dir: cfg.sessions_dir.clone(),
@@ -187,25 +103,11 @@ impl Gateway {
             #[cfg(test)]
             sent_replies: Arc::new(Mutex::new(Vec::new())),
         };
-        let filter = Filter {
-            self_set: cfg
-                .self_handles
-                .iter()
-                .map(|s| (normalize_handle(s), thread_handle(s)))
-                .collect(),
-            allow_set: cfg
-                .allow_from
-                .iter()
-                .map(|s| (normalize_handle(s), thread_handle(s)))
-                .collect(),
-            reply_marker: cfg.reply_marker.clone(),
-        };
         let poll_interval = cfg.poll_interval_dur()?;
         Ok(Self {
-            poller: Poller::new(cfg.db_path.clone()),
+            channel,
             store,
             ack,
-            filter,
             ctx,
             cfg,
             poll_interval,
@@ -215,7 +117,7 @@ impl Gateway {
 
     /// Runs until SIGINT/SIGTERM, then drains in-flight runs and returns.
     pub async fn run(mut self) -> Result<()> {
-        self.skip_backlog().await;
+        self.skip_backlog().await?;
 
         let mut handles: Vec<JoinHandle<()>> = Vec::new();
         let mut ticker = tokio::time::interval(self.poll_interval);
@@ -252,28 +154,31 @@ impl Gateway {
         Ok(())
     }
 
-    async fn skip_backlog(&self) {
-        if self.store.lock().unwrap().last_row() != 0 {
-            return;
+    async fn skip_backlog(&self) -> Result<()> {
+        let channel_id = self.channel.id();
+        if self.store.lock().unwrap().has_cursor(channel_id) {
+            return Ok(());
         }
-        let poller = self.poller.clone();
-        if let Ok(Ok(max)) = tokio::task::spawn_blocking(move || poller.max_row_id()).await {
-            let _ = self.store.lock().unwrap().set_last_row(max);
-            info!("starting from ROWID {max} (skipping backlog)");
-        }
+        let max = self
+            .channel
+            .latest_cursor()
+            .await
+            .with_context(|| format!("read initial {channel_id} cursor"))?;
+        self.store
+            .lock()
+            .unwrap()
+            .set_cursor(channel_id, max)
+            .with_context(|| format!("persist initial {channel_id} cursor"))?;
+        info!("starting {channel_id} from cursor {max} (skipping backlog)");
+        Ok(())
     }
 
     async fn tick(&mut self, handles: &mut Vec<JoinHandle<()>>) {
-        let since = self.store.lock().unwrap().last_row();
-        let poller = self.poller.clone();
-        let msgs = match tokio::task::spawn_blocking(move || poller.poll(since)).await {
-            Ok(Ok(m)) => m,
-            Ok(Err(e)) => {
-                error!("poll error: {e}");
-                return;
-            }
+        let since = self.store.lock().unwrap().cursor(self.channel.id());
+        let msgs = match self.channel.poll(since).await {
+            Ok(messages) => messages,
             Err(e) => {
-                error!("poll task error: {e}");
+                error!("poll error: {e}");
                 return;
             }
         };
@@ -282,12 +187,12 @@ impl Gateway {
     }
 
     #[cfg(test)]
-    async fn tick_fake(&mut self, msgs: Vec<Message>, handles: &mut Vec<JoinHandle<()>>) {
+    async fn tick_fake(&mut self, msgs: Vec<RawMessage>, handles: &mut Vec<JoinHandle<()>>) {
         self.process_messages(msgs, handles).await;
     }
 
-    async fn process_messages(&mut self, msgs: Vec<Message>, handles: &mut Vec<JoinHandle<()>>) {
-        let since = self.store.lock().unwrap().last_row();
+    async fn process_messages(&mut self, msgs: Vec<RawMessage>, handles: &mut Vec<JoinHandle<()>>) {
+        let since = self.store.lock().unwrap().cursor(self.channel.id());
         let mut max_row = 0i64;
         for m in &msgs {
             if m.row_id <= since {
@@ -297,8 +202,8 @@ impl Gateway {
             if self.ack.lock().unwrap().is_known(m.row_id) {
                 continue;
             }
-            if let Some((thread, target)) = self.filter.accept(m) {
-                let backend = match self.cfg.agent_for_thread(&thread) {
+            if let Some((thread, target)) = self.channel.accept(m) {
+                let backend = match self.cfg.agent_for_message(m.channel, &thread) {
                     Ok(v) => v,
                     Err(e) => {
                         error!("[{thread}] route error: {e}");
@@ -324,7 +229,7 @@ impl Gateway {
                 )
                 .await;
             } else {
-                self.audit(self.ctx.audit.ignored(m, self.filter.reject_reason(m)));
+                self.audit(self.ctx.audit.ignored(m, self.channel.reject_reason(m)));
                 self.complete_row(m.row_id, "ignored");
             }
         }
@@ -401,7 +306,7 @@ impl Gateway {
 
     fn complete_row(&self, row_id: i64, reason: &str) {
         self.audit(self.ctx.audit.completed(row_id, reason));
-        complete_row(&self.store, &self.ack, row_id);
+        complete_row(&self.store, &self.ack, self.channel.id(), row_id);
     }
 
     fn audit(&self, event: AuditEvent) {
@@ -718,16 +623,21 @@ async fn complete_setup_failure(ctx: &Ctx, job: &Job, reply: &str) {
         }
     }
     audit(ctx, ctx.audit.completed(job.row_id, "setup_failed"));
-    complete_setup_failure_row(&ctx.store, &ctx.ack, job.row_id);
+    complete_setup_failure_row(&ctx.store, &ctx.ack, ctx.channel.id(), job.row_id);
 }
 
-fn complete_setup_failure_row(store: &Arc<Mutex<Store>>, ack: &Arc<Mutex<AckState>>, row_id: i64) {
-    complete_row(store, ack, row_id);
+fn complete_setup_failure_row(
+    store: &Arc<Mutex<Store>>,
+    ack: &Arc<Mutex<AckState>>,
+    channel: &str,
+    row_id: i64,
+) {
+    complete_row(store, ack, channel, row_id);
 }
 
 fn complete_job(ctx: &Ctx, job: &Job, reason: &str) {
     audit(ctx, ctx.audit.completed(job.row_id, reason));
-    complete_row(&ctx.store, &ctx.ack, job.row_id);
+    complete_row(&ctx.store, &ctx.ack, ctx.channel.id(), job.row_id);
 }
 
 fn audit(ctx: &Ctx, event: AuditEvent) {
@@ -758,36 +668,35 @@ fn command(ctx: &Ctx, job: &Job) -> Option<String> {
 }
 
 async fn reply_to(ctx: &Ctx, target: &str, text: &str) -> bool {
-    if text.trim().is_empty() {
-        return true;
-    }
-    let out = format!("{text}{}", ctx.reply_marker);
+    let chunks = ctx.channel.outbound_chunks(text, &ctx.reply_marker);
     #[cfg(test)]
     {
-        let _ = &ctx.sender;
         ctx.sent_replies
             .lock()
             .unwrap()
-            .push((target.to_string(), out));
+            .extend(chunks.into_iter().map(|chunk| (target.to_string(), chunk)));
         true
     }
     #[cfg(not(test))]
     {
-        match tokio::time::timeout(SEND_TIMEOUT, ctx.sender.send(target, &out)).await {
-            Ok(Ok(())) => true,
-            Ok(Err(e)) => {
-                error!("send error to {target}: {e}");
-                false
-            }
-            Err(_) => {
-                error!("send to {target} timed out");
-                false
+        for chunk in chunks {
+            match tokio::time::timeout(SEND_TIMEOUT, ctx.channel.send_chunk(target, &chunk)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    error!("send error to {target}: {e}");
+                    return false;
+                }
+                Err(_) => {
+                    error!("send to {target} timed out");
+                    return false;
+                }
             }
         }
+        true
     }
 }
 
-fn complete_row(store: &Arc<Mutex<Store>>, ack: &Arc<Mutex<AckState>>, row_id: i64) {
+fn complete_row(store: &Arc<Mutex<Store>>, ack: &Arc<Mutex<AckState>>, channel: &str, row_id: i64) {
     let next = {
         let mut ack = ack.lock().unwrap();
         ack.in_flight.remove(&row_id);
@@ -795,7 +704,7 @@ fn complete_row(store: &Arc<Mutex<Store>>, ack: &Arc<Mutex<AckState>>, row_id: i
         ack.advance_to()
     };
     if let Some(row_id) = next {
-        if let Err(e) = store.lock().unwrap().set_last_row(row_id) {
+        if let Err(e) = store.lock().unwrap().set_cursor(channel, row_id) {
             error!("save state error: {e}");
         }
     }
@@ -854,7 +763,8 @@ fn short(msg: &str) -> String {
 }
 
 fn sandbox(sessions_dir: &str, thread: &str) -> String {
-    format!("{sessions_dir}/{}", sanitize(thread))
+    let directory_key = thread.strip_prefix("imessage:").unwrap_or(thread);
+    format!("{sessions_dir}/{}", sanitize(directory_key))
 }
 
 /// Turns a thread key into a filesystem-safe directory name.
@@ -886,11 +796,15 @@ async fn shutdown_signal() {
 mod tests {
     use super::*;
     use crate::agent::{FakeRunCall, FakeRunner};
+    use crate::channel::{normalize_handle, thread_handle};
+    use crate::imessage::{Poller, Sender};
     use std::path::PathBuf;
     use uuid::Uuid;
 
-    fn filter() -> Filter {
-        Filter {
+    fn filter() -> Channel {
+        Channel::IMessage {
+            poller: Poller::new("fake-chat.db".to_string()),
+            sender: Sender::new(),
             self_set: [("me@icloud.com".to_string(), "me@icloud.com".to_string())]
                 .into_iter()
                 .collect(),
@@ -901,19 +815,21 @@ mod tests {
         }
     }
 
-    fn msg(chat: &str, handle: &str, from_me: bool, text: &str) -> Message {
-        Message {
+    fn msg(chat: &str, handle: &str, from_me: bool, text: &str) -> RawMessage {
+        RawMessage {
             row_id: 1,
+            channel: "imessage",
             handle: handle.to_string(),
             chat_identifier: chat.to_string(),
             text: text.to_string(),
             is_from_me: from_me,
             is_group: false,
+            is_supported: true,
         }
     }
 
-    fn group_msg(chat: &str, handle: &str, from_me: bool, text: &str) -> Message {
-        Message {
+    fn group_msg(chat: &str, handle: &str, from_me: bool, text: &str) -> RawMessage {
+        RawMessage {
             is_group: true,
             ..msg(chat, handle, from_me, text)
         }
@@ -950,7 +866,7 @@ mod tests {
             store,
             ack,
             runners: Arc::new(runners),
-            sender: Sender::new(),
+            channel: filter(),
             run_timeout: Duration::from_secs(1),
             reply_marker: String::new(),
             sessions_dir,
@@ -961,6 +877,7 @@ mod tests {
                     .to_string_lossy()
                     .to_string(),
                 false,
+                "imessage",
             )),
             setup_failure_replies: Arc::new(Mutex::new(Vec::new())),
             sent_replies: Arc::new(Mutex::new(Vec::new())),
@@ -970,7 +887,7 @@ mod tests {
     fn setup_failure_job(row_id: i64) -> Job {
         Job {
             row_id,
-            thread: "self:me".to_string(),
+            thread: "imessage:self:me".to_string(),
             target: "me@icloud.com".to_string(),
             backend: AgentBackend::Claude,
             text: "hello".to_string(),
@@ -983,7 +900,7 @@ mod tests {
         assert_eq!(
             got,
             Some((
-                "self:me@icloud.com".to_string(),
+                "imessage:self:me@icloud.com".to_string(),
                 "me@icloud.com".to_string()
             ))
         );
@@ -994,7 +911,10 @@ mod tests {
         let got = filter().accept(&msg("+15551234567", "+15551234567", false, "hi"));
         assert_eq!(
             got,
-            Some(("dm:+15551234567".to_string(), "+15551234567".to_string()))
+            Some((
+                "imessage:dm:+15551234567".to_string(),
+                "+15551234567".to_string()
+            ))
         );
     }
 
@@ -1004,7 +924,7 @@ mod tests {
         assert_eq!(
             got,
             Some((
-                "dm:+15551234567".to_string(),
+                "imessage:dm:+15551234567".to_string(),
                 "+1 (555) 123-4567".to_string()
             ))
         );
@@ -1012,7 +932,9 @@ mod tests {
 
     #[test]
     fn bare_phone_matches_allowlist_with_plus() {
-        let filter = Filter {
+        let filter = Channel::IMessage {
+            poller: Poller::new("fake-chat.db".to_string()),
+            sender: Sender::new(),
             self_set: HashMap::new(),
             allow_set: ["+15551234567"]
                 .into_iter()
@@ -1025,13 +947,18 @@ mod tests {
 
         assert_eq!(
             got,
-            Some(("dm:+15551234567".to_string(), "15551234567".to_string()))
+            Some((
+                "imessage:dm:+15551234567".to_string(),
+                "15551234567".to_string()
+            ))
         );
     }
 
     #[test]
     fn plus_phone_matches_bare_allowlist() {
-        let filter = Filter {
+        let filter = Channel::IMessage {
+            poller: Poller::new("fake-chat.db".to_string()),
+            sender: Sender::new(),
             self_set: HashMap::new(),
             allow_set: ["15551234567"]
                 .into_iter()
@@ -1045,7 +972,7 @@ mod tests {
         assert_eq!(
             got,
             Some((
-                "dm:15551234567".to_string(),
+                "imessage:dm:15551234567".to_string(),
                 "+1 (555) 123-4567".to_string()
             ))
         );
@@ -1057,7 +984,7 @@ mod tests {
         assert_eq!(
             got,
             Some((
-                "self:me@icloud.com".to_string(),
+                "imessage:self:me@icloud.com".to_string(),
                 "ME@ICLOUD.COM".to_string()
             ))
         );
@@ -1098,6 +1025,18 @@ mod tests {
         assert_eq!(
             filter().accept(&group_msg("chat123456789", "+15551234567", false, "hi")),
             None
+        );
+    }
+
+    #[test]
+    fn imessage_keeps_legacy_sandbox_path_while_telegram_is_qualified() {
+        assert_eq!(
+            sandbox("/sessions", "imessage:dm:+15551234567"),
+            "/sessions/dm__15551234567"
+        );
+        assert_eq!(
+            sandbox("/sessions", "telegram:dm:15551234567"),
+            "/sessions/telegram_dm_15551234567"
         );
     }
 
@@ -1145,7 +1084,7 @@ mod tests {
             ack.completed.insert(11);
         }
 
-        complete_setup_failure_row(&store, &ack, 10);
+        complete_setup_failure_row(&store, &ack, "imessage", 10);
 
         assert_eq!(store.lock().unwrap().last_row(), 11);
         let ack = ack.lock().unwrap();
@@ -1291,7 +1230,7 @@ mod tests {
         assert!(events.iter().any(|e| {
             e.event == "message_accepted"
                 && e.row_id == Some(2)
-                && e.thread.as_deref() == Some("dm:+15551234567")
+                && e.thread.as_deref() == Some("imessage:dm:+15551234567")
                 && e.backend.as_deref() == Some("codex")
         }));
         assert!(events.iter().any(|e| {
@@ -1335,13 +1274,71 @@ mod tests {
         let _ = std::fs::remove_dir_all(assistant_dir);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn telegram_filters_before_agent_and_replies_to_originating_chat() {
+        let state_path = temp_state_path();
+        let sessions_dir = temp_path("telegram-sessions");
+        let assistant_dir = temp_path("telegram-assistant");
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut cfg = test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        );
+        cfg.channel = "telegram".to_string();
+        cfg.self_handles.clear();
+        cfg.allow_from.clear();
+        cfg.telegram_bot_token = Some("secret".to_string());
+        cfg.telegram_allow_user_ids = vec![7];
+        let mut gateway = Gateway::new(cfg).unwrap();
+        gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+
+        let mut handles = Vec::new();
+        gateway
+            .tick_fake(
+                vec![
+                    telegram_message(10, 8, 8, false, "ignore me"),
+                    telegram_message(11, 7, 7, false, "hello"),
+                    telegram_message(12, 7, -100, true, "group"),
+                ],
+                &mut handles,
+            )
+            .await;
+        gateway.queues.clear();
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        assert_eq!(gateway.store.lock().unwrap().cursor("telegram"), 12);
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        assert_eq!(calls.lock().unwrap()[0].prompt, "hello");
+        assert_eq!(
+            gateway.ctx.sent_replies.lock().unwrap().as_slice(),
+            [(
+                "7".to_string(),
+                "fake reply: hello\n\n-- sent by push".to_string()
+            )]
+        );
+
+        let _ = std::fs::remove_file(&state_path);
+        let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+        let _ = std::fs::remove_dir_all(sessions_dir);
+        let _ = std::fs::remove_dir_all(assistant_dir);
+    }
+
     fn test_config(state_path: &str, sessions_dir: &str, assistant_dir: &str) -> Config {
         Config {
+            channel: "imessage".to_string(),
             db_path: "fake-chat.db".to_string(),
             poll_interval: "1s".to_string(),
             run_timeout: "1s".to_string(),
             self_handles: vec!["me@icloud.com".to_string()],
             allow_from: vec!["+15551234567".to_string()],
+            telegram_bot_token: None,
+            telegram_bot_token_env: "TELEGRAM_BOT_TOKEN".to_string(),
+            telegram_allow_user_ids: Vec::new(),
+            telegram_allow_chat_ids: Vec::new(),
             agent: "codex".to_string(),
             routes: Vec::new(),
             assistant: AssistantProfile::default(),
@@ -1384,14 +1381,35 @@ mod tests {
         runners
     }
 
-    fn message(row_id: i64, chat: &str, handle: &str, is_from_me: bool, text: &str) -> Message {
-        Message {
+    fn message(row_id: i64, chat: &str, handle: &str, is_from_me: bool, text: &str) -> RawMessage {
+        RawMessage {
             row_id,
+            channel: "imessage",
             handle: handle.to_string(),
             chat_identifier: chat.to_string(),
             text: text.to_string(),
             is_from_me,
             is_group: false,
+            is_supported: true,
+        }
+    }
+
+    fn telegram_message(
+        row_id: i64,
+        user_id: i64,
+        chat_id: i64,
+        is_group: bool,
+        text: &str,
+    ) -> RawMessage {
+        RawMessage {
+            row_id,
+            channel: "telegram",
+            handle: user_id.to_string(),
+            chat_identifier: chat_id.to_string(),
+            text: text.to_string(),
+            is_from_me: false,
+            is_group,
+            is_supported: true,
         }
     }
 }

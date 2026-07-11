@@ -87,7 +87,7 @@ push takes a narrower bet:
 - `src/codex.rs`: Codex adapter.
 - `src/store.rs`: last row and backend session state.
 - `src/memory.rs`: markdown assistant context loading.
-- `src/config.rs`: JSON configuration.
+- `src/config.rs`: TOML configuration.
 
 ## Backend Behavior
 
@@ -95,8 +95,8 @@ push takes a narrower bet:
 
 Claude Code is selected with:
 
-```json
-{ "agent": "claude" }
+```toml
+agent = "claude"
 ```
 
 It uses:
@@ -110,8 +110,8 @@ It uses:
 
 Codex is selected with:
 
-```json
-{ "agent": "codex" }
+```toml
+agent = "codex"
 ```
 
 It uses:

@@ -5,6 +5,8 @@
 /push
 
 # Local config and state (never commit secrets or session state)
+config.toml
+# Keep legacy local configs ignored during migration.
 config.json
 state.json
 /sessions/
