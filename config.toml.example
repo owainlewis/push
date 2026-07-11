@@ -1,37 +1,7 @@
-channel = "imessage"
-db_path = "~/Library/Messages/chat.db"
-poll_interval = "3s"
-run_timeout = "120s"
-self_handles = ["you@icloud.com", "+15551234567"]
-allow_from = []
-telegram_bot_token_env = "TELEGRAM_BOT_TOKEN"
-telegram_allow_user_ids = []
-telegram_allow_chat_ids = []
-agent = "claude"
-claude_bin = "claude"
-claude_permission_mode = "bypassPermissions"
-claude_allowed_tools = []
-claude_disallowed_tools = []
-codex_bin = "codex"
-codex_sandbox = "workspace-write"
-codex_approval_policy = "never"
-sessions_dir = "~/.push/sessions"
-state_path = "~/.push/state.json"
-audit_log_path = "~/.push/audit.jsonl"
-audit_log_content = false
-assistant_dir = "./assistant"
-reply_marker = "\n\n-- sent by push"
-
-[[routes]]
-thread = "imessage:self:you@icloud.com"
+# Telegram quick start. The bot token comes from TELEGRAM_BOT_TOKEN.
+channel = "telegram"
 agent = "codex"
 
-[assistant]
-name = "push"
-tone = "short, direct, and useful"
-business = "Describe your business or work context here."
-projects = ["push"]
-preferences = [
-  "Prefer concise replies.",
-  "Use the configured agent tools instead of gateway plugins.",
-]
+[telegram]
+# Replace this once with your numeric Telegram user ID.
+allow_user_ids = [123456789]

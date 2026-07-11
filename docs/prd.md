@@ -130,11 +130,14 @@ Codex assistant context is passed as part of the prompt wrapper.
 | `agent` | `claude` or `codex`. |
 | `routes` | Exact thread to backend overrides. |
 | `assistant` | Structured assistant profile fields. |
-| `db_path` | Path to Messages `chat.db`. |
+| `imessage.db_path` | Path to Messages `chat.db`. |
 | `poll_interval` | How often to poll. |
 | `run_timeout` | Max backend run time. |
-| `self_handles` | User's own iMessage handles. |
-| `allow_from` | Other allowed senders. |
+| `imessage.self_handles` | User's own iMessage handles. |
+| `imessage.allow_from` | Other allowed senders. |
+| `telegram.bot_token_env` | Environment variable containing the bot token. |
+| `telegram.allow_user_ids` | Allowed private-chat sender IDs. |
+| `telegram.allow_chat_ids` | Allowed private chat IDs. |
 | `claude_bin` | Claude Code binary. |
 | `claude_permission_mode` | Claude Code permission mode. |
 | `claude_tools` | Optional Claude Code available tool list. |

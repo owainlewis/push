@@ -31,17 +31,19 @@ Use a Telegram-only config:
 
 ```toml
 channel = "telegram"
-telegram_bot_token_env = "TELEGRAM_BOT_TOKEN"
-telegram_allow_user_ids = [123456789]
-telegram_allow_chat_ids = []
 agent = "codex"
+
+[telegram]
+allow_user_ids = [123456789]
 
 [[routes]]
 thread = "telegram:dm:123456789"
 agent = "claude"
 ```
 
-`telegram_bot_token` is supported for constrained deployments, but the
+The token environment variable defaults to `TELEGRAM_BOT_TOKEN`. Set
+`telegram.bot_token_env` only when you need a different variable name.
+`telegram.bot_token` is supported for constrained deployments, but the
 environment-variable form is safer because it keeps the credential out of the
 config file. push never prints the token. Run:
 
@@ -59,8 +61,8 @@ Telegram-only preflight does not open `chat.db` and does not require macOS or
 An incoming Telegram update reaches the agent only when all of these are true:
 
 - it is a normal text message in a private chat
-- its numeric sender id is in `telegram_allow_user_ids`, or its numeric chat id
-  is in `telegram_allow_chat_ids`
+- its numeric sender id is in `telegram.allow_user_ids`, or its numeric chat id
+  is in `telegram.allow_chat_ids`
 - the text is not empty
 
 Group chats, channels, forum topics, edited messages, and other update types are

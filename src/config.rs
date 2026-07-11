@@ -70,7 +70,30 @@ impl Config {
     /// Load, expand `~` in path fields, and validate the config at `path`.
     pub fn load(path: &str) -> Result<Config> {
         let raw = std::fs::read_to_string(path).with_context(|| format!("read config {path}"))?;
-        let mut c: Config = toml::from_str(&raw).context("parse TOML config")?;
+        let mut value: toml::Value = toml::from_str(&raw).context("parse TOML config")?;
+        let root = value
+            .as_table_mut()
+            .context("config must be a TOML table")?;
+        flatten_provider_section(
+            root,
+            "imessage",
+            &[
+                ("db_path", "db_path"),
+                ("self_handles", "self_handles"),
+                ("allow_from", "allow_from"),
+            ],
+        )?;
+        flatten_provider_section(
+            root,
+            "telegram",
+            &[
+                ("bot_token", "telegram_bot_token"),
+                ("bot_token_env", "telegram_bot_token_env"),
+                ("allow_user_ids", "telegram_allow_user_ids"),
+                ("allow_chat_ids", "telegram_allow_chat_ids"),
+            ],
+        )?;
+        let mut c: Config = value.try_into().context("parse TOML config")?;
         c.db_path = expand_home(&c.db_path);
         c.sessions_dir = expand_home(&c.sessions_dir);
         c.state_path = expand_home(&c.state_path);
@@ -151,24 +174,24 @@ impl Config {
         match self.channel_kind()? {
             ChannelKind::IMessage => {
                 if self.self_handles.is_empty() && self.allow_from.is_empty() {
-                    bail!("set at least one of self_handles or allow_from for iMessage");
+                    bail!("set imessage.self_handles or imessage.allow_from for iMessage");
                 }
             }
             ChannelKind::Telegram => {
                 if self.telegram_allow_user_ids.is_empty()
                     && self.telegram_allow_chat_ids.is_empty()
                 {
-                    bail!("set telegram_allow_user_ids or telegram_allow_chat_ids for Telegram");
+                    bail!("set telegram.allow_user_ids or telegram.allow_chat_ids for Telegram");
                 }
                 if self
                     .telegram_bot_token
                     .as_deref()
                     .is_some_and(|v| v.trim().is_empty())
                 {
-                    bail!("telegram_bot_token cannot be empty");
+                    bail!("telegram.bot_token cannot be empty");
                 }
                 if self.telegram_bot_token_env.trim().is_empty() {
-                    bail!("telegram_bot_token_env cannot be empty");
+                    bail!("telegram.bot_token_env cannot be empty");
                 }
             }
         }
@@ -217,6 +240,35 @@ impl Config {
         self.run_timeout_dur()?;
         Ok(())
     }
+}
+
+fn flatten_provider_section(
+    root: &mut toml::Table,
+    section: &str,
+    fields: &[(&str, &str)],
+) -> Result<()> {
+    let Some(value) = root.remove(section) else {
+        return Ok(());
+    };
+    let table = value
+        .as_table()
+        .with_context(|| format!("[{section}] must be a TOML table"))?;
+
+    for (key, value) in table {
+        let Some((_, destination)) = fields.iter().find(|(source, _)| source == key) else {
+            let expected = fields
+                .iter()
+                .map(|(source, _)| *source)
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!("unknown [{section}] setting {key:?}; expected one of: {expected}");
+        };
+        if root.contains_key(*destination) {
+            bail!("set {destination} either at the top level or as [{section}].{key}, not both");
+        }
+        root.insert((*destination).to_string(), value.clone());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
