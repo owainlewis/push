@@ -1,6 +1,6 @@
 # Core Assistant System
 
-**Status:** Draft
+**Status:** Approved
 
 **Author:** Owain Lewis  **Date:** 2026-07-11
 
@@ -245,3 +245,8 @@ reconciliation is not part of this rollout.
 - How much recent history should seed a fresh backend session, if any?
 
 ## Decision
+
+Approved by Owain Lewis on 2026-07-11. Adopt `SOUL.md` as the single assistant
+identity source and SQLite as Push's canonical conversation history. Keep
+backend sessions as a fast path. Defer `MEMORY.md`, reconciliation, retrieval,
+and summarisation to a separate later design.
