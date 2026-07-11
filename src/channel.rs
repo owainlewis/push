@@ -20,6 +20,12 @@ pub struct RawMessage {
     pub is_supported: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundChunk {
+    pub text: String,
+    pub rich_markdown: bool,
+}
+
 #[derive(Clone)]
 pub enum Channel {
     IMessage {
@@ -159,22 +165,39 @@ impl Channel {
         }
     }
 
-    pub fn outbound_chunks(&self, text: &str, marker: &str) -> Vec<String> {
+    pub fn outbound_chunks(&self, text: &str, marker: &str) -> Vec<OutboundChunk> {
         if text.trim().is_empty() {
             return Vec::new();
         }
-        let output = format!("{text}{marker}");
         match self {
-            Self::IMessage { .. } => vec![output],
-            Self::Telegram(_) => crate::telegram::split_text(&output),
+            Self::IMessage { .. } => vec![OutboundChunk {
+                text: format!("{text}{marker}"),
+                rich_markdown: false,
+            }],
+            Self::Telegram(_) if text.chars().count() <= crate::telegram::RICH_TEXT_LIMIT => {
+                vec![OutboundChunk {
+                    text: text.to_string(),
+                    rich_markdown: true,
+                }]
+            }
+            Self::Telegram(_) => crate::telegram::split_text(text)
+                .into_iter()
+                .map(|text| OutboundChunk {
+                    text,
+                    rich_markdown: false,
+                })
+                .collect(),
         }
     }
 
     #[cfg_attr(test, allow(dead_code))]
-    pub async fn send_chunk(&self, target: &str, text: &str) -> Result<()> {
+    pub async fn send_chunk(&self, target: &str, chunk: &OutboundChunk) -> Result<()> {
         match self {
-            Self::IMessage { sender, .. } => sender.send(target, text).await,
-            Self::Telegram(telegram) => telegram.send(target, text).await,
+            Self::IMessage { sender, .. } => sender.send(target, &chunk.text).await,
+            Self::Telegram(telegram) if chunk.rich_markdown => {
+                telegram.send_rich(target, &chunk.text).await
+            }
+            Self::Telegram(telegram) => telegram.send_plain(target, &chunk.text).await,
         }
     }
 
@@ -266,22 +289,49 @@ mod tests {
     }
 
     #[test]
-    fn telegram_marker_and_reply_never_exceed_limit() {
-        let chunks = telegram().outbound_chunks(
-            &"x".repeat(crate::telegram::TEXT_LIMIT),
-            "\n\n-- sent by push",
-        );
+    fn telegram_omits_imessage_marker_and_reply_never_exceeds_limit() {
+        let marker = "\n\n-- sent by push";
+        let chunks = telegram().outbound_chunks(&"x".repeat(crate::telegram::TEXT_LIMIT), marker);
 
-        assert_eq!(chunks.len(), 2);
-        assert!(chunks
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].rich_markdown);
+        assert!(chunks.iter().all(|chunk| !chunk.text.contains(marker)));
+        assert_eq!(chunks[0].text, "x".repeat(crate::telegram::TEXT_LIMIT));
+
+        let long =
+            telegram().outbound_chunks(&"x".repeat(crate::telegram::RICH_TEXT_LIMIT + 1), marker);
+        assert!(long.iter().all(|chunk| !chunk.rich_markdown));
+        assert!(long
             .iter()
-            .all(|chunk| chunk.encode_utf16().count() <= crate::telegram::TEXT_LIMIT));
+            .all(|chunk| { chunk.text.encode_utf16().count() <= crate::telegram::TEXT_LIMIT }));
+    }
+
+    #[test]
+    fn telegram_keeps_markdown_structures_whole_or_falls_back_to_plain_chunks() {
+        let structured = format!(
+            "{}\n```rust\nlet value = 1;\n```\n[link](https://example.com)\n| a | b |\n| - | - |\n| 1 | 2 |",
+            "x".repeat(crate::telegram::TEXT_LIMIT)
+        );
+        let rich = telegram().outbound_chunks(&structured, "ignored");
+
+        assert_eq!(rich.len(), 1);
+        assert!(rich[0].rich_markdown);
+        assert_eq!(rich[0].text, structured);
+
+        let oversized = format!(
+            "{}\n```rust\nlet value = 1;\n```\n[link](https://example.com)\n| a | b |\n| - | - |",
+            "x".repeat(crate::telegram::RICH_TEXT_LIMIT)
+        );
+        let plain = telegram().outbound_chunks(&oversized, "ignored");
+
+        assert!(plain.len() > 1);
+        assert!(plain.iter().all(|chunk| !chunk.rich_markdown));
         assert_eq!(
-            chunks.concat(),
-            format!(
-                "{}\n\n-- sent by push",
-                "x".repeat(crate::telegram::TEXT_LIMIT)
-            )
+            plain
+                .into_iter()
+                .map(|chunk| chunk.text)
+                .collect::<String>(),
+            oversized
         );
     }
 
@@ -296,8 +346,8 @@ mod tests {
         };
 
         assert_eq!(
-            channel.outbound_chunks("hello", "\n\n-- sent by push"),
-            ["hello\n\n-- sent by push"]
+            channel.outbound_chunks("hello", "\n\n-- sent by push")[0].text,
+            "hello\n\n-- sent by push"
         );
     }
 }

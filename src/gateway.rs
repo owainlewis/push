@@ -743,10 +743,11 @@ async fn reply_to(ctx: &Ctx, target: &str, text: &str) -> bool {
     let chunks = ctx.channel.outbound_chunks(text, &ctx.reply_marker);
     #[cfg(test)]
     {
-        ctx.sent_replies
-            .lock()
-            .unwrap()
-            .extend(chunks.into_iter().map(|chunk| (target.to_string(), chunk)));
+        ctx.sent_replies.lock().unwrap().extend(
+            chunks
+                .into_iter()
+                .map(|chunk| (target.to_string(), chunk.text)),
+        );
         true
     }
     #[cfg(not(test))]
@@ -1439,10 +1440,7 @@ mod tests {
         assert_eq!(calls.lock().unwrap()[0].prompt, "hello");
         assert_eq!(
             gateway.ctx.sent_replies.lock().unwrap().as_slice(),
-            [(
-                "7".to_string(),
-                "fake reply: hello\n\n-- sent by push".to_string()
-            )]
+            [("7".to_string(), "fake reply: hello".to_string())]
         );
 
         let _ = std::fs::remove_file(&state_path);
