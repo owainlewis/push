@@ -152,16 +152,10 @@ impl Telegram {
     }
 
     pub async fn send_rich(&self, target: &str, text: &str) -> Result<()> {
+        let mut payload = target_payload(target);
+        payload["rich_message"] = json!({"markdown": text});
         let transport_response = self
-            .transport
-            .post(
-                &self.token,
-                "sendRichMessage",
-                json!({
-                    "chat_id": target,
-                    "rich_message": {"markdown": text}
-                }),
-            )
+            .post_with_topic_fallback("sendRichMessage", payload)
             .await?;
         let response: ApiResponse<Value> = serde_json::from_value(transport_response.body)
             .map_err(|_| {
@@ -187,13 +181,10 @@ impl Telegram {
     }
 
     pub async fn send_plain(&self, target: &str, text: &str) -> Result<()> {
+        let mut payload = target_payload(target);
+        payload["text"] = json!(text);
         let transport_response = self
-            .transport
-            .post(
-                &self.token,
-                "sendMessage",
-                json!({"chat_id": target, "text": text}),
-            )
+            .post_with_topic_fallback("sendMessage", payload)
             .await?;
         let response: ApiResponse<Value> = serde_json::from_value(transport_response.body)
             .map_err(|_| anyhow::anyhow!("Telegram sendMessage returned an invalid response"))?;
@@ -207,13 +198,10 @@ impl Telegram {
     }
 
     pub async fn send_typing(&self, target: &str) -> Result<()> {
+        let mut payload = target_payload(target);
+        payload["action"] = json!("typing");
         let transport_response = self
-            .transport
-            .post(
-                &self.token,
-                "sendChatAction",
-                json!({"chat_id": target, "action": "typing"}),
-            )
+            .post_with_topic_fallback("sendChatAction", payload)
             .await?;
         let response: ApiResponse<Value> = serde_json::from_value(transport_response.body)
             .map_err(|_| anyhow::anyhow!("Telegram sendChatAction returned an invalid response"))?;
@@ -224,6 +212,63 @@ impl Telegram {
             );
         }
         Ok(())
+    }
+
+    /// Posts the payload, retrying once without `message_thread_id` when
+    /// Telegram rejects a private-chat topic send with "message thread not
+    /// found", for example when a topic is stale or unavailable. The retry
+    /// lands the reply in the main chat view instead of losing it.
+    async fn post_with_topic_fallback(
+        &self,
+        method: &'static str,
+        mut payload: Value,
+    ) -> Result<TransportResponse> {
+        let response = self
+            .transport
+            .post(&self.token, method, payload.clone())
+            .await?;
+        let ok = response
+            .body
+            .get("ok")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let thread_missing = response
+            .body
+            .get("description")
+            .and_then(Value::as_str)
+            .is_some_and(|d| d.contains("message thread not found"));
+        if ok
+            || response.status != 400
+            || !thread_missing
+            || payload.get("message_thread_id").is_none()
+        {
+            return Ok(response);
+        }
+        if let Some(obj) = payload.as_object_mut() {
+            obj.remove("message_thread_id");
+        }
+        self.transport.post(&self.token, method, payload).await
+    }
+}
+
+/// Builds the send payload for a reply target. `Channel::accept` encodes
+/// topic targets as `"{chat_id}:{topic_id}"`; plain targets are the chat id.
+fn target_payload(target: &str) -> Value {
+    let (chat, topic) = split_target(target);
+    let mut payload = json!({"chat_id": chat});
+    if let Some(topic) = topic {
+        payload["message_thread_id"] = json!(topic);
+    }
+    payload
+}
+
+fn split_target(target: &str) -> (&str, Option<i64>) {
+    match target.split_once(':') {
+        Some((chat, topic)) => match topic.parse::<i64>() {
+            Ok(topic) => (chat, Some(topic)),
+            Err(_) => (target, None),
+        },
+        None => (target, None),
     }
 }
 
@@ -253,6 +298,7 @@ impl Update {
                 text: String::new(),
                 is_from_me: false,
                 is_supported: false,
+                thread_id: None,
             };
         };
         RawMessage {
@@ -267,6 +313,7 @@ impl Update {
             text: message.text.unwrap_or_default(),
             is_from_me: false,
             is_supported: true,
+            thread_id: message.message_thread_id,
         }
     }
 }
@@ -278,6 +325,8 @@ struct TelegramMessage {
     chat: Chat,
     #[serde(default)]
     text: Option<String>,
+    #[serde(default)]
+    message_thread_id: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -390,7 +439,17 @@ mod tests {
                         "text": "group"
                     }
                 },
-                {"update_id": 103, "edited_message": {}}
+                {"update_id": 103, "edited_message": {}},
+                {
+                    "update_id": 104,
+                    "message": {
+                        "from": {"id": 7},
+                        "chat": {"id": 7, "type": "private"},
+                        "text": "in a topic",
+                        "message_thread_id": 99,
+                        "is_topic_message": true
+                    }
+                }
             ]
         })
     }
@@ -402,13 +461,16 @@ mod tests {
 
         let messages = telegram.poll(100).await.unwrap();
 
-        assert_eq!(messages.len(), 3);
+        assert_eq!(messages.len(), 4);
         assert_eq!(messages[0].row_id, 101);
         assert_eq!(messages[0].handle, "7");
         assert_eq!(messages[0].chat_identifier, "7");
         assert!(!messages[0].is_group);
+        assert_eq!(messages[0].thread_id, None);
         assert!(messages[1].is_group);
         assert!(!messages[2].is_supported);
+        assert_eq!(messages[3].thread_id, Some(99));
+        assert!(!messages[3].is_group);
     }
 
     #[tokio::test]
@@ -436,7 +498,7 @@ mod tests {
 
         let cursor = telegram.latest_cursor().await.unwrap();
 
-        assert_eq!(cursor, 103);
+        assert_eq!(cursor, 104);
         let calls = fake.calls.lock().unwrap();
         assert_eq!(calls[0].1["offset"], -1);
         assert_eq!(calls[0].1["timeout"], 0);
@@ -454,6 +516,7 @@ mod tests {
                     kind: "private".to_string(),
                 },
                 text: Some("hi".to_string()),
+                message_thread_id: None,
             }),
         }
         .into_raw();
@@ -535,6 +598,104 @@ mod tests {
                 .map(|(_, body)| body["text"].as_str().unwrap())
                 .collect::<String>(),
             text
+        );
+    }
+
+    #[tokio::test]
+    async fn topic_target_sends_message_thread_id() {
+        let fake = Arc::new(FakeTransport::with_responses(vec![
+            json!({"ok": true, "result": {}}),
+            json!({"ok": true, "result": {}}),
+            json!({"ok": true, "result": true}),
+        ]));
+        let telegram =
+            Telegram::with_transport("secret".to_string(), vec![7], vec![], fake.clone());
+
+        telegram.send_plain("7:99", "reply").await.unwrap();
+        telegram.send_rich("7:99", "reply").await.unwrap();
+        telegram.send_typing("7:99").await.unwrap();
+
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(
+            calls[0].1,
+            json!({"chat_id": "7", "message_thread_id": 99, "text": "reply"})
+        );
+        assert_eq!(
+            calls[1].1,
+            json!({
+                "chat_id": "7",
+                "message_thread_id": 99,
+                "rich_message": {"markdown": "reply"}
+            })
+        );
+        assert_eq!(
+            calls[2].1,
+            json!({"chat_id": "7", "message_thread_id": 99, "action": "typing"})
+        );
+    }
+
+    #[tokio::test]
+    async fn topic_send_retries_without_thread_id_on_thread_not_found() {
+        let fake = Arc::new(FakeTransport::with_status_responses(vec![
+            (
+                400,
+                json!({
+                    "ok": false,
+                    "error_code": 400,
+                    "description": "Bad Request: message thread not found"
+                }),
+            ),
+            (200, json!({"ok": true, "result": {}})),
+        ]));
+        let telegram =
+            Telegram::with_transport("secret".to_string(), vec![7], vec![], fake.clone());
+
+        telegram.send_plain("7:99", "reply").await.unwrap();
+
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(
+            calls.as_slice(),
+            [
+                (
+                    "sendMessage".to_string(),
+                    json!({"chat_id": "7", "message_thread_id": 99, "text": "reply"})
+                ),
+                (
+                    "sendMessage".to_string(),
+                    json!({"chat_id": "7", "text": "reply"})
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn topic_send_does_not_retry_other_400s_and_rich_still_falls_back() {
+        let fake = Arc::new(FakeTransport::with_status_responses(vec![(
+            400,
+            json!({"ok": false, "error_code": 400, "description": "Bad Request: chat not found"}),
+        )]));
+        let telegram =
+            Telegram::with_transport("secret".to_string(), vec![7], vec![], fake.clone());
+
+        let error = telegram.send_plain("7:99", "reply").await.unwrap_err();
+
+        assert!(error.to_string().contains("HTTP 400"));
+        assert_eq!(fake.calls.lock().unwrap().len(), 1);
+
+        let fake = Arc::new(FakeTransport::with_status_responses(vec![
+            (400, json!({"ok": false, "error_code": 400})),
+            (200, json!({"ok": true, "result": {}})),
+        ]));
+        let telegram =
+            Telegram::with_transport("secret".to_string(), vec![7], vec![], fake.clone());
+
+        telegram.send_rich("7:99", "reply").await.unwrap();
+
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(calls[0].0, "sendRichMessage");
+        assert_eq!(
+            calls[1].1,
+            json!({"chat_id": "7", "message_thread_id": 99, "text": "reply"})
         );
     }
 

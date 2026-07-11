@@ -18,6 +18,8 @@ pub struct RawMessage {
     pub text: String,
     pub is_from_me: bool,
     pub is_supported: bool,
+    /// Channel-specific thread/topic id (Telegram `message_thread_id`).
+    pub thread_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +91,7 @@ impl Channel {
                         text: message.text,
                         is_from_me: message.is_from_me,
                         is_supported: true,
+                        thread_id: None,
                     })
                     .collect())
             }
@@ -136,12 +139,20 @@ impl Channel {
                 }
                 None
             }
-            Self::Telegram(telegram) => telegram.is_allowed(message).then(|| {
-                (
-                    format!("telegram:dm:{}", message.chat_identifier),
-                    message.chat_identifier.clone(),
-                )
-            }),
+            Self::Telegram(telegram) => {
+                telegram
+                    .is_allowed(message)
+                    .then(|| match message.thread_id {
+                        Some(topic) => (
+                            format!("telegram:dm:{}:topic:{topic}", message.chat_identifier),
+                            format!("{}:{topic}", message.chat_identifier),
+                        ),
+                        None => (
+                            format!("telegram:dm:{}", message.chat_identifier),
+                            message.chat_identifier.clone(),
+                        ),
+                    })
+            }
         }
     }
 
@@ -261,6 +272,7 @@ mod tests {
             text: "hello".to_string(),
             is_from_me: false,
             is_supported: true,
+            thread_id: None,
         }
     }
 
@@ -274,6 +286,16 @@ mod tests {
         assert_eq!(
             telegram().accept(&telegram_message(8, 9, false)),
             Some(("telegram:dm:9".to_string(), "9".to_string()))
+        );
+    }
+
+    #[test]
+    fn telegram_topic_message_gets_its_own_thread_key_and_target() {
+        let mut message = telegram_message(7, 7, false);
+        message.thread_id = Some(99);
+        assert_eq!(
+            telegram().accept(&message),
+            Some(("telegram:dm:7:topic:99".to_string(), "7:99".to_string()))
         );
     }
 

@@ -65,15 +65,18 @@ An incoming Telegram update reaches the agent only when all of these are true:
   is in `telegram.allow_chat_ids`
 - the text is not empty
 
-Group chats, channels, forum topics, edited messages, and other update types are
-out of scope and ignored. The private-chat thread key is
-`telegram:dm:<chat_id>`. Replies are sent to that same chat id.
+Group chats, channels, group forum topics, edited messages, and other update
+types are out of scope and ignored. The private-chat thread key is
+`telegram:dm:<chat_id>`. A private-chat topic uses
+`telegram:dm:<chat_id>:topic:<topic_id>` and replies target that topic.
 
 A route with `"channel": "telegram"` selects a backend for all accepted
 Telegram messages. An exact `"thread": "telegram:dm:<chat_id>"` route takes
-priority over a channel route. The default `agent` applies when no route
-matches. iMessage keys include the `imessage:` prefix, so identical numeric or
-text identifiers cannot share Telegram session state.
+priority over a channel route and is inherited by its private-chat topics. An
+exact topic route takes priority over the parent chat route. The default
+`agent` applies when no route matches. iMessage keys include the `imessage:`
+prefix, so identical numeric or text identifiers cannot share Telegram session
+state.
 
 ## Cursor and Restart Behavior
 

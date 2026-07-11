@@ -692,6 +692,11 @@ tools = ["Read", "Grep"]
                 agent: "claude".to_string(),
             },
             config::RouteRule {
+                thread: Some("telegram:dm:7:topic:99".to_string()),
+                channel: None,
+                agent: "codex".to_string(),
+            },
+            config::RouteRule {
                 thread: Some("self:me@icloud.com".to_string()),
                 channel: None,
                 agent: "codex".to_string(),
@@ -705,6 +710,16 @@ tools = ["Read", "Grep"]
         assert_eq!(
             cfg.agent_for_message("telegram", "telegram:dm:8").unwrap(),
             config::AgentBackend::Codex
+        );
+        assert_eq!(
+            cfg.agent_for_message("telegram", "telegram:dm:7:topic:99")
+                .unwrap(),
+            config::AgentBackend::Codex
+        );
+        assert_eq!(
+            cfg.agent_for_message("telegram", "telegram:dm:7:topic:100")
+                .unwrap(),
+            config::AgentBackend::Claude
         );
         assert_eq!(
             cfg.agent_for_message("imessage", "imessage:self:me@icloud.com")
