@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -124,20 +125,24 @@ impl Gateway {
         let mut handles: Vec<JoinHandle<()>> = Vec::new();
         let mut ticker = tokio::time::interval(self.poll_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let shutdown = shutdown_signal();
+        tokio::pin!(shutdown);
         info!(
             "push gateway running, polling every {:?}",
             self.poll_interval
         );
 
         loop {
-            tokio::select! {
-                _ = shutdown_signal() => {
-                    info!("signal received, draining in-flight runs");
-                    break;
-                }
-                _ = ticker.tick() => {
-                    self.tick(&mut handles).await;
-                }
+            let poll = async {
+                ticker.tick().await;
+                self.tick(&mut handles).await;
+            };
+            if wait_for_shutdown_or(shutdown.as_mut(), poll)
+                .await
+                .is_none()
+            {
+                info!("signal received, draining in-flight runs");
+                break;
             }
         }
 
@@ -850,6 +855,17 @@ fn sanitize(s: &str) -> String {
         .collect()
 }
 
+async fn wait_for_shutdown_or<S, O>(shutdown: Pin<&mut S>, operation: O) -> Option<O::Output>
+where
+    S: Future<Output = ()> + ?Sized,
+    O: Future,
+{
+    tokio::select! {
+        _ = shutdown => None,
+        output = operation => Some(output),
+    }
+}
+
 async fn shutdown_signal() {
     use tokio::signal::unix::{signal, SignalKind};
     let mut term = match signal(SignalKind::terminate()) {
@@ -872,7 +888,7 @@ mod tests {
     use crate::channel::{normalize_handle, thread_handle};
     use crate::imessage::{Poller, Sender};
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use uuid::Uuid;
 
     #[tokio::test]
@@ -924,6 +940,44 @@ mod tests {
         .expect("stalled activity should not block the operation");
 
         assert_eq!(output, "done");
+    }
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_a_pending_poll_operation() {
+        let (send_shutdown, receive_shutdown) = tokio::sync::oneshot::channel();
+        let shutdown = async {
+            let _ = receive_shutdown.await;
+        };
+        tokio::pin!(shutdown);
+
+        let operation_dropped = Arc::new(AtomicBool::new(false));
+        let drop_flag = operation_dropped.clone();
+        let operation = async move {
+            let _drop_flag = DropFlag(drop_flag);
+            std::future::pending::<()>().await;
+        };
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            let _ = send_shutdown.send(());
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_for_shutdown_or(shutdown.as_mut(), operation),
+        )
+        .await
+        .expect("shutdown should interrupt a pending poll");
+
+        assert!(result.is_none());
+        assert!(operation_dropped.load(Ordering::SeqCst));
     }
 
     fn filter() -> Channel {
