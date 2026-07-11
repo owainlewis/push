@@ -1004,6 +1004,7 @@ mod tests {
             is_from_me: from_me,
             is_group: false,
             is_supported: true,
+            thread_id: None,
         }
     }
 
@@ -1503,6 +1504,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(assistant_dir);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn telegram_topic_gets_own_thread_and_reply_targets_the_topic() {
+        let state_path = temp_state_path();
+        let sessions_dir = temp_path("telegram-topic-sessions");
+        let assistant_dir = temp_path("telegram-topic-assistant");
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut cfg = test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        );
+        cfg.channel = "telegram".to_string();
+        cfg.self_handles.clear();
+        cfg.allow_from.clear();
+        cfg.telegram_bot_token = Some("secret".to_string());
+        cfg.telegram_allow_user_ids = vec![7];
+        let mut gateway = Gateway::new(cfg).unwrap();
+        gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+
+        let mut topic_message = telegram_message(20, 7, 7, false, "in topic");
+        topic_message.thread_id = Some(99);
+        let mut handles = Vec::new();
+        gateway
+            .tick_fake(
+                vec![topic_message, telegram_message(21, 7, 7, false, "in main")],
+                &mut handles,
+            )
+            .await;
+        gateway.queues.clear();
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        assert_eq!(calls.lock().unwrap().len(), 2);
+        assert!(calls.lock().unwrap().iter().all(|call| call.is_new));
+        let replies = gateway.ctx.sent_replies.lock().unwrap().clone();
+        assert!(replies.contains(&("7:99".to_string(), "fake reply: in topic".to_string())));
+        assert!(replies.contains(&("7".to_string(), "fake reply: in main".to_string())));
+        let events = audit_events(&format!("{state_path}.audit.jsonl"));
+        assert!(events.iter().any(|e| {
+            e.event == "message_accepted" && e.thread.as_deref() == Some("telegram:dm:7:topic:99")
+        }));
+        assert!(events.iter().any(|e| {
+            e.event == "message_accepted" && e.thread.as_deref() == Some("telegram:dm:7")
+        }));
+
+        let _ = std::fs::remove_file(&state_path);
+        let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+        let _ = std::fs::remove_dir_all(sessions_dir);
+        let _ = std::fs::remove_dir_all(assistant_dir);
+    }
+
     fn test_config(state_path: &str, sessions_dir: &str, assistant_dir: &str) -> Config {
         Config {
             channel: "imessage".to_string(),
@@ -1567,6 +1621,7 @@ mod tests {
             is_from_me,
             is_group: false,
             is_supported: true,
+            thread_id: None,
         }
     }
 
@@ -1586,6 +1641,7 @@ mod tests {
             is_from_me: false,
             is_group,
             is_supported: true,
+            thread_id: None,
         }
     }
 }

@@ -137,11 +137,18 @@ impl Config {
 
     pub fn agent_for_message(&self, channel: &str, thread: &str) -> Result<AgentBackend> {
         for route in self.routes.iter().filter(|route| route.thread.is_some()) {
-            if route.matches(channel, thread) {
+            if route.matches_thread(channel, thread) {
                 return AgentBackend::parse(&route.agent);
             }
         }
-        for route in &self.routes {
+        if let Some(parent) = telegram_parent_thread(channel, thread) {
+            for route in self.routes.iter().filter(|route| route.thread.is_some()) {
+                if route.matches_thread(channel, parent) {
+                    return AgentBackend::parse(&route.agent);
+                }
+            }
+        }
+        for route in self.routes.iter().filter(|route| route.thread.is_none()) {
             if route.matches(channel, thread) {
                 return AgentBackend::parse(&route.agent);
             }
@@ -299,11 +306,11 @@ impl RouteRule {
         self.channel.as_deref().is_none_or(|value| value == channel)
     }
 
-    fn matches(&self, channel: &str, thread: &str) -> bool {
+    fn matches_thread(&self, channel: &str, thread: &str) -> bool {
         if !self.can_match_channel(channel) {
             return false;
         }
-        self.thread.as_deref().is_none_or(|value| {
+        self.thread.as_deref().is_some_and(|value| {
             value == thread
                 || (channel == "imessage"
                     && thread
@@ -311,6 +318,21 @@ impl RouteRule {
                         .is_some_and(|legacy| legacy == value))
         })
     }
+
+    fn matches(&self, channel: &str, thread: &str) -> bool {
+        if !self.can_match_channel(channel) {
+            return false;
+        }
+        self.thread
+            .as_deref()
+            .is_none_or(|_| self.matches_thread(channel, thread))
+    }
+}
+
+fn telegram_parent_thread<'a>(channel: &str, thread: &'a str) -> Option<&'a str> {
+    (channel == "telegram")
+        .then(|| thread.rsplit_once(":topic:").map(|(parent, _)| parent))
+        .flatten()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

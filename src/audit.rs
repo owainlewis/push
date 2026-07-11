@@ -265,6 +265,7 @@ mod tests {
             text: "secret request".to_string(),
             is_from_me: false,
             is_supported: true,
+            thread_id: None,
         }
     }
 

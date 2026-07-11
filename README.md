@@ -244,7 +244,10 @@ agent = "claude"
 
 iMessage thread keys are `imessage:self:<handle>` and
 `imessage:dm:<handle>`. Telegram private-chat keys are
-`telegram:dm:<chat_id>`. Legacy unqualified iMessage route keys remain accepted.
+`telegram:dm:<chat_id>`. Private-chat topic keys append
+`:topic:<topic_id>`; topic routes inherit the parent private-chat route unless
+an exact topic route is configured. Legacy unqualified iMessage route keys
+remain accepted.
 
 push reads TOML only. Convert any earlier `config.json` file to `config.toml`
 before upgrading. The old JSON filename remains gitignored to reduce the risk
