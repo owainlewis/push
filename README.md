@@ -137,8 +137,11 @@ sessions when the selected backend has not changed.
 Telegram uses Bot API long polling, so push opens no public port and needs no
 webhook server. Private chats are supported first. Group chats, forum topics,
 and non-text updates are ignored before they can reach the agent. Replies go to
-the chat that originated the accepted message, and replies over Telegram's
-4,096-character text limit are sent as ordered Unicode-safe chunks.
+the chat that originated the accepted message. Replies up to Telegram's 32,768
+character rich-message limit use native Rich Markdown, so headings, lists,
+links, quotes, tables, and code render instead of appearing as raw Markdown.
+Larger replies fall back to ordered, Unicode-safe 4,096-character plain-text
+chunks.
 
 Use stable numeric Telegram user or chat ids in the allowlist. Usernames are
 mutable and are not accepted as security identities. Keep the bot token in the

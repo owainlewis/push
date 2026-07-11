@@ -13,10 +13,16 @@ use serde_json::{json, Value};
 use crate::channel::RawMessage;
 
 pub const TEXT_LIMIT: usize = 4096;
+pub const RICH_TEXT_LIMIT: usize = 32768;
 const LONG_POLL_SECONDS: u64 = 25;
 const HTTP_TIMEOUT_SECONDS: u64 = LONG_POLL_SECONDS + 10;
 
-type TransportFuture<'a> = Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>>;
+struct TransportResponse {
+    status: u16,
+    body: Value,
+}
+
+type TransportFuture<'a> = Pin<Box<dyn Future<Output = Result<TransportResponse>> + Send + 'a>>;
 
 trait Transport: Send + Sync {
     fn post<'a>(&'a self, token: &'a str, method: &'static str, body: Value)
@@ -44,13 +50,11 @@ impl Transport for ReqwestTransport {
                 .send()
                 .await
                 .map_err(|_| anyhow::anyhow!("Telegram {method} request failed"))?;
-            if !response.status().is_success() {
-                bail!("Telegram {method} returned HTTP {}", response.status());
-            }
-            response
-                .json()
-                .await
-                .map_err(|_| anyhow::anyhow!("Telegram {method} returned invalid JSON"))
+            let status = response.status().as_u16();
+            let body = response.json().await.map_err(|_| {
+                anyhow::anyhow!("Telegram {method} returned HTTP {status} with invalid JSON")
+            })?;
+            Ok(TransportResponse { status, body })
         })
     }
 }
@@ -106,7 +110,7 @@ impl Telegram {
     }
 
     async fn get_updates(&self, offset: i64, timeout: u64) -> Result<Vec<RawMessage>> {
-        let value = self
+        let transport_response = self
             .transport
             .post(
                 &self.token,
@@ -118,10 +122,13 @@ impl Telegram {
                 }),
             )
             .await?;
-        let response: ApiResponse<Vec<Update>> = serde_json::from_value(value)
+        let response: ApiResponse<Vec<Update>> = serde_json::from_value(transport_response.body)
             .map_err(|_| anyhow::anyhow!("Telegram getUpdates returned an invalid response"))?;
         if !response.ok {
-            bail!("Telegram getUpdates was rejected by the Bot API");
+            bail!(
+                "Telegram getUpdates returned HTTP {}",
+                transport_response.status
+            );
         }
         Ok(response
             .result
@@ -144,8 +151,43 @@ impl Telegram {
                 .is_some_and(|id| self.allow_chat_ids.contains(&id))
     }
 
-    pub async fn send(&self, target: &str, text: &str) -> Result<()> {
-        let value = self
+    pub async fn send_rich(&self, target: &str, text: &str) -> Result<()> {
+        let transport_response = self
+            .transport
+            .post(
+                &self.token,
+                "sendRichMessage",
+                json!({
+                    "chat_id": target,
+                    "rich_message": {"markdown": text}
+                }),
+            )
+            .await?;
+        let response: ApiResponse<Value> = serde_json::from_value(transport_response.body)
+            .map_err(|_| {
+                anyhow::anyhow!("Telegram sendRichMessage returned an invalid response")
+            })?;
+        if !response.ok {
+            if transport_response.status == 400 {
+                return self.send_plain_chunks(target, text).await;
+            }
+            bail!(
+                "Telegram sendRichMessage returned HTTP {}",
+                transport_response.status
+            );
+        }
+        Ok(())
+    }
+
+    async fn send_plain_chunks(&self, target: &str, text: &str) -> Result<()> {
+        for chunk in split_text(text) {
+            self.send_plain(target, &chunk).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn send_plain(&self, target: &str, text: &str) -> Result<()> {
+        let transport_response = self
             .transport
             .post(
                 &self.token,
@@ -153,10 +195,33 @@ impl Telegram {
                 json!({"chat_id": target, "text": text}),
             )
             .await?;
-        let response: ApiResponse<Value> = serde_json::from_value(value)
+        let response: ApiResponse<Value> = serde_json::from_value(transport_response.body)
             .map_err(|_| anyhow::anyhow!("Telegram sendMessage returned an invalid response"))?;
         if !response.ok {
-            bail!("Telegram sendMessage was rejected by the Bot API");
+            bail!(
+                "Telegram sendMessage returned HTTP {}",
+                transport_response.status
+            );
+        }
+        Ok(())
+    }
+
+    pub async fn send_typing(&self, target: &str) -> Result<()> {
+        let transport_response = self
+            .transport
+            .post(
+                &self.token,
+                "sendChatAction",
+                json!({"chat_id": target, "action": "typing"}),
+            )
+            .await?;
+        let response: ApiResponse<Value> = serde_json::from_value(transport_response.body)
+            .map_err(|_| anyhow::anyhow!("Telegram sendChatAction returned an invalid response"))?;
+        if !response.ok {
+            bail!(
+                "Telegram sendChatAction returned HTTP {}",
+                transport_response.status
+            );
         }
         Ok(())
     }
@@ -258,14 +323,31 @@ mod tests {
     #[derive(Default)]
     struct FakeTransport {
         calls: Mutex<Vec<(String, Value)>>,
-        responses: Mutex<VecDeque<Value>>,
+        responses: Mutex<VecDeque<TransportResponse>>,
     }
 
     impl FakeTransport {
         fn with_responses(responses: Vec<Value>) -> Self {
             Self {
                 calls: Mutex::new(Vec::new()),
-                responses: Mutex::new(responses.into()),
+                responses: Mutex::new(
+                    responses
+                        .into_iter()
+                        .map(|body| TransportResponse { status: 200, body })
+                        .collect(),
+                ),
+            }
+        }
+
+        fn with_status_responses(responses: Vec<(u16, Value)>) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                responses: Mutex::new(
+                    responses
+                        .into_iter()
+                        .map(|(status, body)| TransportResponse { status, body })
+                        .collect(),
+                ),
             }
         }
     }
@@ -406,7 +488,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_path_posts_chat_and_text_without_token_in_payload() {
+    async fn send_path_posts_rich_markdown_without_token_in_payload() {
         let fake = Arc::new(FakeTransport::with_responses(vec![json!({
             "ok": true,
             "result": {}
@@ -414,14 +496,78 @@ mod tests {
         let telegram =
             Telegram::with_transport("do-not-log".to_string(), vec![7], vec![], fake.clone());
 
-        telegram.send("7", "reply").await.unwrap();
+        telegram.send_rich("7", "reply").await.unwrap();
 
         let calls = fake.calls.lock().unwrap();
         assert_eq!(
             calls.as_slice(),
             [(
-                "sendMessage".to_string(),
-                json!({"chat_id": "7", "text": "reply"})
+                "sendRichMessage".to_string(),
+                json!({
+                    "chat_id": "7",
+                    "rich_message": {"markdown": "reply"}
+                })
+            )]
+        );
+        assert!(!calls[0].1.to_string().contains("do-not-log"));
+    }
+
+    #[tokio::test]
+    async fn rejected_rich_markdown_falls_back_to_plain_chunks() {
+        let fake = Arc::new(FakeTransport::with_status_responses(vec![
+            (400, json!({"ok": false, "error_code": 400})),
+            (200, json!({"ok": true, "result": {}})),
+            (200, json!({"ok": true, "result": {}})),
+        ]));
+        let telegram =
+            Telegram::with_transport("secret".to_string(), vec![7], vec![], fake.clone());
+        let text = format!("{}é", "x".repeat(TEXT_LIMIT));
+
+        telegram.send_rich("7", &text).await.unwrap();
+
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(calls[0].0, "sendRichMessage");
+        assert_eq!(calls[1].0, "sendMessage");
+        assert_eq!(calls[2].0, "sendMessage");
+        assert_eq!(
+            calls[1..]
+                .iter()
+                .map(|(_, body)| body["text"].as_str().unwrap())
+                .collect::<String>(),
+            text
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_preserves_http_conflict_status() {
+        let fake = Arc::new(FakeTransport::with_status_responses(vec![(
+            409,
+            json!({"ok": false, "error_code": 409}),
+        )]));
+        let telegram = Telegram::with_transport("secret".to_string(), vec![7], vec![], fake);
+
+        let error = telegram.poll(0).await.unwrap_err();
+
+        assert!(error.to_string().contains("HTTP 409"));
+    }
+
+    #[tokio::test]
+    async fn typing_path_posts_chat_action_without_token_in_payload() {
+        let fake = Arc::new(FakeTransport::with_responses(vec![json!({
+            "ok": true,
+            "result": true
+        })]));
+        let telegram =
+            Telegram::with_transport("do-not-log".to_string(), vec![7], vec![], fake.clone());
+
+        telegram.send_typing("7").await.unwrap();
+
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(
+            calls.as_slice(),
+            [(
+                "sendChatAction".to_string(),
+                json!({"chat_id": "7", "action": "typing"})
             )]
         );
         assert!(!calls[0].1.to_string().contains("do-not-log"));
@@ -438,7 +584,7 @@ mod tests {
         let text = format!("{}é", "a".repeat(TEXT_LIMIT));
 
         for chunk in split_text(&text) {
-            telegram.send("7", &chunk).await.unwrap();
+            telegram.send_plain("7", &chunk).await.unwrap();
         }
 
         let calls = fake.calls.lock().unwrap();
