@@ -96,10 +96,10 @@ Or build from source:
 ```sh
 git clone https://github.com/owainlewis/push.git
 cd push
-cp config.example.json config.json
-# edit config.json: set self_handles and choose "agent": "claude" or "codex"
+cp config.example.toml config.toml
+# edit config.toml: set self_handles and choose agent = "claude" or "codex"
 cargo build --release
-./target/release/push doctor --config config.json
+./target/release/push doctor --config config.toml
 ./target/release/push
 ```
 
@@ -142,16 +142,14 @@ the chat that originated the accepted message, and replies over Telegram's
 Use stable numeric Telegram user or chat ids in the allowlist. Usernames are
 mutable and are not accepted as security identities. Keep the bot token in the
 `TELEGRAM_BOT_TOKEN` environment variable rather than committing it to
-`config.json`:
+`config.toml`:
 
-```json
-{
-  "channel": "telegram",
-  "telegram_bot_token_env": "TELEGRAM_BOT_TOKEN",
-  "telegram_allow_user_ids": [123456789],
-  "telegram_allow_chat_ids": [],
-  "agent": "codex"
-}
+```toml
+channel = "telegram"
+telegram_bot_token_env = "TELEGRAM_BOT_TOKEN"
+telegram_allow_user_ids = [123456789]
+telegram_allow_chat_ids = []
+agent = "codex"
 ```
 
 See [Telegram Setup and Security](docs/telegram.md) for BotFather setup, finding
@@ -172,7 +170,7 @@ git push origin v0.1.0
 ```
 
 The release workflow builds with `cargo build --locked --release`, packages the
-binary with `README.md`, `LICENSE`, and `config.example.json`, uploads checksum
+binary with `README.md`, `LICENSE`, and `config.example.toml`, uploads checksum
 files, and publishes generated notes.
 
 ## Website
@@ -188,54 +186,56 @@ settings, pushes to `main` deploy the site automatically.
 
 ## Configuration
 
-```json
-{
-  "channel": "imessage",
-  "agent": "codex",
-  "routes": [
-    { "thread": "imessage:self:you@icloud.com", "agent": "codex" }
-  ],
-  "assistant": {
-    "name": "push",
-    "tone": "short, direct, and useful",
-    "business": "Describe your business or work context here.",
-    "projects": ["push"],
-    "preferences": ["Prefer concise replies."]
-  },
-  "self_handles": ["you@icloud.com", "+15551234567"],
-  "allow_from": [],
-  "telegram_bot_token": null,
-  "telegram_bot_token_env": "TELEGRAM_BOT_TOKEN",
-  "telegram_allow_user_ids": [],
-  "telegram_allow_chat_ids": [],
-  "claude_bin": "claude",
-  "claude_permission_mode": "bypassPermissions",
-  "claude_tools": null,
-  "claude_allowed_tools": [],
-  "claude_disallowed_tools": [],
-  "codex_bin": "codex",
-  "codex_sandbox": "workspace-write",
-  "codex_approval_policy": "never",
-  "audit_log_path": "~/.push/audit.jsonl",
-  "audit_log_content": false
-}
+```toml
+channel = "imessage"
+agent = "codex"
+self_handles = ["you@icloud.com", "+15551234567"]
+allow_from = []
+telegram_bot_token_env = "TELEGRAM_BOT_TOKEN"
+telegram_allow_user_ids = []
+telegram_allow_chat_ids = []
+claude_bin = "claude"
+claude_permission_mode = "bypassPermissions"
+claude_allowed_tools = []
+claude_disallowed_tools = []
+codex_bin = "codex"
+codex_sandbox = "workspace-write"
+codex_approval_policy = "never"
+audit_log_path = "~/.push/audit.jsonl"
+audit_log_content = false
+
+[[routes]]
+thread = "imessage:self:you@icloud.com"
+agent = "codex"
+
+[assistant]
+name = "push"
+tone = "short, direct, and useful"
+business = "Describe your business or work context here."
+projects = ["push"]
+preferences = ["Prefer concise replies."]
 ```
 
 `channel` can be `imessage` or `telegram`. `agent` can be `claude` or `codex`.
 Routes can override the backend by channel or exact channel-qualified thread:
 
-```json
-{
-  "routes": [
-    { "channel": "telegram", "agent": "codex" },
-    { "thread": "telegram:dm:123456789", "agent": "claude" }
-  ]
-}
+```toml
+[[routes]]
+channel = "telegram"
+agent = "codex"
+
+[[routes]]
+thread = "telegram:dm:123456789"
+agent = "claude"
 ```
 
 iMessage thread keys are `imessage:self:<handle>` and
 `imessage:dm:<handle>`. Telegram private-chat keys are
 `telegram:dm:<chat_id>`. Legacy unqualified iMessage route keys remain accepted.
+
+push reads TOML only. Convert any earlier `config.json` file to `config.toml`
+before upgrading. The old JSON filename remains gitignored to reduce the risk
+of committing a config that contains credentials.
 
 ## Safety
 

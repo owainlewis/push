@@ -29,17 +29,16 @@ export TELEGRAM_BOT_TOKEN='replace-with-the-token-from-BotFather'
 
 Use a Telegram-only config:
 
-```json
-{
-  "channel": "telegram",
-  "telegram_bot_token_env": "TELEGRAM_BOT_TOKEN",
-  "telegram_allow_user_ids": [123456789],
-  "telegram_allow_chat_ids": [],
-  "agent": "codex",
-  "routes": [
-    { "thread": "telegram:dm:123456789", "agent": "claude" }
-  ]
-}
+```toml
+channel = "telegram"
+telegram_bot_token_env = "TELEGRAM_BOT_TOKEN"
+telegram_allow_user_ids = [123456789]
+telegram_allow_chat_ids = []
+agent = "codex"
+
+[[routes]]
+thread = "telegram:dm:123456789"
+agent = "claude"
 ```
 
 `telegram_bot_token` is supported for constrained deployments, but the
@@ -47,8 +46,8 @@ environment-variable form is safer because it keeps the credential out of the
 config file. push never prints the token. Run:
 
 ```sh
-push doctor --config /absolute/path/to/config.json
-push --config /absolute/path/to/config.json
+push doctor --config /absolute/path/to/config.toml
+push --config /absolute/path/to/config.toml
 ```
 
 Doctor validates that a token is available without displaying its value. A

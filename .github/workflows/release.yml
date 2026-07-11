@@ -47,7 +47,7 @@ jobs:
 
           mkdir -p "dist/${package}"
           cp target/release/push "dist/${package}/"
-          cp README.md LICENSE config.example.json install.sh "dist/${package}/"
+          cp README.md LICENSE config.example.toml install.sh "dist/${package}/"
 
           tar -C dist -czf "dist/${package}.tar.gz" "${package}"
           shasum -a 256 "dist/${package}.tar.gz" > "dist/${package}.tar.gz.sha256"

@@ -49,7 +49,7 @@ enum Command {
 impl Args {
     fn parse(args: Vec<String>) -> Result<Self> {
         let mut command = Command::Run;
-        let mut config_path = "config.json".to_string();
+        let mut config_path = "config.toml".to_string();
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
@@ -96,7 +96,7 @@ fn doctor(config_path: &str) -> Result<()> {
                 checks: vec![Check::fail(
                     "config",
                     format!(
-                        "cannot load {config_path}: {e}. Create the file from config.example.json or fix the invalid value."
+                        "cannot load {config_path}: {e}. Create the file from config.example.toml or fix the invalid value."
                     ),
                 )],
             };
@@ -388,7 +388,7 @@ mod tests {
         let args = Args::parse(vec![
             "doctor".to_string(),
             "--config".to_string(),
-            "custom.json".to_string(),
+            "custom.toml".to_string(),
         ])
         .unwrap();
 
@@ -396,9 +396,36 @@ mod tests {
             args,
             Args {
                 command: Command::Doctor,
-                config_path: "custom.json".to_string(),
+                config_path: "custom.toml".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn defaults_to_toml_config_path() {
+        assert_eq!(
+            Args::parse(Vec::new()).unwrap(),
+            Args {
+                command: Command::Run,
+                config_path: "config.toml".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn example_toml_loads_routes_and_assistant_profile() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
+
+        let cfg = Config::load(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(cfg.channel, "imessage");
+        assert_eq!(cfg.routes.len(), 1);
+        assert_eq!(cfg.routes[0].agent, "codex");
+        assert_eq!(cfg.assistant.name, "push");
+        assert_eq!(cfg.assistant.projects, ["push"]);
+        assert_eq!(cfg.telegram_bot_token_env, "TELEGRAM_BOT_TOKEN");
+        assert!(cfg.telegram_allow_user_ids.is_empty());
+        assert!(cfg.telegram_allow_chat_ids.is_empty());
     }
 
     #[test]
@@ -417,8 +444,8 @@ mod tests {
     }
 
     #[test]
-    fn doctor_reports_invalid_json_config() {
-        let path = temp_path("invalid-json-config");
+    fn doctor_reports_invalid_toml_config() {
+        let path = temp_path("invalid-toml-config");
         std::fs::write(&path, "{").unwrap();
 
         let err = doctor(path.to_str().unwrap()).unwrap_err();
@@ -432,10 +459,9 @@ mod tests {
         let path = temp_path("invalid-value-config");
         std::fs::write(
             &path,
-            r#"{
-  "self_handles": ["me@icloud.com"],
-  "agent": "bogus"
-}"#,
+            r#"self_handles = ["me@icloud.com"]
+agent = "bogus"
+"#,
         )
         .unwrap();
 
@@ -450,10 +476,9 @@ mod tests {
         let path = temp_path("empty-claude-tool-config");
         std::fs::write(
             &path,
-            r#"{
-  "self_handles": ["me@icloud.com"],
-  "claude_allowed_tools": ["Read", " "]
-}"#,
+            r#"self_handles = ["me@icloud.com"]
+claude_allowed_tools = ["Read", " "]
+"#,
         )
         .unwrap();
 
@@ -468,10 +493,9 @@ mod tests {
         let path = temp_path("empty-claude-tools-config");
         std::fs::write(
             &path,
-            r#"{
-  "self_handles": ["me@icloud.com"],
-  "claude_tools": []
-}"#,
+            r#"self_handles = ["me@icloud.com"]
+claude_tools = []
+"#,
         )
         .unwrap();
 
@@ -486,11 +510,10 @@ mod tests {
         let path = temp_path("claude-tool-alias-config");
         std::fs::write(
             &path,
-            r#"{
-  "self_handles": ["me@icloud.com"],
-  "allowed_tools": ["Read"],
-  "disallowed_tools": ["Edit"]
-}"#,
+            r#"self_handles = ["me@icloud.com"]
+allowed_tools = ["Read"]
+disallowed_tools = ["Edit"]
+"#,
         )
         .unwrap();
 
@@ -506,10 +529,9 @@ mod tests {
         let path = temp_path("claude-tools-alias-config");
         std::fs::write(
             &path,
-            r#"{
-  "self_handles": ["me@icloud.com"],
-  "tools": ["Read", "Grep"]
-}"#,
+            r#"self_handles = ["me@icloud.com"]
+tools = ["Read", "Grep"]
+"#,
         )
         .unwrap();
 

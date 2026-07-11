@@ -1,4 +1,4 @@
-//! Gateway configuration loaded from a JSON file.
+//! Gateway configuration loaded from a TOML file.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -70,7 +70,7 @@ impl Config {
     /// Load, expand `~` in path fields, and validate the config at `path`.
     pub fn load(path: &str) -> Result<Config> {
         let raw = std::fs::read_to_string(path).with_context(|| format!("read config {path}"))?;
-        let mut c: Config = serde_json::from_str(&raw).context("parse config")?;
+        let mut c: Config = toml::from_str(&raw).context("parse TOML config")?;
         c.db_path = expand_home(&c.db_path);
         c.sessions_dir = expand_home(&c.sessions_dir);
         c.state_path = expand_home(&c.state_path);

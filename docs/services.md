@@ -13,12 +13,12 @@ own the service:
 
 ```sh
 mkdir -p ~/.config/push ~/.push
-push doctor --config /Users/YOU/.config/push/config.json
+push doctor --config /Users/YOU/.config/push/config.toml
 ```
 
 Use absolute paths in service files. The service user needs:
 
-- access to the configured `config.json`
+- access to the configured `config.toml`
 - write access to `state_path`
 - write access to `audit_log_path`
 - write access to `sessions_dir`
@@ -60,7 +60,7 @@ and replace `YOU` with your macOS user name:
   <array>
     <string>/Users/YOU/.local/bin/push</string>
     <string>--config</string>
-    <string>/Users/YOU/.config/push/config.json</string>
+    <string>/Users/YOU/.config/push/config.toml</string>
   </array>
 
   <key>WorkingDirectory</key>
@@ -125,7 +125,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/push --config %h/.config/push/config.json
+ExecStart=%h/.local/bin/push --config %h/.config/push/config.toml
 WorkingDirectory=%h/.push
 Restart=on-failure
 RestartSec=10
