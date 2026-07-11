@@ -1,7 +1,8 @@
 # push Architecture
 
-push is one local Rust process. It polls Messages, filters messages, loads the
-assistant context, runs a configured agent backend, and sends the final reply.
+push is one local Rust process. It polls iMessage or Telegram, filters messages,
+loads the assistant context, runs a configured agent backend, and sends the
+final reply.
 
 The important boundary is not iMessage or Claude. The important boundary is:
 
@@ -43,19 +44,23 @@ Those belong to the selected backend.
 
 ### 3. Polling Only
 
-push reads local message state and shells out to local commands. It opens no
-server port and accepts no inbound network connection.
+push polls channel state and shells out to local agent commands. It opens no
+server port and accepts no inbound network connection. Telegram uses outbound
+HTTPS long polling.
 
-The trust boundary is the messaging account plus the configured allowlist.
+The trust boundary is the messaging account plus the configured channel
+allowlist.
 
 ## System Overview
 
 ```mermaid
 flowchart LR
     user([You]) -->|iMessage| db[(chat.db)]
+    user -->|private chat| tg[Telegram Bot API]
     db -->|poll| push
+    tg -->|long poll| push
     subgraph push[push gateway]
-        poller[Poller] --> gateway[Gateway loop]
+        poller[Channel poller] --> gateway[Gateway loop]
         gateway --> worker[Per-thread worker]
         store[(state.json)] <--> gateway
         memory[/User.md + Memory.md/] --> worker
@@ -67,6 +72,7 @@ flowchart LR
     codex --> adapter
     adapter --> sender[Sender]
     sender -->|osascript| db
+    sender -->|sendMessage| tg
     db -->|reply| user
 ```
 
@@ -146,13 +152,17 @@ stores that id for future turns.
 
 ## State Model
 
-`state.json` stores:
+`state.json` stores channel-specific cursors and channel-qualified sessions:
 
 ```json
 {
   "last_row_id": 123,
+  "cursors": {
+    "imessage": 123,
+    "telegram": 456
+  },
   "sessions": {
-    "self:you@icloud.com": {
+    "imessage:self:you@icloud.com": {
       "uuid": "backend-session-id",
       "started": true,
       "backend": "codex"
@@ -161,7 +171,8 @@ stores that id for future turns.
 }
 ```
 
-The field is still named `uuid` for compatibility with old state files, but it
+`last_row_id` remains for compatibility with old iMessage state files. The
+field named `uuid` also remains for compatibility, but it
 now means "backend session id".
 
 If the configured backend changes for a thread, push starts a fresh backend
@@ -195,9 +206,8 @@ backend session.
 ## Security Posture
 
 An allowed inbound message can cause an agent to run tools. The sender filter is
-the trust boundary: `self_handles` and `allow_from` decide who can ask a
-backend to read files, edit files, run shell commands, call MCP servers, or use
-other backend-owned tools.
+the trust boundary. iMessage uses `self_handles` and `allow_from`; Telegram uses
+stable numeric `telegram_allow_user_ids` and `telegram_allow_chat_ids`.
 
 Backend permissions are adapter-specific:
 

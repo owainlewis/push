@@ -4,6 +4,7 @@
 
 mod agent;
 mod audit;
+mod channel;
 mod claude;
 mod codex;
 mod config;
@@ -11,6 +12,7 @@ mod gateway;
 mod imessage;
 mod memory;
 mod store;
+mod telegram;
 #[cfg(test)]
 mod test_support;
 
@@ -47,7 +49,7 @@ enum Command {
 impl Args {
     fn parse(args: Vec<String>) -> Result<Self> {
         let mut command = Command::Run;
-        let mut config_path = "config.json".to_string();
+        let mut config_path = "config.toml".to_string();
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
@@ -94,7 +96,7 @@ fn doctor(config_path: &str) -> Result<()> {
                 checks: vec![Check::fail(
                     "config",
                     format!(
-                        "cannot load {config_path}: {e}. Create the file from config.example.json or fix the invalid value."
+                        "cannot load {config_path}: {e}. Create the file from config.toml.example or fix the invalid value."
                     ),
                 )],
             };
@@ -117,7 +119,11 @@ fn run_checks(cfg: &config::Config) -> CheckReport {
     check_state_dir(cfg, &mut checks);
     check_sessions_dir(cfg, &mut checks);
     check_audit_log_dir(cfg, &mut checks);
-    check_imessage_db(cfg, &mut checks);
+    match cfg.channel_kind() {
+        Ok(config::ChannelKind::IMessage) => check_imessage_db(cfg, &mut checks),
+        Ok(config::ChannelKind::Telegram) => check_telegram_config(cfg, &mut checks),
+        Err(e) => checks.push(Check::fail("channel", e.to_string())),
+    }
     check_bins(cfg, &mut checks);
     CheckReport { checks }
 }
@@ -126,10 +132,13 @@ fn check_config(cfg: &config::Config, checks: &mut Vec<Check>) {
     checks.push(Check::pass(
         "config",
         format!(
-            "agent={}, self_handles={}, allow_from={}",
+            "channel={}, agent={}, self_handles={}, allow_from={}, telegram_allow_user_ids={}, telegram_allow_chat_ids={}",
+            cfg.channel,
             cfg.agent,
             cfg.self_handles.len(),
-            cfg.allow_from.len()
+            cfg.allow_from.len(),
+            cfg.telegram_allow_user_ids.len(),
+            cfg.telegram_allow_chat_ids.len()
         ),
     ));
 }
@@ -226,6 +235,23 @@ fn check_imessage_db(cfg: &config::Config, checks: &mut Vec<Check>) {
     }
 }
 
+fn check_telegram_config(cfg: &config::Config, checks: &mut Vec<Check>) {
+    if cfg.telegram_token().is_some() {
+        checks.push(Check::pass(
+            "Telegram bot token",
+            format!("loaded from config or {}", cfg.telegram_bot_token_env),
+        ));
+    } else {
+        checks.push(Check::fail(
+            "Telegram bot token",
+            format!(
+                "not configured. Set {} or telegram_bot_token without printing the token.",
+                cfg.telegram_bot_token_env
+            ),
+        ));
+    }
+}
+
 fn ensure_writable_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let probe = dir.join(format!(".push-doctor-write-test-{}", std::process::id()));
@@ -250,7 +276,9 @@ fn check_bins_with(
             return;
         }
     };
-    bins.push("osascript");
+    if matches!(cfg.channel_kind(), Ok(config::ChannelKind::IMessage)) {
+        bins.push("osascript");
+    }
     bins.sort_unstable();
     bins.dedup();
     for bin in bins {
@@ -360,7 +388,7 @@ mod tests {
         let args = Args::parse(vec![
             "doctor".to_string(),
             "--config".to_string(),
-            "custom.json".to_string(),
+            "custom.toml".to_string(),
         ])
         .unwrap();
 
@@ -368,9 +396,36 @@ mod tests {
             args,
             Args {
                 command: Command::Doctor,
-                config_path: "custom.json".to_string(),
+                config_path: "custom.toml".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn defaults_to_toml_config_path() {
+        assert_eq!(
+            Args::parse(Vec::new()).unwrap(),
+            Args {
+                command: Command::Run,
+                config_path: "config.toml".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn example_toml_loads_routes_and_assistant_profile() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.toml.example");
+
+        let cfg = Config::load(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(cfg.channel, "imessage");
+        assert_eq!(cfg.routes.len(), 1);
+        assert_eq!(cfg.routes[0].agent, "codex");
+        assert_eq!(cfg.assistant.name, "push");
+        assert_eq!(cfg.assistant.projects, ["push"]);
+        assert_eq!(cfg.telegram_bot_token_env, "TELEGRAM_BOT_TOKEN");
+        assert!(cfg.telegram_allow_user_ids.is_empty());
+        assert!(cfg.telegram_allow_chat_ids.is_empty());
     }
 
     #[test]
@@ -389,8 +444,8 @@ mod tests {
     }
 
     #[test]
-    fn doctor_reports_invalid_json_config() {
-        let path = temp_path("invalid-json-config");
+    fn doctor_reports_invalid_toml_config() {
+        let path = temp_path("invalid-toml-config");
         std::fs::write(&path, "{").unwrap();
 
         let err = doctor(path.to_str().unwrap()).unwrap_err();
@@ -404,10 +459,9 @@ mod tests {
         let path = temp_path("invalid-value-config");
         std::fs::write(
             &path,
-            r#"{
-  "self_handles": ["me@icloud.com"],
-  "agent": "bogus"
-}"#,
+            r#"self_handles = ["me@icloud.com"]
+agent = "bogus"
+"#,
         )
         .unwrap();
 
@@ -422,10 +476,9 @@ mod tests {
         let path = temp_path("empty-claude-tool-config");
         std::fs::write(
             &path,
-            r#"{
-  "self_handles": ["me@icloud.com"],
-  "claude_allowed_tools": ["Read", " "]
-}"#,
+            r#"self_handles = ["me@icloud.com"]
+claude_allowed_tools = ["Read", " "]
+"#,
         )
         .unwrap();
 
@@ -440,10 +493,9 @@ mod tests {
         let path = temp_path("empty-claude-tools-config");
         std::fs::write(
             &path,
-            r#"{
-  "self_handles": ["me@icloud.com"],
-  "claude_tools": []
-}"#,
+            r#"self_handles = ["me@icloud.com"]
+claude_tools = []
+"#,
         )
         .unwrap();
 
@@ -458,11 +510,10 @@ mod tests {
         let path = temp_path("claude-tool-alias-config");
         std::fs::write(
             &path,
-            r#"{
-  "self_handles": ["me@icloud.com"],
-  "allowed_tools": ["Read"],
-  "disallowed_tools": ["Edit"]
-}"#,
+            r#"self_handles = ["me@icloud.com"]
+allowed_tools = ["Read"]
+disallowed_tools = ["Edit"]
+"#,
         )
         .unwrap();
 
@@ -478,10 +529,9 @@ mod tests {
         let path = temp_path("claude-tools-alias-config");
         std::fs::write(
             &path,
-            r#"{
-  "self_handles": ["me@icloud.com"],
-  "tools": ["Read", "Grep"]
-}"#,
+            r#"self_handles = ["me@icloud.com"]
+tools = ["Read", "Grep"]
+"#,
         )
         .unwrap();
 
@@ -509,6 +559,88 @@ mod tests {
         assert!(checks.iter().any(|check| {
             check.name == "binary osascript" && matches!(check.status, CheckStatus::Fail)
         }));
+    }
+
+    #[test]
+    fn telegram_binary_checks_do_not_require_osascript() {
+        let mut cfg = test_config();
+        cfg.channel = "telegram".to_string();
+        cfg.self_handles.clear();
+        cfg.telegram_bot_token = Some("secret".to_string());
+        cfg.telegram_allow_user_ids = vec![7];
+        cfg.routes = vec![config::RouteRule {
+            thread: None,
+            channel: Some("imessage".to_string()),
+            agent: "claude".to_string(),
+        }];
+        let mut checks = Vec::new();
+
+        check_bins_with(&cfg, &mut checks, |bin| {
+            (bin == "/fake/codex").then(|| PathBuf::from(bin))
+        });
+
+        assert!(checks.iter().any(|check| {
+            check.name == "binary /fake/codex" && matches!(check.status, CheckStatus::Pass)
+        }));
+        assert!(!checks
+            .iter()
+            .any(|check| check.name == "binary /fake/claude"));
+        assert!(!checks.iter().any(|check| check.name.contains("osascript")));
+    }
+
+    #[test]
+    fn telegram_preflight_checks_token_without_imessage_database() {
+        let mut cfg = test_config();
+        cfg.channel = "telegram".to_string();
+        cfg.self_handles.clear();
+        cfg.telegram_bot_token = Some("secret".to_string());
+        cfg.telegram_allow_user_ids = vec![7];
+        let mut checks = Vec::new();
+
+        check_telegram_config(&cfg, &mut checks);
+
+        assert!(checks.iter().any(|check| {
+            check.name == "Telegram bot token" && matches!(check.status, CheckStatus::Pass)
+        }));
+        assert!(!checks.iter().any(|check| check.name == "iMessage database"));
+        assert!(!format!("{:?}", checks[0].message).contains("secret"));
+    }
+
+    #[test]
+    fn routes_support_channel_override_exact_thread_and_legacy_imessage_key() {
+        let mut cfg = test_config();
+        cfg.agent = "claude".to_string();
+        cfg.routes = vec![
+            config::RouteRule {
+                thread: None,
+                channel: Some("telegram".to_string()),
+                agent: "codex".to_string(),
+            },
+            config::RouteRule {
+                thread: Some("telegram:dm:7".to_string()),
+                channel: None,
+                agent: "claude".to_string(),
+            },
+            config::RouteRule {
+                thread: Some("self:me@icloud.com".to_string()),
+                channel: None,
+                agent: "codex".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            cfg.agent_for_message("telegram", "telegram:dm:7").unwrap(),
+            config::AgentBackend::Claude
+        );
+        assert_eq!(
+            cfg.agent_for_message("telegram", "telegram:dm:8").unwrap(),
+            config::AgentBackend::Codex
+        );
+        assert_eq!(
+            cfg.agent_for_message("imessage", "imessage:self:me@icloud.com")
+                .unwrap(),
+            config::AgentBackend::Codex
+        );
     }
 
     #[test]
@@ -563,11 +695,16 @@ mod tests {
 
     fn test_config() -> Config {
         Config {
+            channel: "imessage".to_string(),
             db_path: "/fake/chat.db".to_string(),
             poll_interval: "1s".to_string(),
             run_timeout: "1s".to_string(),
             self_handles: vec!["me@icloud.com".to_string()],
             allow_from: Vec::new(),
+            telegram_bot_token: None,
+            telegram_bot_token_env: "TELEGRAM_BOT_TOKEN".to_string(),
+            telegram_allow_user_ids: Vec::new(),
+            telegram_allow_chat_ids: Vec::new(),
             agent: "codex".to_string(),
             routes: Vec::new(),
             assistant: AssistantProfile::default(),

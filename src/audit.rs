@@ -7,13 +7,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::channel::RawMessage;
 use crate::config::AgentBackend;
-use crate::imessage::Message;
 
 #[derive(Clone)]
 pub struct AuditLog {
     path: String,
     include_content: bool,
+    channel: String,
     lock: Arc<Mutex<()>>,
 }
 
@@ -59,10 +60,11 @@ pub struct AuditContent {
 }
 
 impl AuditLog {
-    pub fn new(path: String, include_content: bool) -> Self {
+    pub fn new(path: String, include_content: bool, channel: &str) -> Self {
         Self {
             path,
             include_content,
+            channel: channel.to_string(),
             lock: Arc::new(Mutex::new(())),
         }
     }
@@ -84,12 +86,12 @@ impl AuditLog {
         Ok(())
     }
 
-    pub fn inbound(&self, msg: &Message) -> AuditEvent {
+    pub fn inbound(&self, msg: &RawMessage) -> AuditEvent {
         AuditEvent {
             ts_ms: now_ms(),
             event: "message_inbound".to_string(),
             row_id: Some(msg.row_id),
-            channel: Some("imessage".to_string()),
+            channel: Some(msg.channel.to_string()),
             thread: None,
             backend: None,
             reason: None,
@@ -105,14 +107,14 @@ impl AuditLog {
         }
     }
 
-    pub fn ignored(&self, msg: &Message, reason: impl Into<String>) -> AuditEvent {
+    pub fn ignored(&self, msg: &RawMessage, reason: impl Into<String>) -> AuditEvent {
         let mut event = self.inbound(msg);
         event.event = "message_ignored".to_string();
         event.reason = Some(reason.into());
         event
     }
 
-    pub fn accepted(&self, msg: &Message, thread: &str, backend: AgentBackend) -> AuditEvent {
+    pub fn accepted(&self, msg: &RawMessage, thread: &str, backend: AgentBackend) -> AuditEvent {
         let mut event = self.inbound(msg);
         event.event = "message_accepted".to_string();
         event.thread = Some(thread.to_string());
@@ -127,7 +129,7 @@ impl AuditLog {
         backend: AgentBackend,
         is_new_session: bool,
     ) -> AuditEvent {
-        AuditEvent::base(
+        self.base(
             "backend_run_started",
             Some(row_id),
             Some(thread),
@@ -143,7 +145,7 @@ impl AuditLog {
         backend: AgentBackend,
         reply: &str,
     ) -> AuditEvent {
-        let mut event = AuditEvent::base(
+        let mut event = self.base(
             "backend_run_completed",
             Some(row_id),
             Some(thread),
@@ -161,7 +163,7 @@ impl AuditLog {
         backend: Option<AgentBackend>,
         error: impl Into<String>,
     ) -> AuditEvent {
-        let mut event = AuditEvent::base(event_name, Some(row_id), Some(thread), backend);
+        let mut event = self.base(event_name, Some(row_id), Some(thread), backend);
         event.error = Some(error.into());
         event
     }
@@ -174,7 +176,7 @@ impl AuditLog {
         backend: Option<AgentBackend>,
         reply: &str,
     ) -> AuditEvent {
-        let mut event = AuditEvent::base("reply_sent", Some(row_id), Some(thread), backend);
+        let mut event = self.base("reply_sent", Some(row_id), Some(thread), backend);
         event.target = Some(target.to_string());
         event.reply = Some(content(reply, self.include_content));
         event
@@ -188,31 +190,29 @@ impl AuditLog {
         backend: Option<AgentBackend>,
         error: impl Into<String>,
     ) -> AuditEvent {
-        let mut event = AuditEvent::base("reply_failed", Some(row_id), Some(thread), backend);
+        let mut event = self.base("reply_failed", Some(row_id), Some(thread), backend);
         event.target = Some(target.to_string());
         event.error = Some(error.into());
         event
     }
 
     pub fn completed(&self, row_id: i64, reason: impl Into<String>) -> AuditEvent {
-        let mut event = AuditEvent::base("message_completed", Some(row_id), None, None);
+        let mut event = self.base("message_completed", Some(row_id), None, None);
         event.reason = Some(reason.into());
         event
     }
-}
-
-impl AuditEvent {
     fn base(
+        &self,
         event: &'static str,
         row_id: Option<i64>,
         thread: Option<&str>,
         backend: Option<AgentBackend>,
-    ) -> Self {
-        Self {
+    ) -> AuditEvent {
+        AuditEvent {
             ts_ms: now_ms(),
             event: event.to_string(),
             row_id,
-            channel: Some("imessage".to_string()),
+            channel: Some(self.channel.clone()),
             thread: thread.map(str::to_string),
             backend: backend.map(|b| b.as_str().to_string()),
             reason: None,
@@ -227,7 +227,9 @@ impl AuditEvent {
             error: None,
         }
     }
+}
 
+impl AuditEvent {
     fn with_new_session(mut self, is_new_session: bool) -> Self {
         self.is_new_session = Some(is_new_session);
         self
@@ -253,20 +255,22 @@ mod tests {
     use super::*;
     use crate::test_support::temp_path;
 
-    fn msg() -> Message {
-        Message {
+    fn msg() -> RawMessage {
+        RawMessage {
             row_id: 42,
+            channel: "imessage",
             handle: "+15551234567".to_string(),
             chat_identifier: "+15551234567".to_string(),
             is_group: false,
             text: "secret request".to_string(),
             is_from_me: false,
+            is_supported: true,
         }
     }
 
     #[test]
     fn accepted_event_redacts_content_by_default() {
-        let audit = AuditLog::new("audit.jsonl".to_string(), false);
+        let audit = AuditLog::new("audit.jsonl".to_string(), false, "imessage");
 
         let event = audit.accepted(&msg(), "dm:+15551234567", AgentBackend::Claude);
 
@@ -278,7 +282,7 @@ mod tests {
 
     #[test]
     fn content_logging_is_opt_in() {
-        let audit = AuditLog::new("audit.jsonl".to_string(), true);
+        let audit = AuditLog::new("audit.jsonl".to_string(), true, "imessage");
 
         let event = audit.ignored(&msg(), "not_allowlisted");
 
@@ -292,7 +296,7 @@ mod tests {
 
     #[test]
     fn failed_and_completed_events_include_debug_context() {
-        let audit = AuditLog::new("audit.jsonl".to_string(), false);
+        let audit = AuditLog::new("audit.jsonl".to_string(), false, "imessage");
 
         let failed = audit.failed(
             "backend_run_failed",
@@ -311,7 +315,7 @@ mod tests {
 
     #[test]
     fn reply_failures_include_backend_context_when_known() {
-        let audit = AuditLog::new("audit.jsonl".to_string(), false);
+        let audit = AuditLog::new("audit.jsonl".to_string(), false, "imessage");
 
         let failed = audit.reply_failed(
             42,
@@ -330,7 +334,7 @@ mod tests {
     #[test]
     fn writes_jsonl_events() {
         let path = temp_path("audit-jsonl");
-        let audit = AuditLog::new(path.to_string_lossy().to_string(), false);
+        let audit = AuditLog::new(path.to_string_lossy().to_string(), false, "imessage");
 
         audit.record(audit.completed(42, "completed")).unwrap();
 

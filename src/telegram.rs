@@ -1,0 +1,454 @@
+//! Telegram Bot API client using outbound-only long polling.
+
+use std::collections::HashSet;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{bail, Result};
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+use crate::channel::RawMessage;
+
+pub const TEXT_LIMIT: usize = 4096;
+const LONG_POLL_SECONDS: u64 = 25;
+const HTTP_TIMEOUT_SECONDS: u64 = LONG_POLL_SECONDS + 10;
+
+type TransportFuture<'a> = Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>>;
+
+trait Transport: Send + Sync {
+    fn post<'a>(&'a self, token: &'a str, method: &'static str, body: Value)
+        -> TransportFuture<'a>;
+}
+
+struct ReqwestTransport {
+    client: reqwest::Client,
+}
+
+impl Transport for ReqwestTransport {
+    fn post<'a>(
+        &'a self,
+        token: &'a str,
+        method: &'static str,
+        body: Value,
+    ) -> TransportFuture<'a> {
+        Box::pin(async move {
+            let url = format!("https://api.telegram.org/bot{token}/{method}");
+            let response = self
+                .client
+                .post(url)
+                .timeout(Duration::from_secs(HTTP_TIMEOUT_SECONDS))
+                .json(&body)
+                .send()
+                .await
+                .map_err(|_| anyhow::anyhow!("Telegram {method} request failed"))?;
+            if !response.status().is_success() {
+                bail!("Telegram {method} returned HTTP {}", response.status());
+            }
+            response
+                .json()
+                .await
+                .map_err(|_| anyhow::anyhow!("Telegram {method} returned invalid JSON"))
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct Telegram {
+    token: Arc<str>,
+    allow_user_ids: Arc<HashSet<i64>>,
+    allow_chat_ids: Arc<HashSet<i64>>,
+    transport: Arc<dyn Transport>,
+}
+
+impl Telegram {
+    pub fn new(token: String, allow_user_ids: Vec<i64>, allow_chat_ids: Vec<i64>) -> Self {
+        Self {
+            token: Arc::from(token),
+            allow_user_ids: Arc::new(allow_user_ids.into_iter().collect()),
+            allow_chat_ids: Arc::new(allow_chat_ids.into_iter().collect()),
+            transport: Arc::new(ReqwestTransport {
+                client: reqwest::Client::new(),
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_transport(
+        token: String,
+        allow_user_ids: Vec<i64>,
+        allow_chat_ids: Vec<i64>,
+        transport: Arc<dyn Transport>,
+    ) -> Self {
+        Self {
+            token: Arc::from(token),
+            allow_user_ids: Arc::new(allow_user_ids.into_iter().collect()),
+            allow_chat_ids: Arc::new(allow_chat_ids.into_iter().collect()),
+            transport,
+        }
+    }
+
+    pub async fn poll(&self, since: i64) -> Result<Vec<RawMessage>> {
+        self.get_updates(since.saturating_add(1), LONG_POLL_SECONDS)
+            .await
+    }
+
+    pub async fn latest_cursor(&self) -> Result<i64> {
+        Ok(self
+            .get_updates(-1, 0)
+            .await?
+            .into_iter()
+            .map(|message| message.row_id)
+            .max()
+            .unwrap_or_default())
+    }
+
+    async fn get_updates(&self, offset: i64, timeout: u64) -> Result<Vec<RawMessage>> {
+        let value = self
+            .transport
+            .post(
+                &self.token,
+                "getUpdates",
+                json!({
+                    "offset": offset,
+                    "timeout": timeout,
+                    "allowed_updates": ["message"]
+                }),
+            )
+            .await?;
+        let response: ApiResponse<Vec<Update>> = serde_json::from_value(value)
+            .map_err(|_| anyhow::anyhow!("Telegram getUpdates returned an invalid response"))?;
+        if !response.ok {
+            bail!("Telegram getUpdates was rejected by the Bot API");
+        }
+        Ok(response
+            .result
+            .unwrap_or_default()
+            .into_iter()
+            .map(Update::into_raw)
+            .collect())
+    }
+
+    pub fn is_allowed(&self, message: &RawMessage) -> bool {
+        message
+            .handle
+            .parse::<i64>()
+            .ok()
+            .is_some_and(|id| self.allow_user_ids.contains(&id))
+            || message
+                .chat_identifier
+                .parse::<i64>()
+                .ok()
+                .is_some_and(|id| self.allow_chat_ids.contains(&id))
+    }
+
+    pub async fn send(&self, target: &str, text: &str) -> Result<()> {
+        let value = self
+            .transport
+            .post(
+                &self.token,
+                "sendMessage",
+                json!({"chat_id": target, "text": text}),
+            )
+            .await?;
+        let response: ApiResponse<Value> = serde_json::from_value(value)
+            .map_err(|_| anyhow::anyhow!("Telegram sendMessage returned an invalid response"))?;
+        if !response.ok {
+            bail!("Telegram sendMessage was rejected by the Bot API");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+struct ApiResponse<T> {
+    ok: bool,
+    #[serde(default)]
+    result: Option<T>,
+}
+
+#[derive(Deserialize)]
+struct Update {
+    update_id: i64,
+    #[serde(default)]
+    message: Option<TelegramMessage>,
+}
+
+impl Update {
+    fn into_raw(self) -> RawMessage {
+        let Some(message) = self.message else {
+            return RawMessage {
+                row_id: self.update_id,
+                channel: "telegram",
+                handle: String::new(),
+                chat_identifier: String::new(),
+                is_group: false,
+                text: String::new(),
+                is_from_me: false,
+                is_supported: false,
+            };
+        };
+        RawMessage {
+            row_id: self.update_id,
+            channel: "telegram",
+            handle: message
+                .from
+                .map(|sender| sender.id.to_string())
+                .unwrap_or_default(),
+            chat_identifier: message.chat.id.to_string(),
+            is_group: message.chat.kind != "private",
+            text: message.text.unwrap_or_default(),
+            is_from_me: false,
+            is_supported: true,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct TelegramMessage {
+    #[serde(default)]
+    from: Option<User>,
+    chat: Chat,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct User {
+    id: i64,
+}
+
+#[derive(Deserialize)]
+struct Chat {
+    id: i64,
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+pub fn split_text(text: &str) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0;
+    for character in text.chars() {
+        let character_len = character.len_utf16();
+        if current_len + character_len > TEXT_LIMIT && !current.is_empty() {
+            chunks.push(std::mem::take(&mut current));
+            current_len = 0;
+        }
+        current.push(character);
+        current_len += character_len;
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct FakeTransport {
+        calls: Mutex<Vec<(String, Value)>>,
+        responses: Mutex<VecDeque<Value>>,
+    }
+
+    impl FakeTransport {
+        fn with_responses(responses: Vec<Value>) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                responses: Mutex::new(responses.into()),
+            }
+        }
+    }
+
+    impl Transport for FakeTransport {
+        fn post<'a>(
+            &'a self,
+            _token: &'a str,
+            method: &'static str,
+            body: Value,
+        ) -> TransportFuture<'a> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push((method.to_string(), body));
+                self.responses
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .ok_or_else(|| anyhow::anyhow!("missing fake response"))
+            })
+        }
+    }
+
+    fn updates() -> Value {
+        json!({
+            "ok": true,
+            "result": [
+                {
+                    "update_id": 101,
+                    "message": {
+                        "from": {"id": 7},
+                        "chat": {"id": 7, "type": "private"},
+                        "text": "hello"
+                    }
+                },
+                {
+                    "update_id": 102,
+                    "message": {
+                        "from": {"id": 8},
+                        "chat": {"id": -10, "type": "group"},
+                        "text": "group"
+                    }
+                },
+                {"update_id": 103, "edited_message": {}}
+            ]
+        })
+    }
+
+    #[tokio::test]
+    async fn parses_private_group_and_unsupported_updates() {
+        let fake = Arc::new(FakeTransport::with_responses(vec![updates()]));
+        let telegram = Telegram::with_transport("secret".to_string(), vec![7], vec![], fake);
+
+        let messages = telegram.poll(100).await.unwrap();
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].row_id, 101);
+        assert_eq!(messages[0].handle, "7");
+        assert_eq!(messages[0].chat_identifier, "7");
+        assert!(!messages[0].is_group);
+        assert!(messages[1].is_group);
+        assert!(!messages[2].is_supported);
+    }
+
+    #[tokio::test]
+    async fn poll_uses_next_update_offset_and_long_poll_timeout() {
+        let fake = Arc::new(FakeTransport::with_responses(vec![json!({
+            "ok": true,
+            "result": []
+        })]));
+        let telegram =
+            Telegram::with_transport("secret".to_string(), vec![7], vec![], fake.clone());
+
+        telegram.poll(41).await.unwrap();
+
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(calls[0].0, "getUpdates");
+        assert_eq!(calls[0].1["offset"], 42);
+        assert_eq!(calls[0].1["timeout"], LONG_POLL_SECONDS);
+    }
+
+    #[tokio::test]
+    async fn first_run_cursor_discards_pending_updates_with_negative_offset() {
+        let fake = Arc::new(FakeTransport::with_responses(vec![updates()]));
+        let telegram =
+            Telegram::with_transport("secret".to_string(), vec![7], vec![], fake.clone());
+
+        let cursor = telegram.latest_cursor().await.unwrap();
+
+        assert_eq!(cursor, 103);
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(calls[0].1["offset"], -1);
+        assert_eq!(calls[0].1["timeout"], 0);
+    }
+
+    #[test]
+    fn allowlist_accepts_user_or_chat_id() {
+        let telegram = Telegram::new("secret".to_string(), vec![7], vec![9]);
+        let mut message = Update {
+            update_id: 1,
+            message: Some(TelegramMessage {
+                from: Some(User { id: 7 }),
+                chat: Chat {
+                    id: 7,
+                    kind: "private".to_string(),
+                },
+                text: Some("hi".to_string()),
+            }),
+        }
+        .into_raw();
+        assert!(telegram.is_allowed(&message));
+        message.handle = "8".to_string();
+        message.chat_identifier = "9".to_string();
+        assert!(telegram.is_allowed(&message));
+        message.chat_identifier = "10".to_string();
+        assert!(!telegram.is_allowed(&message));
+    }
+
+    #[test]
+    fn splits_exact_over_limit_multi_chunk_and_unicode_text() {
+        assert_eq!(split_text(&"a".repeat(TEXT_LIMIT)).len(), 1);
+        let over = split_text(&format!("{}é", "a".repeat(TEXT_LIMIT)));
+        assert_eq!(over.len(), 2);
+        assert_eq!(over[1], "é");
+        let multi = split_text(&"x".repeat(TEXT_LIMIT * 2 + 1));
+        assert_eq!(
+            multi
+                .iter()
+                .map(|chunk| chunk.encode_utf16().count())
+                .collect::<Vec<_>>(),
+            vec![TEXT_LIMIT, TEXT_LIMIT, 1]
+        );
+        let emoji = split_text(&"😀".repeat(TEXT_LIMIT / 2 + 1));
+        assert_eq!(emoji.len(), 2);
+        assert!(emoji
+            .iter()
+            .all(|chunk| chunk.encode_utf16().count() <= TEXT_LIMIT));
+        assert!(split_text("").is_empty());
+    }
+
+    #[tokio::test]
+    async fn send_path_posts_chat_and_text_without_token_in_payload() {
+        let fake = Arc::new(FakeTransport::with_responses(vec![json!({
+            "ok": true,
+            "result": {}
+        })]));
+        let telegram =
+            Telegram::with_transport("do-not-log".to_string(), vec![7], vec![], fake.clone());
+
+        telegram.send("7", "reply").await.unwrap();
+
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(
+            calls.as_slice(),
+            [(
+                "sendMessage".to_string(),
+                json!({"chat_id": "7", "text": "reply"})
+            )]
+        );
+        assert!(!calls[0].1.to_string().contains("do-not-log"));
+    }
+
+    #[tokio::test]
+    async fn long_reply_send_path_preserves_chunk_order_and_limits() {
+        let fake = Arc::new(FakeTransport::with_responses(vec![
+            json!({"ok": true, "result": {}}),
+            json!({"ok": true, "result": {}}),
+        ]));
+        let telegram =
+            Telegram::with_transport("secret".to_string(), vec![7], vec![], fake.clone());
+        let text = format!("{}é", "a".repeat(TEXT_LIMIT));
+
+        for chunk in split_text(&text) {
+            telegram.send("7", &chunk).await.unwrap();
+        }
+
+        let calls = fake.calls.lock().unwrap();
+        let sent: Vec<String> = calls
+            .iter()
+            .map(|(_, body)| body["text"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(sent, vec!["a".repeat(TEXT_LIMIT), "é".to_string()]);
+        assert!(sent
+            .iter()
+            .all(|chunk| chunk.encode_utf16().count() <= TEXT_LIMIT));
+    }
+}

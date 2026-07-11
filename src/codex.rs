@@ -1,6 +1,7 @@
 //! Runs the Codex CLI headlessly for a single message.
 
 use std::path::Path;
+use std::pin::Pin;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -67,7 +68,7 @@ impl Runner {
         cmd.current_dir(req.work_dir);
         cmd.kill_on_drop(true);
 
-        let out = match tokio::time::timeout(timeout, cmd.output()).await {
+        let out = match tokio::time::timeout(timeout, output_with_retry(&mut cmd)).await {
             Err(_) => return Err(RunError::Timeout),
             Ok(Err(e)) => return Err(RunError::Failed(format!("spawn codex: {e}"))),
             Ok(Ok(o)) => o,
@@ -105,6 +106,41 @@ impl Runner {
             reply: reply.trim().to_string(),
             session_id,
         })
+    }
+}
+
+async fn output_with_retry(cmd: &mut Command) -> std::io::Result<std::process::Output> {
+    output_with_retry_inner(cmd).await
+}
+
+type OutputFuture<'a> =
+    Pin<Box<dyn std::future::Future<Output = std::io::Result<std::process::Output>> + Send + 'a>>;
+
+trait CommandOutput {
+    fn output(&mut self) -> OutputFuture<'_>;
+}
+
+impl CommandOutput for Command {
+    fn output(&mut self) -> OutputFuture<'_> {
+        Box::pin(Command::output(self))
+    }
+}
+
+/// Linux can briefly report ETXTBSY when an executable was just installed or
+/// replaced. Retry only that transient spawn error, within the caller's overall
+/// timeout, and preserve every other error unchanged.
+async fn output_with_retry_inner(
+    command: &mut impl CommandOutput,
+) -> std::io::Result<std::process::Output> {
+    let mut attempts = 0;
+    loop {
+        match command.output().await {
+            Err(error) if error.raw_os_error() == Some(26) && attempts < 3 => {
+                attempts += 1;
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            result => return result,
+        }
     }
 }
 
@@ -149,6 +185,9 @@ fn agent_message_from_line(line: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::os::unix::process::ExitStatusExt;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use crate::agent::Request;
@@ -188,6 +227,75 @@ mod tests {
             r#"{"type":"item.completed","item":{"type":"agent_message","text":"two"}}"#
         );
         assert_eq!(last_agent_message_from_jsonl(s), Some("two".to_string()));
+    }
+
+    struct FakeCommand {
+        outputs: VecDeque<std::io::Result<std::process::Output>>,
+        calls: Arc<Mutex<usize>>,
+    }
+
+    impl CommandOutput for FakeCommand {
+        fn output(&mut self) -> OutputFuture<'_> {
+            *self.calls.lock().unwrap() += 1;
+            let result = self.outputs.pop_front().expect("fake output");
+            Box::pin(std::future::ready(result))
+        }
+    }
+
+    fn successful_output() -> std::process::Output {
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_text_file_busy_then_succeeds() {
+        let calls = Arc::new(Mutex::new(0));
+        let mut command = FakeCommand {
+            outputs: [
+                Err(std::io::Error::from_raw_os_error(26)),
+                Err(std::io::Error::from_raw_os_error(26)),
+                Ok(successful_output()),
+            ]
+            .into(),
+            calls: calls.clone(),
+        };
+
+        output_with_retry_inner(&mut command).await.unwrap();
+
+        assert_eq!(*calls.lock().unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn stops_after_three_text_file_busy_retries() {
+        let calls = Arc::new(Mutex::new(0));
+        let mut command = FakeCommand {
+            outputs: (0..4)
+                .map(|_| Err(std::io::Error::from_raw_os_error(26)))
+                .collect(),
+            calls: calls.clone(),
+        };
+
+        let error = output_with_retry_inner(&mut command).await.unwrap_err();
+
+        assert_eq!(error.raw_os_error(), Some(26));
+        assert_eq!(*calls.lock().unwrap(), 4);
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_other_spawn_errors() {
+        let calls = Arc::new(Mutex::new(0));
+        let mut command = FakeCommand {
+            outputs: [Err(std::io::Error::from_raw_os_error(2))].into(),
+            calls: calls.clone(),
+        };
+
+        let error = output_with_retry_inner(&mut command).await.unwrap_err();
+
+        assert_eq!(error.raw_os_error(), Some(2));
+        assert_eq!(*calls.lock().unwrap(), 1);
     }
 
     #[tokio::test]
