@@ -136,6 +136,12 @@ pub async fn assert_runner_contract(contract: RunnerContract) {
     {
         Err(RunError::Failed(_)) => {}
         Err(RunError::Timeout) => panic!("{} failed run timed out", contract.name),
+        Err(RunError::SessionMissing(msg)) => {
+            panic!(
+                "{} failed run reported missing session: {msg}",
+                contract.name
+            )
+        }
         Ok(_) => panic!("{} failed run succeeded", contract.name),
     }
 
@@ -148,6 +154,9 @@ pub async fn assert_runner_contract(contract: RunnerContract) {
     {
         Err(RunError::Timeout) => {}
         Err(RunError::Failed(msg)) => panic!("{} timeout failed: {msg}", contract.name),
+        Err(RunError::SessionMissing(msg)) => {
+            panic!("{} timeout reported missing session: {msg}", contract.name)
+        }
         Ok(_) => panic!("{} timeout run succeeded", contract.name),
     }
 }

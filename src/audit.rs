@@ -45,6 +45,8 @@ pub struct AuditEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_new_session: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub rehydrated_messages: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<AuditContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply: Option<AuditContent>,
@@ -101,6 +103,7 @@ impl AuditLog {
             is_from_me: Some(msg.is_from_me),
             is_group: Some(msg.is_group),
             is_new_session: None,
+            rehydrated_messages: None,
             message: Some(content(&msg.text, self.include_content)),
             reply: None,
             error: None,
@@ -128,6 +131,7 @@ impl AuditLog {
         thread: &str,
         backend: AgentBackend,
         is_new_session: bool,
+        rehydrated_messages: usize,
     ) -> AuditEvent {
         self.base(
             "backend_run_started",
@@ -136,6 +140,7 @@ impl AuditLog {
             Some(backend),
         )
         .with_new_session(is_new_session)
+        .with_rehydrated_messages(rehydrated_messages)
     }
 
     pub fn backend_completed(
@@ -222,6 +227,7 @@ impl AuditLog {
             is_from_me: None,
             is_group: None,
             is_new_session: None,
+            rehydrated_messages: None,
             message: None,
             reply: None,
             error: None,
@@ -232,6 +238,11 @@ impl AuditLog {
 impl AuditEvent {
     fn with_new_session(mut self, is_new_session: bool) -> Self {
         self.is_new_session = Some(is_new_session);
+        self
+    }
+
+    fn with_rehydrated_messages(mut self, count: usize) -> Self {
+        self.rehydrated_messages = Some(count);
         self
     }
 }
