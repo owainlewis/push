@@ -164,6 +164,14 @@ managed service. Use the same config file so the CLI and service share
 `push.db`, `jobs_dir`, and the local per-job lock directory. Invalid job files
 are reported and disabled individually; they do not stop the messaging service.
 
+## Scheduled Jobs
+
+Cron triggers run inside the managed gateway only when `primary_delivery`
+resolves. Keep `push.db`, `jobs_dir`, and `jobs_run_dir` on persistent local
+storage. Restarting the service resumes queued runs and pending result delivery;
+it does not catch up missed cron times or rerun interrupted agent execution.
+Use `push job runs` to distinguish execution state from delivery attempts.
+
 ## Restart Behavior
 
 `push` only advances the selected channel cursor after a message is ignored or

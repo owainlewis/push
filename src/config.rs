@@ -50,6 +50,8 @@ pub struct Config {
     pub jobs_max_timeout: String,
     #[serde(default = "default_jobs_run_dir")]
     pub jobs_run_dir: String,
+    #[serde(default = "default_jobs_max_workers")]
+    pub jobs_max_workers: usize,
     #[serde(default = "default_claude_bin")]
     pub claude_bin: String,
     #[serde(default = "default_codex_bin")]
@@ -321,6 +323,9 @@ impl Config {
         if self.jobs_dir.trim().is_empty() || self.jobs_run_dir.trim().is_empty() {
             bail!("jobs_dir and jobs_run_dir cannot be empty");
         }
+        if self.jobs_max_workers == 0 {
+            bail!("jobs_max_workers must be positive");
+        }
         self.resolve_permission_profile(&self.permission_profile)
             .context("invalid default permission profile")?;
         for (name, profile) in &self.permission_profiles {
@@ -579,6 +584,9 @@ fn default_jobs_max_timeout() -> String {
 }
 fn default_jobs_run_dir() -> String {
     "~/.push/run".to_string()
+}
+fn default_jobs_max_workers() -> usize {
+    2
 }
 fn default_sessions_dir() -> String {
     "~/.push/sessions".to_string()

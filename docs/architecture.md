@@ -206,6 +206,19 @@ Optional `primary_delivery` selects one enabled, allowlisted channel target for
 proactive output. Resolution is lazy: an absent or invalid primary returns a
 scoped error to the proactive caller without affecting reply polling.
 
+When primary delivery resolves, the gateway also runs the cron scheduler. It
+evaluates validated five-field triggers against their IANA timezone, enqueues at
+most one occurrence after an in-process clock jump, and initializes future-only
+occurrences after restart so downtime is never caught up. A configured worker
+limit bounds fresh-session job execution. Scheduled and manual processes share
+the per-job advisory lock and SQLite active-run uniqueness boundary.
+
+Scheduled output or bounded failure detail is committed before notification.
+Delivery has its own persisted state and is retried up to three times from that
+stored result. Restart recovery resumes queued work and pending delivery, but
+never reruns a backend run that had already started. A running row is marked
+interrupted only after the released advisory lock proves its executor is gone.
+
 `push.db` stores channel-qualified conversations and their inbound and outbound
 messages. Accepted inbound messages are inserted before gateway commands or
 backend dispatch. Generated backend, command, and error replies are inserted

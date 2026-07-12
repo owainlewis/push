@@ -159,17 +159,40 @@ async fn run_job_command(config_path: &str, command: JobCommand) -> Result<()> {
             }
             let ledger = jobs::Ledger::open(&cfg.database_path)?;
             for run in ledger.runs(name.as_deref())? {
+                let trigger = run
+                    .trigger_id
+                    .as_deref()
+                    .map(|id| format!("{}:{id}", run.trigger_kind))
+                    .unwrap_or(run.trigger_kind);
+                let scheduled = run
+                    .scheduled_at_ms
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                let delivery = format!("{}({})", run.delivery_state, run.delivery_attempts);
+                let destination = run
+                    .delivery_channel
+                    .zip(run.delivery_target)
+                    .map(|(channel, target)| format!("{channel}:{target}"))
+                    .unwrap_or_else(|| "-".to_string());
+                let execution_detail = run
+                    .result
+                    .or(run.error)
+                    .unwrap_or_default()
+                    .replace('\n', " ");
+                let delivery_error = run.delivery_error.unwrap_or_default().replace('\n', " ");
                 println!(
-                    "{}\t{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                     run.id,
                     run.job_name,
                     run.state,
                     run.backend,
+                    trigger,
+                    scheduled,
                     run.queued_at_ms,
-                    run.result
-                        .or(run.error)
-                        .unwrap_or_default()
-                        .replace('\n', " ")
+                    delivery,
+                    destination,
+                    execution_detail,
+                    delivery_error,
                 );
             }
             Ok(())
@@ -639,6 +662,7 @@ mod tests {
         assert!(cfg.permission_profiles.is_empty());
         assert_eq!(cfg.jobs_agent, None);
         assert_eq!(cfg.jobs_max_timeout, "30m");
+        assert_eq!(cfg.jobs_max_workers, 2);
         assert_eq!(
             cfg.jobs_dir,
             Path::new(&std::env::var("HOME").unwrap())
@@ -1234,6 +1258,7 @@ capability = "workspace"
             jobs_agent: None,
             jobs_max_timeout: "30m".to_string(),
             jobs_run_dir: "/fake/run".to_string(),
+            jobs_max_workers: 2,
             claude_bin: "/fake/claude".to_string(),
             codex_bin: "/fake/codex".to_string(),
             codex_model: None,
