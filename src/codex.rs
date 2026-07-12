@@ -89,11 +89,15 @@ impl Runner {
 
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            return Err(RunError::Failed(if stderr.is_empty() {
+            let message = if stderr.is_empty() {
                 "codex exited without a final reply".to_string()
             } else {
                 stderr
-            }));
+            };
+            if !req.is_new && missing_resume_error(&message) {
+                return Err(RunError::SessionMissing(message));
+            }
+            return Err(RunError::Failed(message));
         }
         if req.is_new && session_id.is_none() {
             return Err(RunError::Failed(
@@ -111,6 +115,12 @@ impl Runner {
             session_id,
         })
     }
+}
+
+fn missing_resume_error(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .contains("no rollout found for thread id")
 }
 
 fn sandbox(capability: PermissionCapability) -> &'static str {
@@ -389,6 +399,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resumed_lookup_failure_is_typed_before_gateway_retry() {
+        let work_dir = temp_dir("codex-missing-resume-work");
+        let cli = FakeCli::new(
+            "codex",
+            "#!/bin/sh\nprintf '%s\n' 'No rollout found for thread id missing' >&2\nexit 1\n",
+        );
+        let runner = runner(cli.bin());
+
+        let error = runner
+            .run(
+                Request {
+                    session_id: "missing",
+                    is_new: false,
+                    work_dir: work_dir.to_str().unwrap(),
+                    instructions: "",
+                    permission: PermissionCapability::ReadOnly,
+                    prompt: "continue",
+                },
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, RunError::SessionMissing(_)));
+    }
+
+    #[tokio::test]
     async fn reports_non_zero_exit_stderr() {
         let work_dir = temp_dir("codex-error-work");
         let cli = FakeCli::new(
@@ -500,6 +537,7 @@ mod tests {
         match err {
             RunError::Failed(msg) => assert_eq!(msg, expected),
             RunError::Timeout => panic!("expected failed error, got timeout"),
+            RunError::SessionMissing(msg) => panic!("unexpected missing session: {msg}"),
         }
     }
 
@@ -507,6 +545,7 @@ mod tests {
         match err {
             RunError::Timeout => {}
             RunError::Failed(msg) => panic!("expected timeout, got failed: {msg}"),
+            RunError::SessionMissing(msg) => panic!("unexpected missing session: {msg}"),
         }
     }
 
@@ -595,5 +634,11 @@ mod tests {
             sandbox(PermissionCapability::FullAccess),
             "danger-full-access"
         );
+    }
+
+    #[test]
+    fn classifies_only_codex_resume_lookup_errors_as_missing_sessions() {
+        assert!(missing_resume_error("No rollout found for thread id 123"));
+        assert!(!missing_resume_error("tool thread not found"));
     }
 }

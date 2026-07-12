@@ -28,13 +28,14 @@ struct CliResult {
 impl Runner {
     /// Executes one turn and returns Claude's reply text, or a RunError.
     pub async fn run(&self, req: Request<'_>, timeout: Duration) -> Result<RunOutput, RunError> {
+        let is_resume = !req.is_new;
         let out = match tokio::time::timeout(timeout, self.output_with_retry(req)).await {
             Err(_) => return Err(RunError::Timeout),
             Ok(Err(e)) => return Err(RunError::Failed(format!("spawn claude: {e}"))),
             Ok(Ok(o)) => o,
         };
 
-        self.parse_output(out)
+        self.parse_output(out, is_resume)
     }
 
     async fn output_with_retry(&self, req: Request<'_>) -> std::io::Result<std::process::Output> {
@@ -84,7 +85,11 @@ impl Runner {
         cmd
     }
 
-    fn parse_output(&self, out: std::process::Output) -> Result<RunOutput, RunError> {
+    fn parse_output(
+        &self,
+        out: std::process::Output,
+        is_resume: bool,
+    ) -> Result<RunOutput, RunError> {
         // claude prints its JSON envelope to stdout even when it exits non-zero
         // (e.g. an API error), so parse stdout regardless of exit status.
         match serde_json::from_slice::<CliResult>(&out.stdout) {
@@ -94,7 +99,11 @@ impl Runner {
                 } else {
                     r.result
                 };
-                Err(RunError::Failed(msg))
+                if is_resume && missing_resume_error(&msg) {
+                    Err(RunError::SessionMissing(msg))
+                } else {
+                    Err(RunError::Failed(msg))
+                }
             }
             Ok(r) => Ok(RunOutput {
                 reply: r.result.trim().to_string(),
@@ -107,13 +116,22 @@ impl Runner {
                         session_id: None,
                     })
                 } else {
-                    Err(RunError::Failed(
-                        String::from_utf8_lossy(&out.stderr).trim().to_string(),
-                    ))
+                    let message = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                    if is_resume && missing_resume_error(&message) {
+                        Err(RunError::SessionMissing(message))
+                    } else {
+                        Err(RunError::Failed(message))
+                    }
                 }
             }
         }
     }
+}
+
+fn missing_resume_error(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .contains("no conversation found with session id")
 }
 
 struct Controls {
@@ -213,6 +231,14 @@ mod tests {
         assert!(full.disallowed_tools.is_empty());
     }
 
+    #[test]
+    fn classifies_only_claude_resume_lookup_errors_as_missing_sessions() {
+        assert!(missing_resume_error(
+            "No conversation found with session ID 123"
+        ));
+        assert!(!missing_resume_error("tool session not found"));
+    }
+
     #[tokio::test]
     async fn satisfies_runner_contract() {
         assert_runner_contract(RunnerContract {
@@ -306,6 +332,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resumed_lookup_failure_is_typed_before_gateway_retry() {
+        let work_dir = temp_dir("claude-missing-resume-work");
+        let cli = FakeCli::new(
+            "claude",
+            "#!/bin/sh\nprintf '%s\n' '{\"is_error\":true,\"result\":\"No conversation found with session ID missing\"}'\nexit 1\n",
+        );
+        let runner = Runner { bin: cli.bin() };
+
+        let error = runner
+            .run(
+                Request {
+                    session_id: "missing",
+                    is_new: false,
+                    work_dir: work_dir.to_str().unwrap(),
+                    instructions: "",
+                    permission: PermissionCapability::ReadOnly,
+                    prompt: "continue",
+                },
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, RunError::SessionMissing(_)));
+    }
+
+    #[tokio::test]
     async fn reports_cli_json_error() {
         let work_dir = temp_dir("claude-error-work");
         let cli = FakeCli::new(
@@ -376,6 +429,7 @@ mod tests {
         match err {
             RunError::Failed(msg) => assert_eq!(msg, expected),
             RunError::Timeout => panic!("expected failed error, got timeout"),
+            RunError::SessionMissing(msg) => panic!("unexpected missing session: {msg}"),
         }
     }
 
@@ -383,6 +437,7 @@ mod tests {
         match err {
             RunError::Timeout => {}
             RunError::Failed(msg) => panic!("expected timeout, got failed: {msg}"),
+            RunError::SessionMissing(msg) => panic!("unexpected missing session: {msg}"),
         }
     }
 

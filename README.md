@@ -142,6 +142,14 @@ If the process stops after a channel accepts a reply but before SQLite records
 delivery, restart may resend the same stored reply; it still does not generate
 a different second response.
 
+Backend sessions are disposable caches. A normal resumed turn sends only the
+new message. A new session, backend switch, `/clear`, or recognized missing
+backend session is seeded with up to 20 recent messages from the exact
+channel-qualified conversation. Historical content is JSON-delimited, each
+message is capped at 4 KiB, and the complete history block is capped at 16 KiB.
+`SOUL.md` remains separate backend instruction context. Audit events record
+whether a run was new and how many messages were used for rehydration.
+
 ## Telegram Support
 
 Telegram uses Bot API long polling, so push opens no public port and needs no

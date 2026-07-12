@@ -19,6 +19,7 @@ pub struct Request<'a> {
 }
 
 /// A completed agent turn.
+#[derive(Debug)]
 pub struct RunOutput {
     pub reply: String,
     pub session_id: Option<String>,
@@ -28,6 +29,7 @@ pub struct RunOutput {
 #[derive(Debug)]
 pub enum RunError {
     Timeout,
+    SessionMissing(String),
     Failed(String),
 }
 
@@ -87,6 +89,7 @@ pub struct FakeRunner {
     pub session_id: String,
     pub calls: std::sync::Arc<std::sync::Mutex<Vec<FakeRunCall>>>,
     pub before_return: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    pub resume_missing_once: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 #[cfg(test)]
@@ -107,6 +110,16 @@ impl FakeRunner {
             prompt: req.prompt.to_string(),
             permission: req.permission,
         });
+        if !req.is_new
+            && self
+                .resume_missing_once
+                .as_ref()
+                .is_some_and(|missing| missing.swap(false, std::sync::atomic::Ordering::SeqCst))
+        {
+            return Err(RunError::SessionMissing(
+                "No conversation found with session ID fake-session".to_string(),
+            ));
+        }
         if let Some(before_return) = &self.before_return {
             before_return();
         }

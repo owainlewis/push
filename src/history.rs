@@ -6,6 +6,8 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 const SCHEMA_VERSION: i64 = 1;
+const MAX_HISTORY_READ_BYTES: usize = 8 * 1024;
+const READ_TRUNCATED: &str = "\n[truncated by push while reading history]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutboundOrigin {
@@ -53,6 +55,27 @@ pub struct OutboundMessage {
     pub id: i64,
     pub content: String,
     pub status: DeliveryStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationRole {
+    User,
+    Assistant,
+}
+
+impl ConversationRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationMessage {
+    pub role: ConversationRole,
+    pub content: String,
 }
 
 pub struct History {
@@ -168,6 +191,66 @@ impl History {
             bail!("outbound message {message_id} does not exist");
         }
         Ok(())
+    }
+
+    pub fn recent_messages_before(
+        &self,
+        channel: &str,
+        thread_key: &str,
+        before_message_id: i64,
+        limit: usize,
+    ) -> Result<Vec<ConversationMessage>> {
+        let mut statement = self.conn.prepare(
+            "SELECT CAST(m.direction AS BLOB),
+                    substr(CAST(m.content AS BLOB), 1, ?5),
+                    length(CAST(m.content AS BLOB)) > ?5
+             FROM messages m
+             JOIN conversations c ON c.id = m.conversation_id
+             WHERE c.channel = ?1
+               AND c.thread_key = ?2
+               AND (
+                   (m.direction = 'inbound' AND m.id < ?3)
+                   OR
+                   (m.direction = 'outbound'
+                    AND m.in_reply_to_id < ?3
+                    AND m.delivery_status = 'delivered')
+               )
+             ORDER BY COALESCE(m.in_reply_to_id, m.id) DESC,
+                      CASE m.direction WHEN 'outbound' THEN 1 ELSE 0 END DESC
+             LIMIT ?4",
+        )?;
+        let rows = statement.query_map(
+            params![
+                channel,
+                thread_key,
+                before_message_id,
+                limit as i64,
+                MAX_HISTORY_READ_BYTES as i64
+            ],
+            |row| {
+                let direction: Vec<u8> = row.get(0)?;
+                let content: Vec<u8> = row.get(1)?;
+                let truncated: bool = row.get(2)?;
+                Ok((direction, content, truncated))
+            },
+        )?;
+
+        let mut messages = Vec::new();
+        for row in rows {
+            let (direction, content, truncated) = row?;
+            let role = match direction.as_slice() {
+                b"inbound" => ConversationRole::User,
+                b"outbound" => ConversationRole::Assistant,
+                _ => continue,
+            };
+            let mut content = String::from_utf8_lossy(&content).into_owned();
+            if truncated {
+                content.push_str(READ_TRUNCATED);
+            }
+            messages.push(ConversationMessage { role, content });
+        }
+        messages.reverse();
+        Ok(messages)
     }
 
     #[cfg(test)]
@@ -356,6 +439,101 @@ mod tests {
             reopened.outbound_for(inbound).unwrap().unwrap().status,
             DeliveryStatus::Delivered
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn recent_messages_are_bounded_to_one_channel_and_thread() {
+        let path = temp_path("history-rehydration-isolation");
+        let mut history = History::open(path.to_str().unwrap()).unwrap();
+        let first = history
+            .record_inbound("telegram", "telegram:dm:7", "telegram:1", "first")
+            .unwrap();
+        history
+            .record_inbound("telegram", "telegram:dm:7:topic:9", "telegram:2", "topic")
+            .unwrap();
+        history
+            .record_inbound("imessage", "telegram:dm:7", "imessage:3", "other channel")
+            .unwrap();
+        let current = history
+            .record_inbound("telegram", "telegram:dm:7", "telegram:4", "current")
+            .unwrap();
+        // Gateway polling may persist several inbound messages before the
+        // per-thread worker generates the earlier reply. Rehydration still
+        // orders that reply with the inbound turn it answers.
+        let reply = history
+            .record_outbound(first, OutboundOrigin::Backend, Some("codex"), "reply")
+            .unwrap();
+        history
+            .mark_delivery(reply.id, DeliveryStatus::Delivered)
+            .unwrap();
+
+        assert_eq!(
+            history
+                .recent_messages_before("telegram", "telegram:dm:7", current, 20)
+                .unwrap(),
+            [
+                ConversationMessage {
+                    role: ConversationRole::User,
+                    content: "first".to_string(),
+                },
+                ConversationMessage {
+                    role: ConversationRole::Assistant,
+                    content: "reply".to_string(),
+                },
+            ]
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn malformed_utf8_history_is_replaced_without_failing_the_read() {
+        let path = temp_path("history-rehydration-malformed");
+        let mut history = History::open(path.to_str().unwrap()).unwrap();
+        let prior = history
+            .record_inbound("imessage", "imessage:self:me", "imessage:1", "valid")
+            .unwrap();
+        history
+            .conn
+            .execute(
+                "UPDATE messages SET content = CAST(x'666F80' AS TEXT) WHERE id = ?1",
+                [prior],
+            )
+            .unwrap();
+        let current = history
+            .record_inbound("imessage", "imessage:self:me", "imessage:2", "current")
+            .unwrap();
+
+        let messages = history
+            .recent_messages_before("imessage", "imessage:self:me", current, 20)
+            .unwrap();
+
+        assert_eq!(messages[0].content, "fo�");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn oversized_history_is_bounded_during_the_database_read() {
+        let path = temp_path("history-rehydration-read-bound");
+        let mut history = History::open(path.to_str().unwrap()).unwrap();
+        history
+            .record_inbound(
+                "imessage",
+                "imessage:self:me",
+                "imessage:1",
+                &"x".repeat(MAX_HISTORY_READ_BYTES * 100),
+            )
+            .unwrap();
+        let current = history
+            .record_inbound("imessage", "imessage:self:me", "imessage:2", "current")
+            .unwrap();
+
+        let messages = history
+            .recent_messages_before("imessage", "imessage:self:me", current, 20)
+            .unwrap();
+
+        assert!(messages[0].content.len() <= MAX_HISTORY_READ_BYTES + READ_TRUNCATED.len());
+        assert!(messages[0].content.ends_with(READ_TRUNCATED));
         let _ = std::fs::remove_file(path);
     }
 
