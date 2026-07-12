@@ -499,6 +499,39 @@ tools = ["Read", "Grep"]
     }
 
     #[test]
+    fn config_rejects_removed_job_permission_profiles_key() {
+        let path = temp_path("job-permission-profiles-config");
+        std::fs::write(
+            &path,
+            r#"self_handles = ["me@icloud.com"]
+job_permission_profiles = ["restricted"]
+"#,
+        )
+        .unwrap();
+
+        let error = Config::load(path.to_str().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("job_permission_profiles"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn loaded_config_file_is_shielded_from_job_workdirs() {
+        let dir = temp_dir("config-shield-load");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "self_handles = [\"me@icloud.com\"]\n").unwrap();
+
+        let cfg = Config::load(path.to_str().unwrap()).unwrap();
+
+        assert!(cfg
+            .validate_job_workdir(&dir)
+            .unwrap_err()
+            .to_string()
+            .contains("config file"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn multi_channel_config_is_opt_in_and_defers_primary_resolution() {
         let path = temp_path("multi-channel-config");
         std::fs::write(

@@ -827,4 +827,19 @@ mod tests {
             .to_string()
             .contains("config file must not be inside sessions_dir"));
     }
+
+    #[test]
+    fn job_workdir_must_not_contain_the_loaded_config_file() {
+        let mut cfg = config();
+        let workdir = crate::test_support::temp_dir("config-shield-workdir");
+        cfg.config_path = workdir.join("config.toml").to_string_lossy().to_string();
+
+        let error = cfg.validate_job_workdir(&workdir).unwrap_err();
+        assert!(error.to_string().contains("config file"));
+
+        let sibling = crate::test_support::temp_dir("config-shield-sibling");
+        assert!(cfg.validate_job_workdir(&sibling).is_ok());
+        let _ = std::fs::remove_dir_all(workdir);
+        let _ = std::fs::remove_dir_all(sibling);
+    }
 }
