@@ -163,7 +163,17 @@ fn load_file(cfg: &Config, name: &str, path: &Path) -> Result<Job> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
         .with_context(|| format!("read job {}", path.display()))?;
-    let text = std::str::from_utf8(&bytes).context("job must be valid UTF-8")?;
+    validate_contents(cfg, name, path, &bytes)
+}
+
+pub(crate) fn validate_contents(
+    cfg: &Config,
+    name: &str,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<Job> {
+    validate_slug(name)?;
+    let text = std::str::from_utf8(bytes).context("job must be valid UTF-8")?;
     let (frontmatter, body) = split_runbook(text)?;
     let metadata: Frontmatter = toml::from_str(frontmatter).context("parse TOML frontmatter")?;
     if metadata.version != 1 {
@@ -189,7 +199,8 @@ fn load_file(cfg: &Config, name: &str, path: &Path) -> Result<Job> {
         .transpose()?
         .unwrap_or(cfg.jobs_backend()?);
     let workdir = canonical_workdir(&metadata.workdir)?;
-    let snapshot_hash = format!("{:x}", Sha256::digest(&bytes));
+    cfg.validate_job_workdir(&workdir, permission.capability)?;
+    let snapshot_hash = format!("{:x}", Sha256::digest(bytes));
     Ok(Job {
         name: name.to_string(),
         path: path.to_path_buf(),
@@ -241,7 +252,7 @@ fn job_name(path: &Path) -> Result<String> {
     Ok(name.to_string())
 }
 
-fn validate_slug(value: &str) -> Result<()> {
+pub(crate) fn validate_slug(value: &str) -> Result<()> {
     if value.is_empty()
         || value.starts_with('-')
         || value.ends_with('-')
@@ -1212,6 +1223,7 @@ async fn execute(cfg: &Config, job: &Job) -> std::result::Result<String, Executi
         session_id: &session_id,
         is_new: true,
         work_dir: &workdir,
+        additional_write_dir: None,
         instructions: &instructions,
         permission: job.permission.capability,
         prompt: &job.body,

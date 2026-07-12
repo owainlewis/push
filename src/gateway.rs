@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -18,7 +19,7 @@ use tracing::{error, info, warn};
 
 use crate::agent::{Request, RunError, Runner};
 use crate::approval::{
-    AnswerOrigin, AnswerOutcome, DeliveryStatus as ApprovalDeliveryStatus, Question,
+    AnswerOrigin, AnswerOutcome, Choice, DeliveryStatus as ApprovalDeliveryStatus, Question,
 };
 use crate::audit::{AuditEvent, AuditLog};
 use crate::channel::{Channel, RawMessage};
@@ -50,12 +51,14 @@ struct Job {
     target: String,
     backend: AgentBackend,
     permission: PermissionProfile,
+    approval_origin: AnswerOrigin,
     text: String,
 }
 
 /// Shared, cheaply cloneable context handed to each worker task.
 #[derive(Clone)]
 struct Ctx {
+    cfg: Config,
     store: Arc<Mutex<Store>>,
     history: Arc<Mutex<History>>,
     ack: Arc<Mutex<AckState>>,
@@ -348,6 +351,7 @@ impl Gateway {
         runners: Arc<HashMap<AgentBackend, Runner>>,
         audit_lock: Arc<Mutex<()>>,
     ) -> Result<Self> {
+        crate::drafts::prepare(&cfg).context("prepare agent job draft boundary")?;
         let ack = Arc::new(Mutex::new(AckState::default()));
         let channel = Channel::new_for(&cfg, kind)?;
         let audit = Arc::new(AuditLog::with_lock(
@@ -357,6 +361,7 @@ impl Gateway {
             audit_lock,
         ));
         let ctx = Ctx {
+            cfg: cfg.clone(),
             store: store.clone(),
             history,
             ack: ack.clone(),
@@ -535,13 +540,38 @@ impl Gateway {
                 continue;
             }
             if let Some((thread, target)) = self.channel.accept(m) {
+                let approval_origin = approval_origin(m, &thread);
                 let approval = self.ctx.history.lock().unwrap().answer_question(
-                    &approval_origin(m, &thread),
+                    &approval_origin,
                     m.text.trim(),
                     now_ms(),
                 );
                 match approval {
                     Ok(AnswerOutcome::NotAnAnswer) => {}
+                    Ok(outcome @ (AnswerOutcome::Selected(_) | AnswerOutcome::Duplicate(_))) => {
+                        self.audit_approval(m.row_id, &thread, &outcome);
+                        let question_id = match &outcome {
+                            AnswerOutcome::Selected(answer) => &answer.correlation_id,
+                            AnswerOutcome::Duplicate(id) => id,
+                            _ => unreachable!(),
+                        };
+                        if let Err(error) = self
+                            .handle_draft_answer(question_id, &approval_origin, &target)
+                            .await
+                        {
+                            error!("[{thread}] draft approval failed: {error:#}");
+                            self.audit(self.ctx.audit.failed(
+                                "draft_approval_failed",
+                                m.row_id,
+                                &thread,
+                                None,
+                                error.to_string(),
+                            ));
+                            return;
+                        }
+                        self.complete_row(m.row_id, "approval_answer");
+                        continue;
+                    }
                     Ok(outcome) => {
                         self.audit_approval(m.row_id, &thread, &outcome);
                         self.complete_row(m.row_id, "approval_answer");
@@ -610,6 +640,7 @@ impl Gateway {
                     target,
                     backend,
                     permission: route.permission,
+                    approval_origin,
                     text: m.text.trim().to_string(),
                 };
                 if !self.route(job).await {
@@ -717,6 +748,46 @@ impl Gateway {
         };
         self.audit(self.ctx.audit.approval(event, row_id, thread, reason));
     }
+
+    async fn handle_draft_answer(
+        &self,
+        question_id: &str,
+        origin: &AnswerOrigin,
+        target: &str,
+    ) -> Result<()> {
+        let approved_by = format!(
+            "channel={} thread={} sender={} chat={}",
+            origin.channel, origin.thread_key, origin.sender_key, origin.chat_key
+        );
+        let outcome = crate::drafts::decide(
+            &self.cfg,
+            &mut self.ctx.history.lock().unwrap(),
+            question_id,
+            &approved_by,
+            now_ms(),
+        )?;
+        let message = match outcome {
+            crate::drafts::DecisionOutcome::Installed(name) => {
+                Some(format!("Installed approved job `{name}`."))
+            }
+            crate::drafts::DecisionOutcome::Rejected(name) => Some(format!(
+                "Rejected job draft `{name}`. It remains inactive in drafts."
+            )),
+            crate::drafts::DecisionOutcome::Invalidated(message) => {
+                Some(format!("Draft approval was invalidated: {message}"))
+            }
+            crate::drafts::DecisionOutcome::Failed(message) => {
+                Some(format!("Draft approval failed safely: {message}"))
+            }
+            crate::drafts::DecisionOutcome::AlreadyHandled => None,
+        };
+        if let Some(message) = message {
+            if !reply_to(&self.ctx, target, &message).await {
+                warn!("draft decision reply delivery failed for question {question_id}");
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Processes one thread's jobs strictly in order, exiting when the queue closes.
@@ -727,9 +798,30 @@ async fn worker(ctx: Ctx, mut rx: mpsc::Receiver<Job>) {
 }
 
 async fn handle(ctx: &Ctx, job: Job) {
+    let draft_directory =
+        if job.permission.capability == crate::config::PermissionCapability::Workspace {
+            match crate::drafts::origin_directory(&ctx.cfg, &job.approval_origin) {
+                Ok(directory) => Some(directory),
+                Err(error) => {
+                    error!("[{}] draft boundary error: {error:#}", job.thread);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
     let existing_outbound = { ctx.history.lock().unwrap().outbound_for(job.inbound_id) };
     match existing_outbound {
         Ok(Some(outbound)) => {
+            if let Some(directory) = &draft_directory {
+                if let Err(error) = present_drafts(ctx, &job, directory).await {
+                    error!(
+                        "[{}] recovered draft presentation failed: {error:#}",
+                        job.thread
+                    );
+                    return;
+                }
+            }
             match deliver_stored(ctx, &job, &outbound).await {
                 Ok(DeliveryOutcome::Delivered | DeliveryOutcome::AlreadyDelivered) => {
                     audit(
@@ -844,7 +936,7 @@ async fn handle(ctx: &Ctx, job: Job) {
         return;
     }
 
-    let instructions = match soul::load(&ctx.assistant_dir) {
+    let mut instructions = match soul::load(&ctx.assistant_dir) {
         Ok(instructions) => instructions,
         Err(error) => {
             error!("[{}] assistant identity error: {error}", job.thread);
@@ -862,6 +954,13 @@ async fn handle(ctx: &Ctx, job: Job) {
             return;
         }
     };
+    let draft_write_dir = draft_directory.as_ref().and_then(|path| path.to_str());
+    if let Some(draft_write_dir) = draft_write_dir {
+        instructions.push_str(&format!(
+            "\n\nTo propose a recurring job, write one complete validated Markdown runbook to {}/<lowercase-slug>.md. This drafts directory is the only Push-owned path you may write. A draft remains inactive until the allowlisted user approves its exact revision. Never write to the installed jobs directory, Push configuration, or Push state.",
+            draft_write_dir
+        ));
+    }
 
     let run = async {
         let mut session_id = session_id;
@@ -913,6 +1012,7 @@ async fn handle(ctx: &Ctx, job: Job) {
                     &session_id,
                     is_new,
                     &work_dir,
+                    draft_write_dir,
                     &instructions,
                     job.permission.capability,
                     prompt,
@@ -932,6 +1032,7 @@ async fn handle(ctx: &Ctx, job: Job) {
                                 &session_id,
                                 false,
                                 &work_dir,
+                                draft_write_dir,
                                 &instructions,
                                 job.permission.capability,
                                 &job.text,
@@ -995,6 +1096,7 @@ async fn handle(ctx: &Ctx, job: Job) {
                         &session_id,
                         true,
                         &work_dir,
+                        draft_write_dir,
                         &instructions,
                         job.permission.capability,
                         prompt,
@@ -1068,7 +1170,24 @@ async fn handle(ctx: &Ctx, job: Job) {
                 );
                 return;
             }
-            match deliver_stored(ctx, &job, &outbound).await {
+            let delivery = deliver_stored(ctx, &job, &outbound).await;
+            if let Some(directory) = &draft_directory {
+                if let Err(error) = present_drafts(ctx, &job, directory).await {
+                    error!("[{}] draft presentation failed: {error:#}", job.thread);
+                    audit(
+                        ctx,
+                        ctx.audit.failed(
+                            "draft_presentation_failed",
+                            job.row_id,
+                            &job.thread,
+                            Some(job.backend),
+                            error.to_string(),
+                        ),
+                    );
+                    return;
+                }
+            }
+            match delivery {
                 Ok(DeliveryOutcome::Delivered | DeliveryOutcome::AlreadyDelivered) => {
                     info!("[{}] reply sent via {}", job.thread, ctx.channel.id());
                     audit(
@@ -1099,7 +1218,25 @@ async fn handle(ctx: &Ctx, job: Job) {
                 ),
             );
             let reply = "That took too long and was stopped. Try again or simplify the request.";
-            match record_and_deliver(ctx, &job, OutboundOrigin::Gateway, reply).await {
+            let outbound = match ctx.history.lock().unwrap().record_outbound(
+                job.inbound_id,
+                OutboundOrigin::Gateway,
+                Some(job.backend.as_str()),
+                reply,
+            ) {
+                Ok(outbound) => outbound,
+                Err(error) => {
+                    history_error(ctx, &job, "record timeout reply", error);
+                    return;
+                }
+            };
+            if let Some(directory) = &draft_directory {
+                if let Err(error) = present_drafts(ctx, &job, directory).await {
+                    history_error(ctx, &job, "present timed-out run drafts", error);
+                    return;
+                }
+            }
+            match deliver_stored(ctx, &job, &outbound).await {
                 Ok(DeliveryOutcome::Delivered | DeliveryOutcome::AlreadyDelivered) => {
                     audit(
                         ctx,
@@ -1113,7 +1250,7 @@ async fn handle(ctx: &Ctx, job: Job) {
                     );
                     complete_job(ctx, &job, "timeout");
                 }
-                Err(error) => history_error(ctx, &job, "record timeout reply", error),
+                Err(error) => history_error(ctx, &job, "deliver timeout reply", error),
             }
         }
         Err(RunError::Failed(msg) | RunError::SessionMissing(msg)) => {
@@ -1129,7 +1266,25 @@ async fn handle(ctx: &Ctx, job: Job) {
                 ),
             );
             let reply = format!("⚠️ {}", short(&msg));
-            match record_and_deliver(ctx, &job, OutboundOrigin::Gateway, &reply).await {
+            let outbound = match ctx.history.lock().unwrap().record_outbound(
+                job.inbound_id,
+                OutboundOrigin::Gateway,
+                Some(job.backend.as_str()),
+                &reply,
+            ) {
+                Ok(outbound) => outbound,
+                Err(error) => {
+                    history_error(ctx, &job, "record failure reply", error);
+                    return;
+                }
+            };
+            if let Some(directory) = &draft_directory {
+                if let Err(error) = present_drafts(ctx, &job, directory).await {
+                    history_error(ctx, &job, "present failed run drafts", error);
+                    return;
+                }
+            }
+            match deliver_stored(ctx, &job, &outbound).await {
                 Ok(DeliveryOutcome::Delivered | DeliveryOutcome::AlreadyDelivered) => {
                     audit(
                         ctx,
@@ -1143,10 +1298,101 @@ async fn handle(ctx: &Ctx, job: Job) {
                     );
                     complete_job(ctx, &job, "backend_failed");
                 }
-                Err(error) => history_error(ctx, &job, "record failure reply", error),
+                Err(error) => history_error(ctx, &job, "deliver failure reply", error),
             }
         }
     }
+}
+
+async fn present_drafts(ctx: &Ctx, job: &Job, directory: &Path) -> Result<()> {
+    for (display_name, result) in crate::drafts::candidates(&ctx.cfg, directory)? {
+        let candidate = match result {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                let message = format!(
+                    "Job draft `{display_name}` is inactive and cannot be approved: {error:#}"
+                );
+                if !reply_to(ctx, &job.target, &message).await {
+                    warn!("[{}] invalid draft notice delivery failed", job.thread);
+                }
+                continue;
+            }
+        };
+        let existing = ctx
+            .history
+            .lock()
+            .unwrap()
+            .draft_revision(&candidate.path, &candidate.snapshot_hash)?;
+        let proposal = if let Some(proposal) = existing {
+            proposal
+        } else {
+            let question = Question::new(
+                job.approval_origin.clone(),
+                job.target.clone(),
+                format!(
+                    "Install job draft `{}` at exact revision `{}`?",
+                    candidate.name, candidate.snapshot_hash
+                ),
+                vec![
+                    Choice {
+                        label: "Approve and install".to_string(),
+                        value: "approve".to_string(),
+                    },
+                    Choice {
+                        label: "Reject and leave inactive".to_string(),
+                        value: "reject".to_string(),
+                    },
+                ],
+                now_ms() + 86_400_000,
+            )?;
+            let proposed_by = format!(
+                "channel={} thread={} sender={} chat={}",
+                job.approval_origin.channel,
+                job.approval_origin.thread_key,
+                job.approval_origin.sender_key,
+                job.approval_origin.chat_key
+            );
+            let proposal = crate::drafts::proposal(question.id.clone(), &candidate, proposed_by);
+            let _ = ctx.history.lock().unwrap().create_draft_question(
+                &question,
+                &proposal,
+                now_ms(),
+            )?;
+            ctx.history
+                .lock()
+                .unwrap()
+                .draft_revision(&candidate.path, &candidate.snapshot_hash)?
+                .context("persisted draft revision disappeared")?
+        };
+        let Some(question) = ctx
+            .history
+            .lock()
+            .unwrap()
+            .pending_draft_question(&proposal.question_id, now_ms())?
+        else {
+            continue;
+        };
+        let full = format!(
+            "Proposed job `{}`\nRevision: `{}`\n\n{}",
+            candidate.name, candidate.snapshot_hash, candidate.contents
+        );
+        let contents_delivered = reply_to(ctx, &question.target, &full).await;
+        let delivered =
+            contents_delivered && reply_to(ctx, &question.target, &question.render_text()).await;
+        ctx.history.lock().unwrap().mark_question_delivery(
+            &proposal.question_id,
+            if delivered {
+                ApprovalDeliveryStatus::Delivered
+            } else {
+                ApprovalDeliveryStatus::Failed
+            },
+        )?;
+        if !delivered {
+            warn!("[{}] draft proposal delivery failed", job.thread);
+            anyhow::bail!("draft proposal delivery failed; retry before expiry");
+        }
+    }
+    Ok(())
 }
 
 async fn run_with_periodic_activity<O, A, AF>(
@@ -1455,6 +1701,7 @@ fn backend_request<'a>(
     session_id: &'a str,
     is_new: bool,
     work_dir: &'a str,
+    additional_write_dir: Option<&'a str>,
     instructions: &'a str,
     permission: crate::config::PermissionCapability,
     prompt: &'a str,
@@ -1463,6 +1710,7 @@ fn backend_request<'a>(
         session_id,
         is_new,
         work_dir,
+        additional_write_dir,
         instructions,
         permission,
         prompt,
@@ -1554,7 +1802,7 @@ pub(crate) mod tests {
     use crate::agent::{FakeRunCall, FakeRunner};
     use crate::channel::{normalize_handle, thread_handle};
     use crate::imessage::{Poller, Sender};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use uuid::Uuid;
 
@@ -1708,6 +1956,11 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(inbound_id, 1);
         Ctx {
+            cfg: test_config(
+                &temp_path("setup-failure-state").to_string_lossy(),
+                &sessions_dir,
+                "",
+            ),
             store,
             history: Arc::new(Mutex::new(history)),
             ack,
@@ -1740,6 +1993,12 @@ pub(crate) mod tests {
             permission: PermissionProfile {
                 name: "restricted".to_string(),
                 capability: crate::config::PermissionCapability::ReadOnly,
+            },
+            approval_origin: AnswerOrigin {
+                channel: "imessage".to_string(),
+                thread_key: "imessage:self:me".to_string(),
+                sender_key: "me@icloud.com".to_string(),
+                chat_key: "me@icloud.com".to_string(),
             },
             text: "hello".to_string(),
         }
@@ -2434,6 +2693,7 @@ pub(crate) mod tests {
                 session_id: "fake-session".to_string(),
                 calls: calls.clone(),
                 before_return: None,
+                failure: None,
                 resume_missing_once: Some(missing),
             }),
         );
@@ -2506,6 +2766,7 @@ pub(crate) mod tests {
                 session_id: "codex-session".to_string(),
                 calls: codex_calls.clone(),
                 before_return: None,
+                failure: None,
                 resume_missing_once: None,
             }),
         );
@@ -2516,6 +2777,7 @@ pub(crate) mod tests {
                 session_id: "claude-session".to_string(),
                 calls: claude_calls.clone(),
                 before_return: None,
+                failure: None,
                 resume_missing_once: None,
             }),
         );
@@ -3187,6 +3449,326 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(assistant_dir);
     }
 
+    #[tokio::test]
+    async fn route_agent_draft_requires_bound_approval_before_atomic_install() {
+        let state_path = temp_state_path();
+        let sessions_dir = temp_path("draft-e2e-sessions");
+        let assistant_dir = temp_path("draft-e2e-assistant");
+        let workdir = temp_path("draft-e2e-workdir");
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        std::fs::create_dir_all(&workdir).unwrap();
+        let mut cfg = test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        );
+        cfg.permission_profile = "workspace".to_string();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut gateway = Gateway::new(cfg.clone()).unwrap();
+        let inbound = message(
+            1,
+            "+15551234567",
+            "+15551234567",
+            false,
+            "Draft a morning job",
+        );
+        let (thread, _) = gateway.channel.accept(&inbound).unwrap();
+        let draft_directory =
+            crate::drafts::origin_directory(&cfg, &approval_origin(&inbound, &thread)).unwrap();
+        let body = format!(
+            "+++\nversion = 1\npermission_profile = \"restricted\"\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"codex\"\n+++\n\nPrepare a note.\n",
+            workdir.to_string_lossy()
+        );
+        let hook = Arc::new(move || {
+            std::fs::write(draft_directory.join("agent-note.md"), &body).unwrap();
+        });
+        gateway.ctx.runners = Arc::new(fake_runners_with_hook(calls.clone(), Some(hook)));
+
+        run_messages(&mut gateway, vec![inbound]).await;
+        assert!(!Path::new(&cfg.jobs_dir).join("agent-note.md").exists());
+        let replies = gateway.ctx.sent_replies.lock().unwrap().clone();
+        assert!(replies
+            .iter()
+            .any(|(_, text)| text.contains("Prepare a note.")));
+        let question_text = replies
+            .iter()
+            .find_map(|(_, text)| text.contains("Approve and install").then_some(text))
+            .unwrap();
+        let question_id = question_text
+            .split_whitespace()
+            .map(|part| part.trim_matches(|ch| ch == '`' || ch == ',' || ch == '.'))
+            .find(|part| uuid::Uuid::parse_str(part).is_ok())
+            .unwrap()
+            .to_string();
+
+        run_messages(
+            &mut gateway,
+            vec![message(
+                2,
+                "+15551234567",
+                "+15551234567",
+                false,
+                &format!("{question_id} 1"),
+            )],
+        )
+        .await;
+
+        assert!(Path::new(&cfg.jobs_dir).join("agent-note.md").is_file());
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        let proposal = gateway
+            .ctx
+            .history
+            .lock()
+            .unwrap()
+            .draft_proposal(&question_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(proposal.status, "installed");
+        assert!(proposal.proposed_by.contains("sender=15551234567"));
+        assert!(proposal
+            .approved_by
+            .as_deref()
+            .unwrap()
+            .contains("sender=15551234567"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_origins_present_only_their_isolated_drafts() {
+        let state_path = temp_state_path();
+        let sessions_dir = temp_path("draft-concurrent-sessions");
+        let assistant_dir = temp_path("draft-concurrent-assistant");
+        let workdir = temp_path("draft-concurrent-workdir");
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        std::fs::create_dir_all(&workdir).unwrap();
+        let mut cfg = test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        );
+        cfg.permission_profile = "workspace".to_string();
+        let gateway = Gateway::new(cfg.clone()).unwrap();
+        let first_origin = AnswerOrigin {
+            channel: "imessage".to_string(),
+            thread_key: "imessage:dm:111".to_string(),
+            sender_key: "111".to_string(),
+            chat_key: "111".to_string(),
+        };
+        let second_origin = AnswerOrigin {
+            channel: "imessage".to_string(),
+            thread_key: "imessage:dm:222".to_string(),
+            sender_key: "222".to_string(),
+            chat_key: "222".to_string(),
+        };
+        let first_dir = crate::drafts::origin_directory(&cfg, &first_origin).unwrap();
+        let second_dir = crate::drafts::origin_directory(&cfg, &second_origin).unwrap();
+        assert_ne!(first_dir, second_dir);
+        std::fs::write(
+            first_dir.join("first.md"),
+            draft_runbook(&workdir, "FIRST ONLY"),
+        )
+        .unwrap();
+        std::fs::write(
+            second_dir.join("second.md"),
+            draft_runbook(&workdir, "SECOND ONLY"),
+        )
+        .unwrap();
+        let first = draft_test_job(1, "111", first_origin);
+        let second = draft_test_job(2, "222", second_origin);
+
+        let (first_result, second_result) = tokio::join!(
+            present_drafts(&gateway.ctx, &first, &first_dir),
+            present_drafts(&gateway.ctx, &second, &second_dir),
+        );
+        first_result.unwrap();
+        second_result.unwrap();
+
+        let replies = gateway.ctx.sent_replies.lock().unwrap();
+        let first_replies = replies
+            .iter()
+            .filter(|(target, _)| target == "111")
+            .map(|(_, text)| text)
+            .collect::<Vec<_>>();
+        let second_replies = replies
+            .iter()
+            .filter(|(target, _)| target == "222")
+            .map(|(_, text)| text)
+            .collect::<Vec<_>>();
+        assert!(first_replies.iter().any(|text| text.contains("FIRST ONLY")));
+        assert!(!first_replies
+            .iter()
+            .any(|text| text.contains("SECOND ONLY")));
+        assert!(second_replies
+            .iter()
+            .any(|text| text.contains("SECOND ONLY")));
+        assert!(!second_replies
+            .iter()
+            .any(|text| text.contains("FIRST ONLY")));
+    }
+
+    #[tokio::test]
+    async fn failed_run_and_recovered_outbound_still_reconcile_origin_drafts() {
+        let state_path = temp_state_path();
+        let sessions_dir = temp_path("draft-failure-sessions");
+        let assistant_dir = temp_path("draft-failure-assistant");
+        let workdir = temp_path("draft-failure-workdir");
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        std::fs::create_dir_all(&workdir).unwrap();
+        let mut cfg = test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        );
+        cfg.permission_profile = "workspace".to_string();
+        let mut gateway = Gateway::new(cfg.clone()).unwrap();
+        let failed_message = message(1, "+15551234567", "+15551234567", false, "draft then fail");
+        let (thread, _) = gateway.channel.accept(&failed_message).unwrap();
+        let directory =
+            crate::drafts::origin_directory(&cfg, &approval_origin(&failed_message, &thread))
+                .unwrap();
+        let failed_body = draft_runbook(&workdir, "CREATED BEFORE FAILURE");
+        let hook = Arc::new(move || {
+            std::fs::write(directory.join("failed-run.md"), &failed_body).unwrap();
+        });
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut runners = HashMap::new();
+        runners.insert(
+            AgentBackend::Codex,
+            Runner::Fake(FakeRunner {
+                backend: AgentBackend::Codex,
+                session_id: "failed-session".to_string(),
+                calls: calls.clone(),
+                before_return: Some(hook),
+                failure: Some("boom".to_string()),
+                resume_missing_once: None,
+            }),
+        );
+        gateway.ctx.runners = Arc::new(runners);
+
+        run_messages(&mut gateway, vec![failed_message]).await;
+        let replies = gateway.ctx.sent_replies.lock().unwrap().clone();
+        assert!(replies
+            .iter()
+            .any(|(_, text)| text.contains("CREATED BEFORE FAILURE")));
+        assert!(replies.iter().any(|(_, text)| text.contains("boom")));
+        assert_eq!(calls.lock().unwrap().len(), 1);
+
+        let recovered_message = message(2, "+15551234567", "+15551234567", false, "crash window");
+        let (recovered_thread, _) = gateway.channel.accept(&recovered_message).unwrap();
+        let recovered_dir = crate::drafts::origin_directory(
+            &cfg,
+            &approval_origin(&recovered_message, &recovered_thread),
+        )
+        .unwrap();
+        std::fs::write(
+            recovered_dir.join("recovered.md"),
+            draft_runbook(&workdir, "RECOVERED AFTER CRASH"),
+        )
+        .unwrap();
+        let inbound_id = gateway
+            .ctx
+            .history
+            .lock()
+            .unwrap()
+            .record_inbound(
+                recovered_message.channel,
+                &recovered_thread,
+                &recovered_message.event_id(),
+                recovered_message.text.trim(),
+            )
+            .unwrap();
+        gateway
+            .ctx
+            .history
+            .lock()
+            .unwrap()
+            .record_outbound(
+                inbound_id,
+                OutboundOrigin::Backend,
+                Some("codex"),
+                "stored before crash",
+            )
+            .unwrap();
+        run_messages(&mut gateway, vec![recovered_message]).await;
+        let replies = gateway.ctx.sent_replies.lock().unwrap();
+        assert!(replies
+            .iter()
+            .any(|(_, text)| text.contains("RECOVERED AFTER CRASH")));
+        assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_draft_delivery_retries_after_restart_before_expiry() {
+        let state_path = temp_state_path();
+        let sessions_dir = temp_path("draft-delivery-sessions");
+        let assistant_dir = temp_path("draft-delivery-assistant");
+        let workdir = temp_path("draft-delivery-workdir");
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        std::fs::create_dir_all(&workdir).unwrap();
+        let mut cfg = test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        );
+        cfg.permission_profile = "workspace".to_string();
+        let origin = AnswerOrigin {
+            channel: "imessage".to_string(),
+            thread_key: "imessage:dm:15551234567".to_string(),
+            sender_key: "15551234567".to_string(),
+            chat_key: "15551234567".to_string(),
+        };
+        let directory = crate::drafts::origin_directory(&cfg, &origin).unwrap();
+        std::fs::write(
+            directory.join("retry.md"),
+            draft_runbook(&workdir, "RETRY THIS OFFER"),
+        )
+        .unwrap();
+        let job = draft_test_job(1, "+15551234567", origin);
+        let gateway = Gateway::new(cfg.clone()).unwrap();
+        *gateway.ctx.send_failures_remaining.lock().unwrap() = DELIVERY_ATTEMPTS;
+
+        assert!(present_drafts(&gateway.ctx, &job, &directory)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("retry before expiry"));
+        drop(gateway);
+
+        let restarted = Gateway::new(cfg).unwrap();
+        present_drafts(&restarted.ctx, &job, &directory)
+            .await
+            .unwrap();
+        let replies = restarted.ctx.sent_replies.lock().unwrap();
+        assert!(replies
+            .iter()
+            .any(|(_, text)| text.contains("RETRY THIS OFFER")));
+        assert!(replies
+            .iter()
+            .any(|(_, text)| text.contains("Approve and install")));
+    }
+
+    fn draft_runbook(workdir: &Path, instruction: &str) -> String {
+        format!(
+            "+++\nversion = 1\npermission_profile = \"restricted\"\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"codex\"\n+++\n\n{instruction}\n",
+            workdir.to_string_lossy()
+        )
+    }
+
+    fn draft_test_job(row_id: i64, target: &str, origin: AnswerOrigin) -> Job {
+        Job {
+            row_id,
+            inbound_id: row_id,
+            thread: origin.thread_key.clone(),
+            target: target.to_string(),
+            backend: AgentBackend::Codex,
+            permission: PermissionProfile {
+                name: "workspace".to_string(),
+                capability: crate::config::PermissionCapability::Workspace,
+            },
+            approval_origin: origin,
+            text: "draft".to_string(),
+        }
+    }
+
     fn test_config(state_path: &str, sessions_dir: &str, assistant_dir: &str) -> Config {
         Config {
             channel: "imessage".to_string(),
@@ -3207,6 +3789,7 @@ pub(crate) mod tests {
             job_permission_profiles: vec!["restricted".to_string()],
             permission_profiles: HashMap::new(),
             jobs_dir: format!("{state_path}.jobs"),
+            drafts_dir: format!("{state_path}.drafts"),
             jobs_agent: None,
             jobs_max_timeout: "30m".to_string(),
             jobs_run_dir: format!("{state_path}.run"),
@@ -3256,6 +3839,7 @@ pub(crate) mod tests {
                 session_id: "fake-session".to_string(),
                 calls,
                 before_return,
+                failure: None,
                 resume_missing_once: None,
             }),
         );

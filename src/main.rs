@@ -9,6 +9,7 @@ mod channel;
 mod claude;
 mod codex;
 mod config;
+mod drafts;
 mod gateway;
 mod history;
 mod imessage;
@@ -257,6 +258,7 @@ fn run_checks(cfg: &config::Config) -> CheckReport {
     check_config(cfg, &mut checks);
     check_state_dir(cfg, &mut checks);
     check_sessions_dir(cfg, &mut checks);
+    check_drafts_dir(cfg, &mut checks);
     check_audit_log_dir(cfg, &mut checks);
     check_history_database(cfg, &mut checks);
     match cfg.enabled_channel_kinds() {
@@ -326,6 +328,22 @@ fn check_sessions_dir(cfg: &config::Config, checks: &mut Vec<Check>) {
             format!(
                 "cannot create {}: {e}. Create it or choose a writable sessions_dir.",
                 cfg.sessions_dir
+            ),
+        )),
+    }
+}
+
+fn check_drafts_dir(cfg: &config::Config, checks: &mut Vec<Check>) {
+    match drafts::prepare(cfg) {
+        Ok(()) => checks.push(Check::pass(
+            "drafts directory",
+            format!("{} is writable and protected", cfg.drafts_dir),
+        )),
+        Err(error) => checks.push(Check::fail(
+            "drafts directory",
+            format!(
+                "cannot prepare {}: {error}. Create it with owner-only permissions or choose a writable drafts_dir.",
+                cfg.drafts_dir
             ),
         )),
     }
@@ -1255,6 +1273,7 @@ capability = "workspace"
             job_permission_profiles: vec!["restricted".to_string()],
             permission_profiles: std::collections::HashMap::new(),
             jobs_dir: "/fake/jobs".to_string(),
+            drafts_dir: "/fake/drafts".to_string(),
             jobs_agent: None,
             jobs_max_timeout: "30m".to_string(),
             jobs_run_dir: "/fake/run".to_string(),

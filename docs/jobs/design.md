@@ -241,9 +241,30 @@ execution:
 
 Push is the only writer to the run ledger. The CLI owns the manual run it
 claims, and the gateway owns scheduled runs. Installed job files remain
-operator-owned. A later draft workflow may let an agent write under
-`~/.push/drafts/`, but activation must revalidate and atomically install the
-exact approved revision into `~/.push/jobs/`.
+operator-owned.
+
+### Agent-authored draft extension
+
+Route agents may write proposals only in an opaque, exact-identity inbox under
+`~/.push/drafts/`, which Push adds as the only extra writable root for contained
+workspace profiles. Concurrent channels, senders, chats, and topics therefore
+cannot claim each other's files. Full-access
+routes and jobs are rejected because backend bypass modes cannot prevent direct
+writes to Push-owned files. Job work directories may not overlap Push identity,
+configuration, session, draft, installed-job, lock, audit, or database paths.
+
+After a route run completes, fails, times out, or resumes from a persisted
+outbound reply, Push reconciles unrecorded revisions in that identity's inbox.
+It validates each full runbook and sends its complete contents to the
+originating allowlisted channel. The
+following `ask_user` question binds Approve and Reject to that channel, sender,
+chat, thread or topic, and exact SHA-256 revision. SQLite stores the exact bytes
+and proposer identity with the question. Approval rereads and revalidates the
+draft and current permission ceiling. A changed revision is invalidated; a
+valid stored revision is staged inside `jobs_dir` and installed with an atomic
+no-clobber link. Rejection leaves the draft inactive. Proposal and approver
+identities, terminal status, and errors remain durable across restart, while
+duplicate answers cannot repeat installation.
 
 ## Alternatives and tradeoffs
 

@@ -172,6 +172,14 @@ storage. Restarting the service resumes queued runs and pending result delivery;
 it does not catch up missed cron times or rerun interrupted agent execution.
 Use `push job runs` to distinguish execution state from delivery attempts.
 
+## Drafted Jobs
+
+The service creates `drafts_dir` and `jobs_dir` with owner-only permissions.
+A workspace route may write proposals only to its identity-specific drafts
+inbox, but they
+remain inactive until the exact revision is approved from its originating
+allowlisted channel identity. Pending questions survive service restart.
+
 ## Restart Behavior
 
 `push` only advances the selected channel cursor after a message is ignored or
@@ -190,7 +198,8 @@ Managed services run without a person watching the terminal. An allowed sender
 can instruct the configured backend to use its tools, subject to your backend
 settings. Keep `imessage.allow_from` narrow and use the least-powerful named
 permission profile that works. The default `restricted` profile omits shell and
-write tools; select `full-access` only in an environment you control.
+write tools. Push rejects `full-access` for unattended routes and jobs because
+it cannot enforce the drafted-job boundary.
 
 Store config files, state files, audit logs, backend credentials, and service
 logs with permissions appropriate for the service user. Logs may contain
