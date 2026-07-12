@@ -22,7 +22,7 @@ use crate::audit::{AuditEvent, AuditLog};
 use crate::channel::{Channel, RawMessage};
 use crate::claude;
 use crate::codex;
-use crate::config::{AgentBackend, Config};
+use crate::config::{AgentBackend, Config, PermissionProfile};
 use crate::history::{DeliveryStatus, History, OutboundMessage, OutboundOrigin};
 use crate::soul;
 use crate::store::Store;
@@ -45,6 +45,7 @@ struct Job {
     thread: String,
     target: String,
     backend: AgentBackend,
+    permission: PermissionProfile,
     text: String,
 }
 
@@ -244,7 +245,7 @@ impl Gateway {
                         return;
                     }
                 };
-                let backend = match self.cfg.agent_for_message(m.channel, &thread) {
+                let route = match self.cfg.route_for_message(m.channel, &thread) {
                     Ok(v) => v,
                     Err(e) => {
                         error!("[{thread}] route error: {e}");
@@ -259,6 +260,7 @@ impl Gateway {
                         continue;
                     }
                 };
+                let backend = route.backend;
                 self.audit(self.ctx.audit.accepted(m, &thread, backend));
                 info!(
                     "[{thread}] new message accepted; routing to {}",
@@ -270,6 +272,7 @@ impl Gateway {
                     thread,
                     target,
                     backend,
+                    permission: route.permission,
                     text: m.text.trim().to_string(),
                 };
                 if !self.route(job, handles).await {
@@ -507,6 +510,7 @@ async fn handle(ctx: &Ctx, job: Job) {
         is_new,
         work_dir: &work_dir,
         instructions: &instructions,
+        permission: job.permission.capability,
         prompt: &job.text,
     };
 
@@ -925,18 +929,12 @@ fn runners(cfg: &Config) -> HashMap<AgentBackend, Runner> {
         AgentBackend::Claude,
         Runner::Claude(claude::Runner {
             bin: cfg.claude_bin.clone(),
-            permission_mode: cfg.claude_permission_mode.clone(),
-            tools: cfg.claude_tools.clone(),
-            allowed_tools: cfg.claude_allowed_tools.clone(),
-            disallowed_tools: cfg.claude_disallowed_tools.clone(),
         }),
     );
     runners.insert(
         AgentBackend::Codex,
         Runner::Codex(codex::Runner {
             bin: cfg.codex_bin.clone(),
-            sandbox: cfg.codex_sandbox.clone(),
-            approval_policy: cfg.codex_approval_policy.clone(),
             model: cfg.codex_model.clone(),
         }),
     );
@@ -1167,10 +1165,6 @@ mod tests {
             AgentBackend::Claude,
             Runner::Claude(claude::Runner {
                 bin: "claude".to_string(),
-                permission_mode: "bypassPermissions".to_string(),
-                tools: None,
-                allowed_tools: Vec::new(),
-                disallowed_tools: Vec::new(),
             }),
         );
         let history_path = temp_path("setup-failure-history");
@@ -1209,6 +1203,10 @@ mod tests {
             thread: "imessage:self:me".to_string(),
             target: "me@icloud.com".to_string(),
             backend: AgentBackend::Claude,
+            permission: PermissionProfile {
+                name: "restricted".to_string(),
+                capability: crate::config::PermissionCapability::ReadOnly,
+            },
             text: "hello".to_string(),
         }
     }
@@ -1518,12 +1516,18 @@ mod tests {
         let assistant_dir = temp_path("e2e-assistant");
         std::fs::create_dir_all(&assistant_dir).unwrap();
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let mut gateway = Gateway::new(test_config(
+        let mut cfg = test_config(
             &state_path,
             sessions_dir.to_str().unwrap(),
             assistant_dir.to_str().unwrap(),
-        ))
-        .unwrap();
+        );
+        cfg.routes = vec![crate::config::RouteRule {
+            thread: Some("imessage:dm:+15551234567".to_string()),
+            channel: None,
+            agent: "codex".to_string(),
+            permission_profile: Some("workspace".to_string()),
+        }];
+        let mut gateway = Gateway::new(cfg).unwrap();
         gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
 
         let mut handles = Vec::new();
@@ -1563,11 +1567,13 @@ mod tests {
                     session_id: String::new(),
                     is_new: true,
                     prompt: "first".to_string(),
+                    permission: crate::config::PermissionCapability::Workspace,
                 },
                 FakeRunCall {
                     session_id: "fake-session".to_string(),
                     is_new: false,
                     prompt: "second".to_string(),
+                    permission: crate::config::PermissionCapability::Workspace,
                 }
             ]
         );
@@ -2024,14 +2030,11 @@ mod tests {
             telegram_allow_chat_ids: Vec::new(),
             agent: "codex".to_string(),
             routes: Vec::new(),
+            permission_profile: "restricted".to_string(),
+            job_permission_profiles: vec!["restricted".to_string()],
+            permission_profiles: HashMap::new(),
             claude_bin: "claude".to_string(),
-            claude_permission_mode: "bypassPermissions".to_string(),
-            claude_tools: None,
-            claude_allowed_tools: Vec::new(),
-            claude_disallowed_tools: Vec::new(),
             codex_bin: "codex".to_string(),
-            codex_sandbox: "workspace-write".to_string(),
-            codex_approval_policy: "never".to_string(),
             codex_model: None,
             sessions_dir: sessions_dir.to_string(),
             state_path: state_path.to_string(),

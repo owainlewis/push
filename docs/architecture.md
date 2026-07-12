@@ -218,16 +218,14 @@ the trust boundary. iMessage uses `imessage.self_handles` and
 `imessage.allow_from`; Telegram uses stable numeric `telegram.allow_user_ids`
 and `telegram.allow_chat_ids`.
 
-Backend permissions are adapter-specific:
-
-- Claude Code currently defaults to `bypassPermissions` for headless use.
-  `claude_tools` controls the available Claude Code tool set.
-  `claude_allowed_tools` and `claude_disallowed_tools` pass permission allow
-  and deny rules through to Claude Code.
-- Codex currently defaults to `workspace-write` with approval policy `never`.
-
-Both should be treated as powerful local automation. Use broader modes only in
-environments you control.
+Routes select a named Push permission profile. `restricted` is the default,
+future jobs may use only explicitly allow-listed profile names, and
+`full-access` is explicit. Push translates the common capability into backend
+controls for every request. Claude receives a fixed tool allowlist and denies
+Bash outside full access; Codex receives `read-only`, `workspace-write`, or
+`danger-full-access`. Claude does not provide a Codex-equivalent filesystem
+sandbox, so its `workspace` mapping permits file tools but deliberately omits
+shell access. Custom profiles select a capability, not raw backend flags.
 
 ## Extension Points
 

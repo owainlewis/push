@@ -134,9 +134,10 @@ fn check_config(cfg: &config::Config, checks: &mut Vec<Check>) {
     checks.push(Check::pass(
         "config",
         format!(
-            "channel={}, agent={}, imessage.self_handles={}, imessage.allow_from={}, telegram.allow_user_ids={}, telegram.allow_chat_ids={}",
+            "channel={}, agent={}, permission_profile={}, imessage.self_handles={}, imessage.allow_from={}, telegram.allow_user_ids={}, telegram.allow_chat_ids={}",
             cfg.channel,
             cfg.agent,
+            cfg.permission_profile,
             cfg.self_handles.len(),
             cfg.allow_from.len(),
             cfg.telegram_allow_user_ids.len(),
@@ -441,6 +442,8 @@ mod tests {
         assert_eq!(cfg.telegram_bot_token_env, "TELEGRAM_BOT_TOKEN");
         assert_eq!(cfg.telegram_allow_user_ids, [123456789]);
         assert!(cfg.telegram_allow_chat_ids.is_empty());
+        assert_eq!(cfg.permission_profile, "restricted");
+        assert!(cfg.permission_profiles.is_empty());
         assert_eq!(
             cfg.database_path,
             Path::new(&std::env::var("HOME").unwrap())
@@ -642,7 +645,7 @@ claude_tools = []
     }
 
     #[test]
-    fn doctor_accepts_unprefixed_claude_tool_filter_aliases() {
+    fn config_rejects_legacy_claude_tool_filter_aliases() {
         let path = temp_path("claude-tool-alias-config");
         std::fs::write(
             &path,
@@ -653,15 +656,14 @@ disallowed_tools = ["Edit"]
         )
         .unwrap();
 
-        let cfg = Config::load(path.to_str().unwrap()).unwrap();
+        let error = Config::load(path.to_str().unwrap()).unwrap_err();
 
-        assert_eq!(cfg.claude_allowed_tools, vec!["Read"]);
-        assert_eq!(cfg.claude_disallowed_tools, vec!["Edit"]);
+        assert!(error.to_string().contains("named permission_profile"));
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn doctor_accepts_unprefixed_claude_tools_alias() {
+    fn config_rejects_legacy_claude_tools_alias() {
         let path = temp_path("claude-tools-alias-config");
         std::fs::write(
             &path,
@@ -671,12 +673,9 @@ tools = ["Read", "Grep"]
         )
         .unwrap();
 
-        let cfg = Config::load(path.to_str().unwrap()).unwrap();
+        let error = Config::load(path.to_str().unwrap()).unwrap_err();
 
-        assert_eq!(
-            cfg.claude_tools,
-            Some(vec!["Read".to_string(), "Grep".to_string()])
-        );
+        assert!(error.to_string().contains("named permission_profile"));
         let _ = std::fs::remove_file(path);
     }
 
@@ -708,6 +707,7 @@ tools = ["Read", "Grep"]
             thread: None,
             channel: Some("imessage".to_string()),
             agent: "claude".to_string(),
+            permission_profile: None,
         }];
         let mut checks = Vec::new();
 
@@ -751,47 +751,127 @@ tools = ["Read", "Grep"]
                 thread: None,
                 channel: Some("telegram".to_string()),
                 agent: "codex".to_string(),
+                permission_profile: Some("workspace".to_string()),
             },
             config::RouteRule {
                 thread: Some("telegram:dm:7".to_string()),
                 channel: None,
                 agent: "claude".to_string(),
+                permission_profile: None,
             },
             config::RouteRule {
                 thread: Some("telegram:dm:7:topic:99".to_string()),
                 channel: None,
                 agent: "codex".to_string(),
+                permission_profile: None,
             },
             config::RouteRule {
                 thread: Some("self:me@icloud.com".to_string()),
                 channel: None,
                 agent: "codex".to_string(),
+                permission_profile: None,
             },
         ];
 
         assert_eq!(
-            cfg.agent_for_message("telegram", "telegram:dm:7").unwrap(),
+            cfg.route_for_message("telegram", "telegram:dm:7")
+                .unwrap()
+                .backend,
             config::AgentBackend::Claude
         );
         assert_eq!(
-            cfg.agent_for_message("telegram", "telegram:dm:8").unwrap(),
+            cfg.route_for_message("telegram", "telegram:dm:8")
+                .unwrap()
+                .backend,
             config::AgentBackend::Codex
         );
         assert_eq!(
-            cfg.agent_for_message("telegram", "telegram:dm:7:topic:99")
-                .unwrap(),
+            cfg.route_for_message("telegram", "telegram:dm:8")
+                .unwrap()
+                .permission
+                .capability,
+            config::PermissionCapability::Workspace
+        );
+        assert_eq!(
+            cfg.route_for_message("telegram", "telegram:dm:7:topic:99")
+                .unwrap()
+                .backend,
             config::AgentBackend::Codex
         );
         assert_eq!(
-            cfg.agent_for_message("telegram", "telegram:dm:7:topic:100")
-                .unwrap(),
+            cfg.route_for_message("telegram", "telegram:dm:7:topic:100")
+                .unwrap()
+                .backend,
             config::AgentBackend::Claude
         );
         assert_eq!(
-            cfg.agent_for_message("imessage", "imessage:self:me@icloud.com")
-                .unwrap(),
+            cfg.route_for_message("imessage", "imessage:self:me@icloud.com")
+                .unwrap()
+                .backend,
             config::AgentBackend::Codex
         );
+    }
+
+    #[test]
+    fn unknown_route_permission_profile_fails_config_load() {
+        let path = temp_path("unknown-route-permission");
+        std::fs::write(
+            &path,
+            r#"self_handles = ["me@icloud.com"]
+
+[[routes]]
+channel = "imessage"
+agent = "claude"
+permission_profile = "missing"
+"#,
+        )
+        .unwrap();
+
+        let error = Config::load(path.to_str().unwrap()).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("invalid permission profile for route"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn job_profile_errors_are_scoped_and_enforce_named_allow_list() {
+        let path = temp_path("job-permission-profile");
+        std::fs::write(
+            &path,
+            r#"self_handles = ["me@icloud.com"]
+job_permission_profiles = ["job-writer"]
+
+[permission_profiles.job-writer]
+capability = "workspace"
+"#,
+        )
+        .unwrap();
+        let cfg = Config::load(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(
+            cfg.permission_for_job("job-writer").unwrap().capability,
+            config::PermissionCapability::Workspace
+        );
+        assert!(cfg
+            .permission_for_job("missing")
+            .unwrap_err()
+            .to_string()
+            .contains("invalid job permission profile"));
+        assert!(cfg
+            .permission_for_job("workspace")
+            .unwrap_err()
+            .to_string()
+            .contains("is not included in job_permission_profiles"));
+        assert_eq!(
+            cfg.route_for_message("imessage", "imessage:self:me@icloud.com")
+                .unwrap()
+                .permission
+                .capability,
+            config::PermissionCapability::ReadOnly
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -866,14 +946,11 @@ tools = ["Read", "Grep"]
             telegram_allow_chat_ids: Vec::new(),
             agent: "codex".to_string(),
             routes: Vec::new(),
+            permission_profile: "restricted".to_string(),
+            job_permission_profiles: vec!["restricted".to_string()],
+            permission_profiles: std::collections::HashMap::new(),
             claude_bin: "/fake/claude".to_string(),
-            claude_permission_mode: "bypassPermissions".to_string(),
-            claude_tools: None,
-            claude_allowed_tools: Vec::new(),
-            claude_disallowed_tools: Vec::new(),
             codex_bin: "/fake/codex".to_string(),
-            codex_sandbox: "workspace-write".to_string(),
-            codex_approval_policy: "never".to_string(),
             codex_model: None,
             sessions_dir: "/fake/sessions".to_string(),
             state_path: "/fake/state.json".to_string(),

@@ -10,12 +10,11 @@ use tokio::process::Command;
 use uuid::Uuid;
 
 use crate::agent::{Request, RunError, RunOutput};
+use crate::config::PermissionCapability;
 
 /// Runner invokes `codex exec` in non-interactive mode.
 pub struct Runner {
     pub bin: String,
-    pub sandbox: String,
-    pub approval_policy: String,
     pub model: Option<String>,
 }
 
@@ -35,10 +34,11 @@ impl Runner {
         let out_path = Path::new(req.work_dir)
             .join(format!(".push-codex-last-message-{}.txt", Uuid::new_v4()));
         let mut cmd = Command::new(&self.bin);
+        let sandbox = sandbox(req.permission);
         cmd.arg("--ask-for-approval")
-            .arg(&self.approval_policy)
+            .arg("never")
             .arg("--sandbox")
-            .arg(&self.sandbox);
+            .arg(sandbox);
         if !req.instructions.trim().is_empty() {
             cmd.arg("-c")
                 .arg(developer_instructions(req.instructions.trim()));
@@ -110,6 +110,14 @@ impl Runner {
             reply: reply.trim().to_string(),
             session_id,
         })
+    }
+}
+
+fn sandbox(capability: PermissionCapability) -> &'static str {
+    match capability {
+        PermissionCapability::ReadOnly => "read-only",
+        PermissionCapability::Workspace => "workspace-write",
+        PermissionCapability::FullAccess => "danger-full-access",
     }
 }
 
@@ -325,6 +333,7 @@ mod tests {
                     is_new: true,
                     work_dir: work_dir.to_str().unwrap(),
                     instructions: "assistant identity",
+                    permission: PermissionCapability::Workspace,
                     prompt: "hello",
                 },
                 Duration::from_secs(5),
@@ -360,6 +369,7 @@ mod tests {
                     is_new: false,
                     work_dir: work_dir.to_str().unwrap(),
                     instructions: "assistant identity",
+                    permission: PermissionCapability::ReadOnly,
                     prompt: "continue",
                 },
                 Duration::from_secs(5),
@@ -372,6 +382,7 @@ mod tests {
         let args = read_args(&args_path);
         assert_arg_sequence(&args, &["exec", "resume"]);
         assert_arg_present(&args, "existing-thread");
+        assert_arg_pair(&args, "--sandbox", "read-only");
         assert_arg_pair(&args, "-c", &developer_instructions("assistant identity"));
         assert_eq!(args.last().unwrap(), "continue");
         assert!(!args.contains(&"-C".to_string()));
@@ -418,12 +429,7 @@ mod tests {
     }
 
     fn runner(bin: String) -> Runner {
-        Runner {
-            bin,
-            sandbox: "workspace-write".to_string(),
-            approval_policy: "never".to_string(),
-            model: None,
-        }
+        Runner { bin, model: None }
     }
 
     fn request(work_dir: &str) -> Request<'_> {
@@ -432,6 +438,7 @@ mod tests {
             is_new: true,
             work_dir,
             instructions: "",
+            permission: PermissionCapability::ReadOnly,
             prompt: "hello",
         }
     }
@@ -575,7 +582,18 @@ mod tests {
             is_new,
             work_dir,
             instructions: String::new(),
+            permission: PermissionCapability::ReadOnly,
             prompt: "hello".to_string(),
         }
+    }
+
+    #[test]
+    fn translates_all_permission_capabilities() {
+        assert_eq!(sandbox(PermissionCapability::ReadOnly), "read-only");
+        assert_eq!(sandbox(PermissionCapability::Workspace), "workspace-write");
+        assert_eq!(
+            sandbox(PermissionCapability::FullAccess),
+            "danger-full-access"
+        );
     }
 }

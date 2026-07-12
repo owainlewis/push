@@ -204,18 +204,18 @@ settings, pushes to `main` deploy the site automatically.
 channel = "imessage"
 agent = "codex"
 
-# Advanced shared and backend settings use their existing top-level names.
+# Advanced shared settings.
 claude_bin = "claude"
-claude_permission_mode = "bypassPermissions"
-claude_allowed_tools = []
-claude_disallowed_tools = []
 codex_bin = "codex"
-codex_sandbox = "workspace-write"
-codex_approval_policy = "never"
 audit_log_path = "~/.push/audit.jsonl"
 audit_log_content = false
 database_path = "~/.push/push.db"
 assistant_dir = "~/.push"
+permission_profile = "restricted"
+job_permission_profiles = ["restricted", "research"]
+
+[permission_profiles.research]
+capability = "read-only"
 
 [imessage]
 self_handles = ["you@icloud.com"]
@@ -229,6 +229,7 @@ allow_chat_ids = []
 [[routes]]
 thread = "imessage:self:you@icloud.com"
 agent = "codex"
+permission_profile = "workspace"
 ```
 
 `channel` can be `imessage` or `telegram`. `agent` can be `claude` or `codex`.
@@ -241,10 +242,12 @@ Routes can override the backend by channel or exact channel-qualified thread:
 [[routes]]
 channel = "telegram"
 agent = "codex"
+permission_profile = "restricted"
 
 [[routes]]
 thread = "telegram:dm:123456789"
 agent = "claude"
+permission_profile = "workspace"
 ```
 
 iMessage thread keys are `imessage:self:<handle>` and
@@ -253,6 +256,34 @@ iMessage thread keys are `imessage:self:<handle>` and
 `:topic:<topic_id>`; topic routes inherit the parent private-chat route unless
 an exact topic route is configured. Legacy unqualified iMessage route keys
 remain accepted.
+
+## Permission Profiles
+
+Every route selects a named Push permission profile. The default is the built-in
+`restricted` profile. Built-ins are `restricted` (`read-only` capability),
+`workspace`, and the deliberately explicit `full-access`. Custom profiles can
+only select one of those capabilities; they cannot inject raw backend flags.
+
+Backend translation is intentionally conservative:
+
+- `restricted`: Claude gets only Read, Grep, and Glob with Bash and write tools
+  denied; Codex uses the read-only sandbox with approvals disabled.
+- `workspace`: Claude gets read and file-edit tools but no Bash because Claude
+  Code has no equivalent to Codex filesystem sandboxing; Codex uses
+  `workspace-write` with approvals disabled.
+- `full-access`: Claude uses `bypassPermissions`; Codex uses
+  `danger-full-access`. Select it by name only in environments you control.
+
+Future jobs request only a profile name explicitly listed in
+`job_permission_profiles`. The allow-list defaults to only `restricted`; adding
+`workspace`, `full-access`, or a custom profile is an explicit operator choice.
+Unknown route profiles fail startup. Unknown or unapproved job references return
+a job-scoped validation error without invalidating messaging routes.
+
+Legacy raw settings such as `claude_permission_mode`, `claude_tools`,
+`claude_allowed_tools`, `claude_disallowed_tools`, `codex_sandbox`, and
+`codex_approval_policy` now produce a migration error; replace them with a named
+profile.
 
 push reads TOML only. Convert any earlier `config.json` file to `config.toml`
 before upgrading. The old JSON filename remains gitignored to reduce the risk
@@ -283,19 +314,9 @@ MCP servers, or use any other backend tool. Keep `imessage.allow_from` tight, an
 lost or shared phone, forwarded iMessage account, or compromised allowed sender
 as able to instruct the agent.
 
-Claude Code defaults to `bypassPermissions` for headless use. Codex defaults to
-`workspace-write` plus `never` approval for non-interactive use. Both settings
-should be treated as powerful automation. Use the least access that still makes
-the assistant useful, and run broad-access modes only in an environment you
-control.
-
-For Claude Code, `claude_tools` maps to `--tools`, which controls which tools
-are available to the model. Set entries such as `"Read"` and `"Grep"` for a
-read-only assistant, or `[""]` to disable tools for pure text replies.
-`claude_allowed_tools` maps to `--allowed-tools`, which lets matching tools run
-without a prompt, and `claude_disallowed_tools` maps to `--disallowed-tools`,
-which denies matching tools. The shorter `tools`, `allowed_tools`, and
-`disallowed_tools` names are also accepted.
+The default `restricted` profile does not grant write or shell tools. Broader
+profiles should still be treated as powerful automation because backend
+enforcement differs and an allowed sender controls the request.
 
 ## Audit Log
 
