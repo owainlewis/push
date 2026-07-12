@@ -499,6 +499,63 @@ tools = ["Read", "Grep"]
     }
 
     #[test]
+    fn inherit_profile_is_selectable_for_default_and_routes() {
+        let path = temp_path("inherit-profile-config");
+        std::fs::write(
+            &path,
+            r#"self_handles = ["me@icloud.com"]
+permission_profile = "inherit"
+
+[permission_profiles.trusted]
+capability = "inherit"
+
+[[routes]]
+thread = "imessage:self:me@icloud.com"
+agent = "codex"
+permission_profile = "trusted"
+"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(
+            cfg.route_for_message("imessage", "imessage:dm:someone")
+                .unwrap()
+                .permission
+                .capability,
+            config::PermissionCapability::Inherit
+        );
+        assert_eq!(
+            cfg.route_for_message("imessage", "imessage:self:me@icloud.com")
+                .unwrap()
+                .permission
+                .capability,
+            config::PermissionCapability::Inherit
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn built_in_inherit_profile_cannot_be_redefined() {
+        let path = temp_path("inherit-redefined-config");
+        std::fs::write(
+            &path,
+            r#"self_handles = ["me@icloud.com"]
+
+[permission_profiles.inherit]
+capability = "read-only"
+"#,
+        )
+        .unwrap();
+
+        let error = Config::load(path.to_str().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("cannot be redefined"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn config_rejects_removed_job_permission_profiles_key() {
         let path = temp_path("job-permission-profiles-config");
         std::fs::write(
