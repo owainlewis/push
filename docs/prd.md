@@ -139,6 +139,7 @@ user prompt.
 | `permission_profiles` | Custom names mapped to a common capability. |
 | `job_permission_profiles` | Explicit profile names future jobs may request; defaults to `restricted`. |
 | `jobs_dir` | Installed Markdown runbooks; defaults to `~/.push/jobs`. |
+| `drafts_dir` | Agent-written inactive job proposals; defaults to `~/.push/drafts`. |
 | `jobs_agent` | Optional default job backend; otherwise uses `agent`. |
 | `jobs_max_timeout` | Maximum validated job timeout; defaults to `30m`. |
 | `jobs_run_dir` | Local advisory-lock state; defaults to `~/.push/run`. |
@@ -176,6 +177,8 @@ user prompt.
 - `/clear` starts a fresh backend session.
 - Claude backend can create and resume a session.
 - Codex backend can create a session, store the Codex thread id, and resume it.
+- Workspace routes can propose a validated job draft, but only an exact-revision
+  approval from the bound allowlisted identity can install it.
 - Fresh or lost backend sessions receive bounded recent canonical history;
   resumed sessions receive only the new request.
 - Assistant identity is included in backend runs at instruction priority.

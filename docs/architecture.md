@@ -248,6 +248,20 @@ the rehydrated conversation transcript. Workflows can poll the durable question
 state and consume an answered value once; crossing the expiry first records an
 expired terminal state, so later cancellation cannot overwrite the timeout.
 
+Agent-written job proposals live separately under identity-specific inboxes in
+`drafts_dir`. Route backends receive only their exact inbox as an additional
+writable root under contained
+permission profiles; full-access routes and jobs are rejected. Push snapshots
+and validates a changed regular file, stores its exact bytes, hash, proposer,
+and bound approval question in SQLite, then sends the full proposal to the
+originating channel. Reconciliation also runs after backend failure or timeout
+and before replaying a persisted outbound reply, so a crash cannot orphan an
+unrecorded revision. Approval rechecks the path, symlink status, revision, job
+schema, protected work directory, and configured permission ceiling. A valid
+stored revision is staged inside `jobs_dir` and installed with an atomic
+no-clobber link. Rejection and revision mismatch never activate the draft, and
+consumed or duplicate answers cannot repeat installation.
+
 `audit_log_path` stores a local JSONL event stream for production debugging.
 Audit events record message metadata, routing decisions, approval outcomes,
 backend run starts and failures, reply delivery metadata, and row completion.
@@ -277,14 +291,14 @@ the trust boundary. iMessage uses `imessage.self_handles` and
 `imessage.allow_from`; Telegram uses stable numeric `telegram.allow_user_ids`
 and `telegram.allow_chat_ids`.
 
-Routes select a named Push permission profile. `restricted` is the default,
-future jobs may use only explicitly allow-listed profile names, and
-`full-access` is explicit. Push translates the common capability into backend
-controls for every request. Claude receives a fixed tool allowlist and denies
-Bash outside full access; Codex receives `read-only`, `workspace-write`, or
-`danger-full-access`. Claude does not provide a Codex-equivalent filesystem
-sandbox, so its `workspace` mapping permits file tools but deliberately omits
-shell access. Custom profiles select a capability, not raw backend flags.
+Routes select a named Push permission profile. `restricted` is the default and
+jobs may use only explicitly allow-listed profile names. Push rejects
+`full-access` for routes and jobs because backend bypass modes cannot protect
+Push-owned files. Claude receives a fixed tool allowlist and denies Bash;
+Codex receives `read-only` or `workspace-write`. Claude does not provide a
+Codex-equivalent filesystem sandbox, so its `workspace` mapping permits file
+tools but deliberately omits shell access. Custom profiles select a capability,
+not raw backend flags.
 
 ## Extension Points
 

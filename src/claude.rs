@@ -62,6 +62,9 @@ impl Runner {
             .arg(controls.permission_mode)
             .arg("--add-dir")
             .arg(req.work_dir);
+        if let Some(path) = req.additional_write_dir {
+            cmd.arg("--add-dir").arg(path);
+        }
         if req.is_new {
             cmd.arg("--session-id").arg(req.session_id);
         } else {
@@ -268,6 +271,7 @@ mod tests {
                     session_id: "push-session",
                     is_new: true,
                     work_dir: work_dir.to_str().unwrap(),
+                    additional_write_dir: None,
                     instructions: "assistant identity",
                     permission: PermissionCapability::ReadOnly,
                     prompt: "hello",
@@ -297,6 +301,7 @@ mod tests {
     async fn runs_resumed_session_with_resume_flag() {
         let args_path = temp_path("claude-resume-args");
         let work_dir = temp_dir("claude-resume-work");
+        let drafts_dir = temp_dir("claude-resume-drafts");
         let script = format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nprintf '%s\\n' '{{\"result\":\"resumed\",\"session_id\":\"claude-returned\"}}'\n",
             sh_arg(&args_path)
@@ -310,6 +315,7 @@ mod tests {
                     session_id: "existing-session",
                     is_new: false,
                     work_dir: work_dir.to_str().unwrap(),
+                    additional_write_dir: Some(drafts_dir.to_str().unwrap()),
                     instructions: "assistant identity",
                     permission: PermissionCapability::Workspace,
                     prompt: "continue",
@@ -324,6 +330,9 @@ mod tests {
         assert_arg_pair(&args, "--resume", "existing-session");
         assert!(!args.contains(&"--session-id".to_string()));
         assert_arg_pair(&args, "--append-system-prompt", "assistant identity");
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair == ["--add-dir", drafts_dir.to_str().unwrap()] }));
         assert_arg_pair(&args, "-p", "continue");
         assert!(args
             .windows(2)
@@ -346,6 +355,7 @@ mod tests {
                     session_id: "missing",
                     is_new: false,
                     work_dir: work_dir.to_str().unwrap(),
+                    additional_write_dir: None,
                     instructions: "",
                     permission: PermissionCapability::ReadOnly,
                     prompt: "continue",
@@ -403,6 +413,7 @@ mod tests {
             session_id: "session",
             is_new: true,
             work_dir,
+            additional_write_dir: None,
             instructions: "",
             permission: PermissionCapability::ReadOnly,
             prompt: "hello",

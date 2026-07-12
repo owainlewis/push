@@ -13,6 +13,7 @@ pub struct Request<'a> {
     pub session_id: &'a str,
     pub is_new: bool,
     pub work_dir: &'a str,
+    pub additional_write_dir: Option<&'a str>,
     pub instructions: &'a str,
     pub permission: PermissionCapability,
     pub prompt: &'a str,
@@ -89,6 +90,7 @@ pub struct FakeRunner {
     pub session_id: String,
     pub calls: std::sync::Arc<std::sync::Mutex<Vec<FakeRunCall>>>,
     pub before_return: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    pub failure: Option<String>,
     pub resume_missing_once: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
@@ -122,6 +124,9 @@ impl FakeRunner {
         }
         if let Some(before_return) = &self.before_return {
             before_return();
+        }
+        if let Some(message) = &self.failure {
+            return Err(RunError::Failed(message.clone()));
         }
         Ok(RunOutput {
             reply: format!("fake reply: {}", req.prompt),

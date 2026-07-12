@@ -1,6 +1,7 @@
 //! Gateway configuration loaded from a TOML file.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -44,6 +45,8 @@ pub struct Config {
     pub permission_profiles: HashMap<String, PermissionProfileConfig>,
     #[serde(default = "default_jobs_dir")]
     pub jobs_dir: String,
+    #[serde(default = "default_drafts_dir")]
+    pub drafts_dir: String,
     #[serde(default)]
     pub jobs_agent: Option<String>,
     #[serde(default = "default_jobs_max_timeout")]
@@ -132,8 +135,10 @@ impl Config {
         c.database_path = expand_home(&c.database_path);
         c.assistant_dir = expand_home(&c.assistant_dir);
         c.jobs_dir = expand_home(&c.jobs_dir);
+        c.drafts_dir = expand_home(&c.drafts_dir);
         c.jobs_run_dir = expand_home(&c.jobs_run_dir);
         c.validate()?;
+        validate_config_path(path, &c)?;
         Ok(c)
     }
 
@@ -223,6 +228,12 @@ impl Config {
                 profile.name
             );
         }
+        if profile.capability == PermissionCapability::FullAccess {
+            bail!(
+                "job permission profile {:?} uses full-access, which cannot protect Push jobs, drafts, or state",
+                profile.name
+            );
+        }
         Ok(profile)
     }
 
@@ -234,6 +245,37 @@ impl Config {
     pub fn jobs_max_timeout_dur(&self) -> Result<Duration> {
         humantime::parse_duration(&self.jobs_max_timeout)
             .with_context(|| format!("invalid jobs_max_timeout {}", self.jobs_max_timeout))
+    }
+
+    pub fn validate_job_workdir(
+        &self,
+        workdir: &Path,
+        capability: PermissionCapability,
+    ) -> Result<()> {
+        if capability == PermissionCapability::ReadOnly {
+            return Ok(());
+        }
+        let workdir = resolved_absolute("job workdir", workdir)?;
+        for (label, protected) in [
+            ("assistant_dir", self.assistant_dir.as_str()),
+            ("sessions_dir", self.sessions_dir.as_str()),
+            ("jobs_dir", self.jobs_dir.as_str()),
+            ("drafts_dir", self.drafts_dir.as_str()),
+            ("jobs_run_dir", self.jobs_run_dir.as_str()),
+            ("state_path", self.state_path.as_str()),
+            ("database_path", self.database_path.as_str()),
+            ("audit_log_path", self.audit_log_path.as_str()),
+        ] {
+            let protected = resolved_absolute(label, Path::new(protected))?;
+            if paths_overlap(&workdir, &protected) {
+                bail!(
+                    "job workdir {} overlaps Push-owned {label} {}",
+                    workdir.display(),
+                    protected.display()
+                );
+            }
+        }
+        Ok(())
     }
 
     fn resolve_route(&self, route: &RouteRule) -> Result<RouteSelection> {
@@ -320,14 +362,19 @@ impl Config {
         if self.jobs_max_timeout_dur()?.is_zero() {
             bail!("jobs_max_timeout must be positive");
         }
-        if self.jobs_dir.trim().is_empty() || self.jobs_run_dir.trim().is_empty() {
-            bail!("jobs_dir and jobs_run_dir cannot be empty");
+        if self.jobs_dir.trim().is_empty()
+            || self.drafts_dir.trim().is_empty()
+            || self.jobs_run_dir.trim().is_empty()
+        {
+            bail!("jobs_dir, drafts_dir, and jobs_run_dir cannot be empty");
         }
         if self.jobs_max_workers == 0 {
             bail!("jobs_max_workers must be positive");
         }
-        self.resolve_permission_profile(&self.permission_profile)
+        let default_profile = self
+            .resolve_permission_profile(&self.permission_profile)
             .context("invalid default permission profile")?;
+        reject_uncontained_route_profile(&default_profile)?;
         for (name, profile) in &self.permission_profiles {
             if name.trim().is_empty() {
                 bail!("permission profile names cannot be empty");
@@ -359,13 +406,119 @@ impl Config {
                 .permission_profile
                 .as_deref()
                 .unwrap_or(&self.permission_profile);
-            self.resolve_permission_profile(profile)
+            let profile = self
+                .resolve_permission_profile(profile)
                 .with_context(|| format!("invalid permission profile for route {route:?}"))?;
+            reject_uncontained_route_profile(&profile)?;
         }
+        validate_protected_paths(self)?;
         self.poll_interval_dur()?;
         self.run_timeout_dur()?;
         Ok(())
     }
+}
+
+fn reject_uncontained_route_profile(profile: &PermissionProfile) -> Result<()> {
+    if profile.capability == PermissionCapability::FullAccess {
+        bail!(
+            "route permission profile {:?} uses full-access, which cannot prevent direct writes to Push jobs or state",
+            profile.name
+        );
+    }
+    Ok(())
+}
+
+fn validate_protected_paths(cfg: &Config) -> Result<()> {
+    let sessions = resolved_absolute("sessions_dir", Path::new(&cfg.sessions_dir))?;
+    let jobs = resolved_absolute("jobs_dir", Path::new(&cfg.jobs_dir))?;
+    let drafts = resolved_absolute("drafts_dir", Path::new(&cfg.drafts_dir))?;
+    let run = resolved_absolute("jobs_run_dir", Path::new(&cfg.jobs_run_dir))?;
+    let assistant = resolved_absolute("assistant_dir", Path::new(&cfg.assistant_dir))?;
+    if paths_overlap(&jobs, &drafts) {
+        bail!("jobs_dir and drafts_dir must not overlap");
+    }
+    for (label, path) in [
+        ("jobs_dir", &jobs),
+        ("drafts_dir", &drafts),
+        ("jobs_run_dir", &run),
+    ] {
+        if paths_overlap(&sessions, path) {
+            bail!("sessions_dir and {label} must not overlap");
+        }
+    }
+    if assistant.starts_with(&sessions) {
+        bail!("assistant_dir must not be inside sessions_dir");
+    }
+    if assistant.starts_with(&drafts) {
+        bail!("assistant_dir must not be inside drafts_dir");
+    }
+    for (label, value) in [
+        ("state_path", cfg.state_path.as_str()),
+        ("database_path", cfg.database_path.as_str()),
+        ("audit_log_path", cfg.audit_log_path.as_str()),
+    ] {
+        let path = resolved_absolute(label, Path::new(value))?;
+        if path.starts_with(&sessions) {
+            bail!("{label} must not be inside sessions_dir");
+        }
+        if path.starts_with(&drafts) {
+            bail!("{label} must not be inside drafts_dir");
+        }
+    }
+    Ok(())
+}
+
+fn validate_config_path(path: &str, cfg: &Config) -> Result<()> {
+    let config = std::fs::canonicalize(path).with_context(|| format!("resolve config {path}"))?;
+    let sessions = resolved_absolute("sessions_dir", Path::new(&cfg.sessions_dir))?;
+    let drafts = resolved_absolute("drafts_dir", Path::new(&cfg.drafts_dir))?;
+    if config.starts_with(&sessions) {
+        bail!("config file must not be inside sessions_dir");
+    }
+    if config.starts_with(&drafts) {
+        bail!("config file must not be inside drafts_dir");
+    }
+    Ok(())
+}
+
+fn normalized_absolute(label: &str, path: &Path) -> Result<PathBuf> {
+    if !path.is_absolute() {
+        bail!("{label} must be an absolute path");
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => bail!("{label} cannot contain '..'"),
+            Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    Ok(normalized)
+}
+
+fn resolved_absolute(label: &str, path: &Path) -> Result<PathBuf> {
+    let normalized = normalized_absolute(label, path)?;
+    let mut existing = normalized.as_path();
+    let mut missing = Vec::new();
+    while !existing.exists() {
+        let name = existing
+            .file_name()
+            .with_context(|| format!("{label} has no existing ancestor"))?;
+        missing.push(name.to_os_string());
+        existing = existing
+            .parent()
+            .with_context(|| format!("{label} has no existing ancestor"))?;
+    }
+    let mut resolved = std::fs::canonicalize(existing)
+        .with_context(|| format!("resolve existing ancestor for {label}"))?;
+    for component in missing.into_iter().rev() {
+        resolved.push(component);
+    }
+    Ok(resolved)
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
 }
 
 fn flatten_provider_section(
@@ -579,6 +732,10 @@ fn default_job_permission_profiles() -> Vec<String> {
 fn default_jobs_dir() -> String {
     "~/.push/jobs".to_string()
 }
+
+fn default_drafts_dir() -> String {
+    "~/.push/drafts".to_string()
+}
 fn default_jobs_max_timeout() -> String {
     "30m".to_string()
 }
@@ -605,4 +762,103 @@ fn default_assistant_dir() -> String {
 }
 fn default_reply_marker() -> String {
     "\n\n-- sent by push".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::temp_dir;
+
+    fn config() -> Config {
+        let root = temp_dir("config-draft-boundary");
+        Config {
+            channel: "imessage".to_string(),
+            channels: Vec::new(),
+            primary_delivery: None,
+            db_path: root.join("chat.db").to_string_lossy().to_string(),
+            poll_interval: "1s".to_string(),
+            run_timeout: "1s".to_string(),
+            self_handles: vec!["me@example.com".to_string()],
+            allow_from: Vec::new(),
+            telegram_bot_token: None,
+            telegram_bot_token_env: "TELEGRAM_BOT_TOKEN".to_string(),
+            telegram_allow_user_ids: Vec::new(),
+            telegram_allow_chat_ids: Vec::new(),
+            agent: "codex".to_string(),
+            routes: Vec::new(),
+            permission_profile: "workspace".to_string(),
+            job_permission_profiles: vec!["restricted".to_string()],
+            permission_profiles: HashMap::new(),
+            jobs_dir: root.join("jobs").to_string_lossy().to_string(),
+            drafts_dir: root.join("drafts").to_string_lossy().to_string(),
+            jobs_agent: None,
+            jobs_max_timeout: "30m".to_string(),
+            jobs_run_dir: root.join("run").to_string_lossy().to_string(),
+            jobs_max_workers: 2,
+            claude_bin: "claude".to_string(),
+            codex_bin: "codex".to_string(),
+            codex_model: None,
+            sessions_dir: root.join("sessions").to_string_lossy().to_string(),
+            state_path: root.join("state.json").to_string_lossy().to_string(),
+            audit_log_path: root.join("audit.jsonl").to_string_lossy().to_string(),
+            database_path: root.join("push.db").to_string_lossy().to_string(),
+            audit_log_content: false,
+            assistant_dir: root.to_string_lossy().to_string(),
+            reply_marker: String::new(),
+        }
+    }
+
+    #[test]
+    fn rejects_uncontained_routes_jobs_and_protected_path_overlap() {
+        let mut cfg = config();
+        assert!(cfg.validate().is_ok());
+
+        cfg.permission_profile = "full-access".to_string();
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("full-access"));
+
+        cfg.permission_profile = "workspace".to_string();
+        cfg.job_permission_profiles = vec!["full-access".to_string()];
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("full-access"));
+
+        cfg.job_permission_profiles = vec!["restricted".to_string()];
+        cfg.drafts_dir = format!("{}/drafts", cfg.jobs_dir);
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("must not overlap"));
+
+        let mut cfg = config();
+        cfg.assistant_dir = format!("{}/identity", cfg.sessions_dir);
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("assistant_dir must not be inside sessions_dir"));
+
+        let mut cfg = config();
+        cfg.assistant_dir = format!("{}/identity", cfg.drafts_dir);
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("assistant_dir must not be inside drafts_dir"));
+
+        let cfg = config();
+        std::fs::create_dir_all(&cfg.sessions_dir).unwrap();
+        let config_path = Path::new(&cfg.sessions_dir).join("config.toml");
+        std::fs::write(&config_path, "channel = 'imessage'").unwrap();
+        assert!(validate_config_path(config_path.to_str().unwrap(), &cfg)
+            .unwrap_err()
+            .to_string()
+            .contains("config file must not be inside sessions_dir"));
+    }
 }

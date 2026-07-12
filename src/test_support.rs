@@ -85,6 +85,7 @@ impl ContractRequest {
             session_id: &self.session_id,
             is_new: self.is_new,
             work_dir: self.work_dir.to_str().unwrap(),
+            additional_write_dir: None,
             instructions: &self.instructions,
             permission: self.permission,
             prompt: &self.prompt,
