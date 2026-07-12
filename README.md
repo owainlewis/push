@@ -234,6 +234,7 @@ assistant_dir = "~/.push"
 permission_profile = "restricted"
 job_permission_profiles = ["restricted", "research"]
 jobs_dir = "~/.push/jobs"
+drafts_dir = "~/.push/drafts"
 jobs_agent = "codex"
 jobs_max_timeout = "30m"
 jobs_run_dir = "~/.push/run"
@@ -329,12 +330,13 @@ Backend translation is intentionally conservative:
 - `workspace`: Claude gets read and file-edit tools but no Bash because Claude
   Code has no equivalent to Codex filesystem sandboxing; Codex uses
   `workspace-write` with approvals disabled.
-- `full-access`: Claude uses `bypassPermissions`; Codex uses
-  `danger-full-access`. Select it by name only in environments you control.
+- `full-access`: maps to backend bypass modes, but push rejects it for
+  unattended routes and jobs because it cannot protect installed jobs,
+  configuration, or state from direct writes.
 
 Future jobs request only a profile name explicitly listed in
 `job_permission_profiles`. The allow-list defaults to only `restricted`; adding
-`workspace`, `full-access`, or a custom profile is an explicit operator choice.
+`workspace` or a contained custom profile is an explicit operator choice.
 Unknown route profiles fail startup. Unknown or unapproved job references return
 a job-scoped validation error without invalidating messaging routes.
 
@@ -406,6 +408,32 @@ Scheduled state and bounded output are persisted before delivery. Success,
 failure, timeout, overlap, and delivery state remain separate in
 `push job runs`. Delivery retries up to three times with backoff from the stored
 result, including after restart, and never reruns the backend.
+
+## Agent-Drafted Jobs
+
+A route using the `workspace` profile can propose a job by writing one complete
+runbook to the identity-specific inbox Push provides beneath `drafts_dir`, which
+defaults to `~/.push/drafts`. Push gives the backend only that opaque inbox as
+its extra writable root, so concurrent senders and topics cannot claim each
+other's files. `restricted` routes
+remain read-only, and `full-access` routes and jobs are rejected because their
+backend bypass modes cannot enforce this boundary.
+
+After a route run finishes, fails, times out, or resumes from a persisted
+outbound reply, Push reconciles every unrecorded revision in that route's inbox.
+It validates each filename,
+complete contents, work directory, timeout, backend, triggers, and named
+permission profile. Invalid files, symlinks, path escapes, protected Push paths,
+and profiles above the configured job ceiling never reach approval. A valid
+draft is sent in full to the originating allowlisted channel followed by an
+Approve or Reject `ask_user` question.
+
+Approval is bound to that channel, sender, chat, thread or topic, and the exact
+SHA-256 revision shown in the question. Push stores the proposal bytes and both
+identities in `push.db`. It revalidates the current draft and configured ceiling
+before installing from the stored bytes with an atomic no-clobber operation.
+Any edit after presentation invalidates the approval. Rejection leaves the file
+inactive in `drafts_dir`; duplicate answers cannot install twice.
 
 push reads TOML only. Convert any earlier `config.json` file to `config.toml`
 before upgrading. The old JSON filename remains gitignored to reduce the risk
