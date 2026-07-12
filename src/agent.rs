@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
-use crate::config::{AgentBackend, PermissionCapability};
+use crate::config::{AgentBackend, Config, PermissionCapability};
 use crate::{claude, codex};
 
 /// One headless agent turn.
@@ -41,7 +41,40 @@ pub enum Runner {
     Fake(FakeRunner),
 }
 
+/// Linux can briefly report ETXTBSY when an executable was just installed or
+/// replaced. Retry only that transient spawn error, within the caller's
+/// overall timeout, and preserve every other error unchanged. `spawn` must
+/// build a fresh child process attempt on every call.
+pub(crate) async fn output_with_retry<F, Fut>(mut spawn: F) -> std::io::Result<std::process::Output>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<std::process::Output>>,
+{
+    let mut attempts = 0;
+    loop {
+        match spawn().await {
+            Err(error) if error.raw_os_error() == Some(26) && attempts < 3 => {
+                attempts += 1;
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            result => return result,
+        }
+    }
+}
+
 impl Runner {
+    pub fn for_backend(backend: AgentBackend, cfg: &Config) -> Self {
+        match backend {
+            AgentBackend::Claude => Runner::Claude(claude::Runner {
+                bin: cfg.claude_bin.clone(),
+            }),
+            AgentBackend::Codex => Runner::Codex(codex::Runner {
+                bin: cfg.codex_bin.clone(),
+                model: cfg.codex_model.clone(),
+            }),
+        }
+    }
+
     pub fn backend(&self) -> AgentBackend {
         match self {
             Runner::Claude(_) => AgentBackend::Claude,
@@ -132,5 +165,82 @@ impl FakeRunner {
             reply: format!("fake reply: {}", req.prompt),
             session_id: req.is_new.then(|| self.session_id.clone()),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::os::unix::process::ExitStatusExt;
+    use std::sync::Mutex;
+
+    fn fake_spawner(
+        outputs: impl Into<VecDeque<std::io::Result<std::process::Output>>>,
+    ) -> (
+        Mutex<VecDeque<std::io::Result<std::process::Output>>>,
+        Mutex<usize>,
+    ) {
+        (Mutex::new(outputs.into()), Mutex::new(0))
+    }
+
+    fn successful_output() -> std::process::Output {
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_text_file_busy_then_succeeds() {
+        let (outputs, calls) = fake_spawner([
+            Err(std::io::Error::from_raw_os_error(26)),
+            Err(std::io::Error::from_raw_os_error(26)),
+            Ok(successful_output()),
+        ]);
+
+        output_with_retry(|| {
+            *calls.lock().unwrap() += 1;
+            std::future::ready(outputs.lock().unwrap().pop_front().expect("fake output"))
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(*calls.lock().unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn stops_after_three_text_file_busy_retries() {
+        let (outputs, calls) = fake_spawner(
+            (0..4)
+                .map(|_| Err(std::io::Error::from_raw_os_error(26)))
+                .collect::<VecDeque<_>>(),
+        );
+
+        let error = output_with_retry(|| {
+            *calls.lock().unwrap() += 1;
+            std::future::ready(outputs.lock().unwrap().pop_front().expect("fake output"))
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.raw_os_error(), Some(26));
+        assert_eq!(*calls.lock().unwrap(), 4);
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_other_spawn_errors() {
+        let (outputs, calls) = fake_spawner([Err(std::io::Error::from_raw_os_error(2))]);
+
+        let error = output_with_retry(|| {
+            *calls.lock().unwrap() += 1;
+            std::future::ready(outputs.lock().unwrap().pop_front().expect("fake output"))
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.raw_os_error(), Some(2));
+        assert_eq!(*calls.lock().unwrap(), 1);
     }
 }

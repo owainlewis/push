@@ -41,7 +41,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"cli-thread"}'
 
     let list = run_cli(binary, &config, &["job", "list"]);
     assert!(list.status.success());
-    assert!(stdout(&list).contains("crash-test\tvalid\tcodex\trestricted"));
+    assert!(stdout(&list).contains("crash-test\tvalid\tcodex"));
 
     let show = run_cli(binary, &config, &["job", "show", "crash-test"]);
     assert!(show.status.success());
@@ -220,7 +220,7 @@ fn write_job_and_config(
     std::fs::write(
         jobs.join("crash-test.md"),
         format!(
-            "+++\nversion = 1\npermission_profile = \"restricted\"\ntimeout = \"1m\"\nworkdir = {:?}\nbackend = \"codex\"\n+++\n\nReturn a short result.\n",
+            "+++\nversion = 1\ntimeout = \"1m\"\nworkdir = {:?}\nbackend = \"codex\"\n+++\n\nReturn a short result.\n",
             work.to_string_lossy()
         ),
     )
@@ -228,7 +228,7 @@ fn write_job_and_config(
     std::fs::write(
         config,
         format!(
-            "channel = \"telegram\"\nagent = \"codex\"\ntelegram_bot_token = \"test\"\ntelegram_allow_user_ids = [1]\ndatabase_path = {:?}\njobs_dir = {:?}\njobs_run_dir = {:?}\ncodex_bin = {:?}\njob_permission_profiles = [\"restricted\"]\n",
+            "channel = \"telegram\"\nagent = \"codex\"\ntelegram_bot_token = \"test\"\ntelegram_allow_user_ids = [1]\ndatabase_path = {:?}\njobs_dir = {:?}\njobs_run_dir = {:?}\ncodex_bin = {:?}\n",
             database.to_string_lossy(),
             jobs.to_string_lossy(),
             run.to_string_lossy(),
