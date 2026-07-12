@@ -131,6 +131,9 @@ user prompt.
 |---|---|
 | `agent` | `claude` or `codex`. |
 | `routes` | Exact thread to backend overrides. |
+| `permission_profile` | Default named profile; defaults to `restricted`. |
+| `permission_profiles` | Custom names mapped to a common capability. |
+| `job_permission_profiles` | Explicit profile names future jobs may request; defaults to `restricted`. |
 | `imessage.db_path` | Path to Messages `chat.db`. |
 | `poll_interval` | How often to poll. |
 | `run_timeout` | Max backend run time. |
@@ -140,13 +143,7 @@ user prompt.
 | `telegram.allow_user_ids` | Allowed private-chat sender IDs. |
 | `telegram.allow_chat_ids` | Allowed private chat IDs. |
 | `claude_bin` | Claude Code binary. |
-| `claude_permission_mode` | Claude Code permission mode. |
-| `claude_tools` | Optional Claude Code available tool list. |
-| `claude_allowed_tools` | Optional Claude Code permission allow rules. |
-| `claude_disallowed_tools` | Optional Claude Code permission deny rules. |
 | `codex_bin` | Codex binary. |
-| `codex_sandbox` | Codex sandbox mode. |
-| `codex_approval_policy` | Codex approval policy. |
 | `codex_model` | Optional Codex model override. |
 | `sessions_dir` | Per-thread working dirs. |
 | `state_path` | JSON state path. |
@@ -179,8 +176,7 @@ user prompt.
 - A crash during an in-flight run retries that message on restart, which can
   duplicate backend work but avoids silently losing the message.
 - Codex resume behavior depends on the Codex CLI session store.
-- Claude `bypassPermissions` and Codex non-interactive automation are powerful
-  local execution modes.
+- Full-access profiles are powerful local execution modes.
 - iMessage database shape can change across macOS versions.
 
 ## Next Scope
