@@ -1,7 +1,6 @@
 //! Runs the Codex CLI headlessly for a single message.
 
 use std::path::Path;
-use std::pin::Pin;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -33,52 +32,11 @@ impl Runner {
     pub async fn run(&self, req: Request<'_>, timeout: Duration) -> Result<RunOutput, RunError> {
         let out_path = Path::new(req.work_dir)
             .join(format!(".push-codex-last-message-{}.txt", Uuid::new_v4()));
-        let mut cmd = Command::new(&self.bin);
-        let sandbox = sandbox(req.permission);
-        cmd.arg("--ask-for-approval")
-            .arg("never")
-            .arg("--sandbox")
-            .arg(sandbox);
-        if !req.instructions.trim().is_empty() {
-            cmd.arg("-c")
-                .arg(developer_instructions(req.instructions.trim()));
-        }
-        if req.is_new {
-            cmd.arg("exec")
-                .arg("--json")
-                .arg("--skip-git-repo-check")
-                .arg("-C")
-                .arg(req.work_dir)
-                .arg("--add-dir")
-                .arg(req.work_dir)
-                .arg("-o")
-                .arg(&out_path);
-            if let Some(path) = req.additional_write_dir {
-                cmd.arg("--add-dir").arg(path);
-            }
-            if let Some(model) = self.model.as_deref() {
-                cmd.arg("-m").arg(model);
-            }
-            cmd.arg(req.prompt);
-        } else {
-            cmd.arg("exec");
-            if let Some(path) = req.additional_write_dir {
-                cmd.arg("--add-dir").arg(path);
-            }
-            cmd.arg("resume")
-                .arg("--json")
-                .arg("--skip-git-repo-check")
-                .arg("-o")
-                .arg(&out_path);
-            if let Some(model) = self.model.as_deref() {
-                cmd.arg("-m").arg(model);
-            }
-            cmd.arg(req.session_id).arg(req.prompt);
-        }
-        cmd.current_dir(req.work_dir);
-        cmd.kill_on_drop(true);
-
-        let out = match tokio::time::timeout(timeout, output_with_retry(&mut cmd)).await {
+        let attempt = crate::agent::output_with_retry(|| {
+            let mut cmd = self.command(&req, &out_path);
+            async move { cmd.output().await }
+        });
+        let out = match tokio::time::timeout(timeout, attempt).await {
             Err(_) => return Err(RunError::Timeout),
             Ok(Err(e)) => return Err(RunError::Failed(format!("spawn codex: {e}"))),
             Ok(Ok(o)) => o,
@@ -121,6 +79,53 @@ impl Runner {
             session_id,
         })
     }
+
+    fn command(&self, req: &Request<'_>, out_path: &Path) -> Command {
+        let mut cmd = Command::new(&self.bin);
+        cmd.arg("--ask-for-approval").arg("never");
+        if let Some(sandbox) = sandbox(req.permission) {
+            cmd.arg("--sandbox").arg(sandbox);
+        }
+        if !req.instructions.trim().is_empty() {
+            cmd.arg("-c")
+                .arg(developer_instructions(req.instructions.trim()));
+        }
+        if req.is_new {
+            cmd.arg("exec")
+                .arg("--json")
+                .arg("--skip-git-repo-check")
+                .arg("-C")
+                .arg(req.work_dir)
+                .arg("--add-dir")
+                .arg(req.work_dir)
+                .arg("-o")
+                .arg(out_path);
+            if let Some(path) = req.additional_write_dir {
+                cmd.arg("--add-dir").arg(path);
+            }
+            if let Some(model) = self.model.as_deref() {
+                cmd.arg("-m").arg(model);
+            }
+            cmd.arg(req.prompt);
+        } else {
+            cmd.arg("exec");
+            if let Some(path) = req.additional_write_dir {
+                cmd.arg("--add-dir").arg(path);
+            }
+            cmd.arg("resume")
+                .arg("--json")
+                .arg("--skip-git-repo-check")
+                .arg("-o")
+                .arg(out_path);
+            if let Some(model) = self.model.as_deref() {
+                cmd.arg("-m").arg(model);
+            }
+            cmd.arg(req.session_id).arg(req.prompt);
+        }
+        cmd.current_dir(req.work_dir);
+        cmd.kill_on_drop(true);
+        cmd
+    }
 }
 
 fn missing_resume_error(message: &str) -> bool {
@@ -129,46 +134,13 @@ fn missing_resume_error(message: &str) -> bool {
         .contains("no rollout found for thread id")
 }
 
-fn sandbox(capability: PermissionCapability) -> &'static str {
+fn sandbox(capability: PermissionCapability) -> Option<&'static str> {
     match capability {
-        PermissionCapability::ReadOnly => "read-only",
-        PermissionCapability::Workspace => "workspace-write",
-        PermissionCapability::FullAccess => "danger-full-access",
-    }
-}
-
-async fn output_with_retry(cmd: &mut Command) -> std::io::Result<std::process::Output> {
-    output_with_retry_inner(cmd).await
-}
-
-type OutputFuture<'a> =
-    Pin<Box<dyn std::future::Future<Output = std::io::Result<std::process::Output>> + Send + 'a>>;
-
-trait CommandOutput {
-    fn output(&mut self) -> OutputFuture<'_>;
-}
-
-impl CommandOutput for Command {
-    fn output(&mut self) -> OutputFuture<'_> {
-        Box::pin(Command::output(self))
-    }
-}
-
-/// Linux can briefly report ETXTBSY when an executable was just installed or
-/// replaced. Retry only that transient spawn error, within the caller's overall
-/// timeout, and preserve every other error unchanged.
-async fn output_with_retry_inner(
-    command: &mut impl CommandOutput,
-) -> std::io::Result<std::process::Output> {
-    let mut attempts = 0;
-    loop {
-        match command.output().await {
-            Err(error) if error.raw_os_error() == Some(26) && attempts < 3 => {
-                attempts += 1;
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-            result => return result,
-        }
+        PermissionCapability::ReadOnly => Some("read-only"),
+        PermissionCapability::Workspace => Some("workspace-write"),
+        // No --sandbox flag: the operator's own Codex configuration decides.
+        PermissionCapability::Inherit => None,
+        PermissionCapability::FullAccess => Some("danger-full-access"),
     }
 }
 
@@ -209,9 +181,6 @@ fn agent_message_from_line(line: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
-    use std::os::unix::process::ExitStatusExt;
-    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use crate::agent::Request;
@@ -251,75 +220,6 @@ mod tests {
             r#"{"type":"item.completed","item":{"type":"agent_message","text":"two"}}"#
         );
         assert_eq!(last_agent_message_from_jsonl(s), Some("two".to_string()));
-    }
-
-    struct FakeCommand {
-        outputs: VecDeque<std::io::Result<std::process::Output>>,
-        calls: Arc<Mutex<usize>>,
-    }
-
-    impl CommandOutput for FakeCommand {
-        fn output(&mut self) -> OutputFuture<'_> {
-            *self.calls.lock().unwrap() += 1;
-            let result = self.outputs.pop_front().expect("fake output");
-            Box::pin(std::future::ready(result))
-        }
-    }
-
-    fn successful_output() -> std::process::Output {
-        std::process::Output {
-            status: std::process::ExitStatus::from_raw(0),
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-        }
-    }
-
-    #[tokio::test]
-    async fn retries_text_file_busy_then_succeeds() {
-        let calls = Arc::new(Mutex::new(0));
-        let mut command = FakeCommand {
-            outputs: [
-                Err(std::io::Error::from_raw_os_error(26)),
-                Err(std::io::Error::from_raw_os_error(26)),
-                Ok(successful_output()),
-            ]
-            .into(),
-            calls: calls.clone(),
-        };
-
-        output_with_retry_inner(&mut command).await.unwrap();
-
-        assert_eq!(*calls.lock().unwrap(), 3);
-    }
-
-    #[tokio::test]
-    async fn stops_after_three_text_file_busy_retries() {
-        let calls = Arc::new(Mutex::new(0));
-        let mut command = FakeCommand {
-            outputs: (0..4)
-                .map(|_| Err(std::io::Error::from_raw_os_error(26)))
-                .collect(),
-            calls: calls.clone(),
-        };
-
-        let error = output_with_retry_inner(&mut command).await.unwrap_err();
-
-        assert_eq!(error.raw_os_error(), Some(26));
-        assert_eq!(*calls.lock().unwrap(), 4);
-    }
-
-    #[tokio::test]
-    async fn does_not_retry_other_spawn_errors() {
-        let calls = Arc::new(Mutex::new(0));
-        let mut command = FakeCommand {
-            outputs: [Err(std::io::Error::from_raw_os_error(2))].into(),
-            calls: calls.clone(),
-        };
-
-        let error = output_with_retry_inner(&mut command).await.unwrap_err();
-
-        assert_eq!(error.raw_os_error(), Some(2));
-        assert_eq!(*calls.lock().unwrap(), 1);
     }
 
     #[tokio::test]
@@ -643,11 +543,15 @@ mod tests {
 
     #[test]
     fn translates_all_permission_capabilities() {
-        assert_eq!(sandbox(PermissionCapability::ReadOnly), "read-only");
-        assert_eq!(sandbox(PermissionCapability::Workspace), "workspace-write");
+        assert_eq!(sandbox(PermissionCapability::ReadOnly), Some("read-only"));
+        assert_eq!(
+            sandbox(PermissionCapability::Workspace),
+            Some("workspace-write")
+        );
+        assert_eq!(sandbox(PermissionCapability::Inherit), None);
         assert_eq!(
             sandbox(PermissionCapability::FullAccess),
-            "danger-full-access"
+            Some("danger-full-access")
         );
     }
 

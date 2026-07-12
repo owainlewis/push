@@ -7,6 +7,7 @@ use tokio::process::Command;
 
 use crate::agent::{Request, RunError, RunOutput};
 use crate::config::PermissionCapability;
+use crate::util::non_empty_session_id;
 
 /// Runner invokes the `claude` binary in print mode.
 pub struct Runner {
@@ -29,7 +30,11 @@ impl Runner {
     /// Executes one turn and returns Claude's reply text, or a RunError.
     pub async fn run(&self, req: Request<'_>, timeout: Duration) -> Result<RunOutput, RunError> {
         let is_resume = !req.is_new;
-        let out = match tokio::time::timeout(timeout, self.output_with_retry(req)).await {
+        let attempt = crate::agent::output_with_retry(|| {
+            let mut cmd = self.command(&req);
+            async move { cmd.output().await }
+        });
+        let out = match tokio::time::timeout(timeout, attempt).await {
             Err(_) => return Err(RunError::Timeout),
             Ok(Err(e)) => return Err(RunError::Failed(format!("spawn claude: {e}"))),
             Ok(Ok(o)) => o,
@@ -38,30 +43,17 @@ impl Runner {
         self.parse_output(out, is_resume)
     }
 
-    async fn output_with_retry(&self, req: Request<'_>) -> std::io::Result<std::process::Output> {
-        let mut attempts = 0;
-        loop {
-            match self.command(&req).output().await {
-                Err(e) if e.raw_os_error() == Some(26) && attempts < 3 => {
-                    attempts += 1;
-                    tokio::time::sleep(Duration::from_millis(25)).await;
-                }
-                result => return result,
-            }
-        }
-    }
-
     fn command(&self, req: &Request<'_>) -> Command {
         let mut cmd = Command::new(&self.bin);
         let controls = controls(req.permission);
         cmd.arg("-p")
             .arg(req.prompt)
             .arg("--output-format")
-            .arg("json")
-            .arg("--permission-mode")
-            .arg(controls.permission_mode)
-            .arg("--add-dir")
-            .arg(req.work_dir);
+            .arg("json");
+        if let Some(mode) = controls.permission_mode {
+            cmd.arg("--permission-mode").arg(mode);
+        }
+        cmd.arg("--add-dir").arg(req.work_dir);
         if let Some(path) = req.additional_write_dir {
             cmd.arg("--add-dir").arg(path);
         }
@@ -138,7 +130,7 @@ fn missing_resume_error(message: &str) -> bool {
 }
 
 struct Controls {
-    permission_mode: &'static str,
+    permission_mode: Option<&'static str>,
     tools: Option<&'static [&'static str]>,
     allowed_tools: &'static [&'static str],
     disallowed_tools: &'static [&'static str],
@@ -153,29 +145,32 @@ const DENY_SHELL: &[&str] = &["Bash"];
 fn controls(capability: PermissionCapability) -> Controls {
     match capability {
         PermissionCapability::ReadOnly => Controls {
-            permission_mode: "dontAsk",
+            permission_mode: Some("dontAsk"),
             tools: Some(READ_ONLY_TOOLS),
             allowed_tools: READ_ONLY_TOOLS,
             disallowed_tools: DENY_SHELL_AND_WRITES,
         },
         PermissionCapability::Workspace => Controls {
-            permission_mode: "dontAsk",
+            permission_mode: Some("dontAsk"),
             tools: Some(WORKSPACE_TOOLS),
             allowed_tools: WORKSPACE_TOOLS,
             disallowed_tools: DENY_SHELL,
         },
+        // No mode and no tool lists: the operator's own Claude Code settings
+        // decide what is allowed, exactly as in an interactive session.
+        PermissionCapability::Inherit => Controls {
+            permission_mode: None,
+            tools: None,
+            allowed_tools: NO_TOOLS,
+            disallowed_tools: NO_TOOLS,
+        },
         PermissionCapability::FullAccess => Controls {
-            permission_mode: "bypassPermissions",
+            permission_mode: Some("bypassPermissions"),
             tools: None,
             allowed_tools: NO_TOOLS,
             disallowed_tools: NO_TOOLS,
         },
     }
-}
-
-fn non_empty_session_id(id: &str) -> Option<&str> {
-    let trimmed = id.trim();
-    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 #[cfg(test)]
@@ -217,19 +212,25 @@ mod tests {
     #[test]
     fn translates_all_permission_capabilities() {
         let read_only = controls(PermissionCapability::ReadOnly);
-        assert_eq!(read_only.permission_mode, "dontAsk");
+        assert_eq!(read_only.permission_mode, Some("dontAsk"));
         assert_eq!(read_only.tools, Some(READ_ONLY_TOOLS));
         assert!(read_only.disallowed_tools.contains(&"Bash"));
         assert!(read_only.disallowed_tools.contains(&"Edit"));
 
         let workspace = controls(PermissionCapability::Workspace);
-        assert_eq!(workspace.permission_mode, "dontAsk");
+        assert_eq!(workspace.permission_mode, Some("dontAsk"));
         assert_eq!(workspace.tools, Some(WORKSPACE_TOOLS));
         assert!(workspace.allowed_tools.contains(&"Edit"));
         assert!(workspace.disallowed_tools.contains(&"Bash"));
 
+        let inherit = controls(PermissionCapability::Inherit);
+        assert_eq!(inherit.permission_mode, None);
+        assert_eq!(inherit.tools, None);
+        assert!(inherit.allowed_tools.is_empty());
+        assert!(inherit.disallowed_tools.is_empty());
+
         let full = controls(PermissionCapability::FullAccess);
-        assert_eq!(full.permission_mode, "bypassPermissions");
+        assert_eq!(full.permission_mode, Some("bypassPermissions"));
         assert_eq!(full.tools, None);
         assert!(full.disallowed_tools.is_empty());
     }

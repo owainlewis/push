@@ -5,7 +5,7 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::future::Future;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use chrono::{Datelike, LocalResult, TimeZone, Timelike, Utc};
@@ -16,8 +16,9 @@ use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::agent::{Request, RunError, Runner};
-use crate::config::{AgentBackend, Config, PermissionProfile};
-use crate::{claude, codex, history::History, soul};
+use crate::config::{AgentBackend, Config, PermissionCapability};
+use crate::util::{expand_home, now_ms, restrict_permissions, same_file};
+use crate::{history::History, soul};
 
 const MAX_STORED_RESULT_BYTES: usize = 64 * 1024;
 
@@ -25,7 +26,6 @@ const MAX_STORED_RESULT_BYTES: usize = 64 * 1024;
 #[serde(deny_unknown_fields)]
 struct Frontmatter {
     version: u32,
-    permission_profile: String,
     timeout: String,
     workdir: String,
     #[serde(default)]
@@ -49,7 +49,6 @@ pub struct Job {
     pub name: String,
     pub path: PathBuf,
     pub body: String,
-    pub permission: PermissionProfile,
     pub timeout: Duration,
     pub workdir: PathBuf,
     pub backend: AgentBackend,
@@ -183,7 +182,6 @@ pub(crate) fn validate_contents(
         bail!("job instruction body cannot be empty");
     }
     validate_triggers(&metadata.triggers)?;
-    let permission = cfg.permission_for_job(&metadata.permission_profile)?;
     let timeout = humantime::parse_duration(&metadata.timeout)
         .with_context(|| format!("invalid job timeout {:?}", metadata.timeout))?;
     if timeout.is_zero() || timeout > cfg.jobs_max_timeout_dur()? {
@@ -199,32 +197,18 @@ pub(crate) fn validate_contents(
         .transpose()?
         .unwrap_or(cfg.jobs_backend()?);
     let workdir = canonical_workdir(&metadata.workdir)?;
-    cfg.validate_job_workdir(&workdir, permission.capability)?;
+    cfg.validate_job_workdir(&workdir)?;
     let snapshot_hash = format!("{:x}", Sha256::digest(bytes));
     Ok(Job {
         name: name.to_string(),
         path: path.to_path_buf(),
         body: body.to_string(),
-        permission,
         timeout,
         workdir,
         backend,
         snapshot_hash,
         triggers: metadata.triggers,
     })
-}
-
-#[cfg(unix)]
-fn same_file(expected: &std::fs::Metadata, opened: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    expected.dev() == opened.dev() && expected.ino() == opened.ino()
-}
-
-#[cfg(not(unix))]
-fn same_file(expected: &std::fs::Metadata, opened: &std::fs::Metadata) -> bool {
-    expected.len() == opened.len()
-        && expected.modified().ok() == opened.modified().ok()
-        && opened.is_file()
 }
 
 fn split_runbook(text: &str) -> Result<(&str, &str)> {
@@ -465,20 +449,13 @@ fn canonical_workdir(value: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn expand_home(value: &str) -> String {
-    if value == "~" || value.starts_with("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return format!("{}{}", home.to_string_lossy(), &value[1..]);
-        }
-    }
-    value.to_string()
-}
-
 fn job_error(name: &str, path: PathBuf, error: impl std::fmt::Display) -> JobError {
     JobError {
         name: name.to_string(),
         path,
-        message: error.to_string(),
+        // The alternate form keeps anyhow context chains, so a validation
+        // failure reports its root cause, not just the outermost step.
+        message: format!("{error:#}"),
     }
 }
 
@@ -502,7 +479,8 @@ impl JobLock {
         let lock_dir = Path::new(run_dir).join("locks");
         std::fs::create_dir_all(&lock_dir)
             .with_context(|| format!("create job lock directory {}", lock_dir.display()))?;
-        restrict_lock_permissions(&lock_dir, true)?;
+        restrict_permissions(&lock_dir, true)
+            .with_context(|| format!("restrict job lock permissions {}", lock_dir.display()))?;
         let path = lock_dir.join(format!("{job_name}.lock"));
         let file = OpenOptions::new()
             .create(true)
@@ -511,7 +489,8 @@ impl JobLock {
             .write(true)
             .open(&path)
             .with_context(|| format!("open job lock {}", path.display()))?;
-        restrict_lock_permissions(&path, false)?;
+        restrict_permissions(&path, false)
+            .with_context(|| format!("restrict job lock permissions {}", path.display()))?;
         match file.try_lock() {
             Ok(()) => Ok(Some(Self { _file: file })),
             Err(TryLockError::WouldBlock) => Ok(None),
@@ -520,19 +499,6 @@ impl JobLock {
             }
         }
     }
-}
-
-#[cfg(unix)]
-fn restrict_lock_permissions(path: &Path, directory: bool) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = if directory { 0o700 } else { 0o600 };
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-        .with_context(|| format!("restrict job lock permissions {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn restrict_lock_permissions(_path: &Path, _directory: bool) -> Result<()> {
-    Ok(())
 }
 
 pub struct Ledger {
@@ -749,7 +715,7 @@ impl Ledger {
                 queued_at_ms,
                 state,
                 job.backend.as_str(),
-                job.permission.name,
+                "inherit",
                 duration_ms(job.timeout),
                 job.workdir.to_string_lossy(),
                 error,
@@ -982,7 +948,7 @@ fn insert_run(
             now,
             state,
             job.backend.as_str(),
-            job.permission.name,
+            "inherit",
             duration_ms(job.timeout),
             job.workdir.to_string_lossy(),
             error,
@@ -1165,14 +1131,12 @@ fn format_delivery(row: &DeliveryRun) -> String {
 
 pub async fn run_manual(cfg: &Config, job: Job) -> Result<(String, String)> {
     let mut ledger = Ledger::open(&cfg.database_path)?;
-    let outcome = ledger.start_manual(cfg, &job)?;
-    let StartOutcome::Claimed { run_id, lock, job } = outcome else {
-        let StartOutcome::Skipped { run_id } = outcome else {
-            unreachable!()
-        };
-        return Ok((run_id, "skipped_overlap".to_string()));
+    let (run_id, _lock, job) = match ledger.start_manual(cfg, &job)? {
+        StartOutcome::Claimed { run_id, lock, job } => (run_id, lock, job),
+        StartOutcome::Skipped { run_id } => {
+            return Ok((run_id, "skipped_overlap".to_string()));
+        }
     };
-    let _lock = lock;
 
     match execute(cfg, &job).await {
         Ok(reply) => {
@@ -1208,15 +1172,7 @@ async fn execute(cfg: &Config, job: &Job) -> std::result::Result<String, Executi
     }
     let instructions = soul::load(&cfg.assistant_dir)
         .map_err(|error| ExecutionError::Failed(format!("load SOUL.md: {error}")))?;
-    let runner = match job.backend {
-        AgentBackend::Claude => Runner::Claude(claude::Runner {
-            bin: cfg.claude_bin.clone(),
-        }),
-        AgentBackend::Codex => Runner::Codex(codex::Runner {
-            bin: cfg.codex_bin.clone(),
-            model: cfg.codex_model.clone(),
-        }),
-    };
+    let runner = Runner::for_backend(job.backend, cfg);
     let session_id = runner.initial_session_id();
     let workdir = job.workdir.to_string_lossy().to_string();
     let request = Request {
@@ -1225,9 +1181,16 @@ async fn execute(cfg: &Config, job: &Job) -> std::result::Result<String, Executi
         work_dir: &workdir,
         additional_write_dir: None,
         instructions: &instructions,
-        permission: job.permission.capability,
+        permission: PermissionCapability::Inherit,
         prompt: &job.body,
     };
+    tracing::info!(
+        "job {} starting: backend={} permission=inherit workdir={} timeout={}",
+        job.name,
+        job.backend.as_str(),
+        workdir,
+        humantime::format_duration(job.timeout),
+    );
     match runner.run(request, job.timeout).await {
         Ok(output) => Ok(output.reply),
         Err(RunError::Timeout) => Err(ExecutionError::Timeout),
@@ -1249,13 +1212,6 @@ fn bound_result(value: &str) -> String {
     format!("{}{SUFFIX}", &value[..boundary])
 }
 
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or_default()
-}
-
 pub fn format_job(job: &Job) -> String {
     let triggers = if job.triggers.is_empty() {
         "none".to_string()
@@ -1272,11 +1228,10 @@ pub fn format_job(job: &Job) -> String {
             .join("\n")
     };
     format!(
-        "name: {}\npath: {}\nbackend: {}\npermission_profile: {}\ntimeout: {}\nworkdir: {}\nsnapshot: {}\ntriggers:\n{}\n\n{}\n",
+        "name: {}\npath: {}\nbackend: {}\ntimeout: {}\nworkdir: {}\nsnapshot: {}\ntriggers:\n{}\n\n{}\n",
         job.name,
         job.path.display(),
         job.backend.as_str(),
-        job.permission.name,
         humantime::format_duration(job.timeout),
         job.workdir.display(),
         job.snapshot_hash,
@@ -1320,7 +1275,6 @@ mod tests {
         cfg.jobs_dir = jobs_dir.to_string_lossy().to_string();
         cfg.database_path = database.to_string_lossy().to_string();
         cfg.jobs_run_dir = run_dir.to_string_lossy().to_string();
-        cfg.job_permission_profiles = vec!["restricted".to_string(), "workspace".to_string()];
         cfg
     }
 
@@ -1331,14 +1285,14 @@ mod tests {
 
     fn valid_job(workdir: &Path) -> String {
         format!(
-            "+++\nversion = 1\npermission_profile = \"restricted\"\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"codex\"\n+++\n\nInspect this directory.\n",
+            "+++\nversion = 1\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"codex\"\n+++\n\nInspect this directory.\n",
             workdir.to_string_lossy()
         )
     }
 
     fn scheduled_job(workdir: &Path, enabled: bool) -> String {
         format!(
-            "+++\nversion = 1\npermission_profile = \"restricted\"\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"codex\"\n\n[[triggers]]\nid = \"every-minute\"\nkind = \"cron\"\nschedule = \"* * * * *\"\ntimezone = \"UTC\"\nenabled = {enabled}\n+++\n\nRun once.\n",
+            "+++\nversion = 1\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"codex\"\n\n[[triggers]]\nid = \"every-minute\"\nkind = \"cron\"\nschedule = \"* * * * *\"\ntimezone = \"UTC\"\nenabled = {enabled}\n+++\n\nRun once.\n",
             workdir.to_string_lossy()
         )
     }
@@ -1368,9 +1322,9 @@ mod tests {
         let run_dir = temp_dir("jobs-validation-run");
         write_job(
             &jobs_dir,
-            "too-powerful",
+            "sets-permissions",
             &format!(
-                "+++\nversion = 1\npermission_profile = \"full-access\"\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"other\"\n+++\nbody",
+                "+++\nversion = 1\npermission_profile = \"full-access\"\ntimeout = \"5s\"\nworkdir = {:?}\n+++\nbody",
                 workdir.to_string_lossy()
             ),
         );
@@ -1378,7 +1332,7 @@ mod tests {
             &jobs_dir,
             "too-slow",
             &format!(
-                "+++\nversion = 1\npermission_profile = \"restricted\"\ntimeout = \"31m\"\nworkdir = {:?}\n+++\nbody",
+                "+++\nversion = 1\ntimeout = \"31m\"\nworkdir = {:?}\n+++\nbody",
                 workdir.to_string_lossy()
             ),
         );
@@ -1386,14 +1340,14 @@ mod tests {
             &jobs_dir,
             "bad-backend",
             &format!(
-                "+++\nversion = 1\npermission_profile = \"restricted\"\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"other\"\n+++\nbody",
+                "+++\nversion = 1\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"other\"\n+++\nbody",
                 workdir.to_string_lossy()
             ),
         );
         write_job(
             &jobs_dir,
             "bad-workdir",
-            "+++\nversion = 1\npermission_profile = \"restricted\"\ntimeout = \"5s\"\nworkdir = \"/definitely/missing/push-job\"\n+++\nbody",
+            "+++\nversion = 1\ntimeout = \"5s\"\nworkdir = \"/definitely/missing/push-job\"\n+++\nbody",
         );
         let cfg = cfg(&jobs_dir, &database, &run_dir);
 
@@ -1407,7 +1361,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(messages
             .iter()
-            .any(|message| message.contains("not included")));
+            .any(|message| message.contains("permission_profile")));
         assert!(messages
             .iter()
             .any(|message| message.contains("no greater than")));

@@ -20,6 +20,7 @@ mod store;
 mod telegram;
 #[cfg(test)]
 mod test_support;
+mod util;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -130,12 +131,7 @@ async fn run_job_command(config_path: &str, command: JobCommand) -> Result<()> {
         JobCommand::List => {
             let catalog = jobs::Catalog::load(&cfg)?;
             for job in catalog.jobs.values() {
-                println!(
-                    "{}\tvalid\t{}\t{}",
-                    job.name,
-                    job.backend.as_str(),
-                    job.permission.name
-                );
+                println!("{}\tvalid\t{}", job.name, job.backend.as_str());
             }
             for error in catalog.errors {
                 println!("{}\tinvalid\t{}", error.name, error.message);
@@ -1157,45 +1153,6 @@ permission_profile = "missing"
     }
 
     #[test]
-    fn job_profile_errors_are_scoped_and_enforce_named_allow_list() {
-        let path = temp_path("job-permission-profile");
-        std::fs::write(
-            &path,
-            r#"self_handles = ["me@icloud.com"]
-job_permission_profiles = ["job-writer"]
-
-[permission_profiles.job-writer]
-capability = "workspace"
-"#,
-        )
-        .unwrap();
-        let cfg = Config::load(path.to_str().unwrap()).unwrap();
-
-        assert_eq!(
-            cfg.permission_for_job("job-writer").unwrap().capability,
-            config::PermissionCapability::Workspace
-        );
-        assert!(cfg
-            .permission_for_job("missing")
-            .unwrap_err()
-            .to_string()
-            .contains("invalid job permission profile"));
-        assert!(cfg
-            .permission_for_job("workspace")
-            .unwrap_err()
-            .to_string()
-            .contains("is not included in job_permission_profiles"));
-        assert_eq!(
-            cfg.route_for_message("imessage", "imessage:self:me@icloud.com")
-                .unwrap()
-                .permission
-                .capability,
-            config::PermissionCapability::ReadOnly
-        );
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
     fn run_checks_reports_config_and_writable_paths() {
         let db_path = temp_path("chat-db");
         std::fs::write(&db_path, "").unwrap();
@@ -1270,7 +1227,6 @@ capability = "workspace"
             agent: "codex".to_string(),
             routes: Vec::new(),
             permission_profile: "restricted".to_string(),
-            job_permission_profiles: vec!["restricted".to_string()],
             permission_profiles: std::collections::HashMap::new(),
             jobs_dir: "/fake/jobs".to_string(),
             drafts_dir: "/fake/drafts".to_string(),

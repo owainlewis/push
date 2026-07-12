@@ -232,7 +232,6 @@ audit_log_content = false
 database_path = "~/.push/push.db"
 assistant_dir = "~/.push"
 permission_profile = "restricted"
-job_permission_profiles = ["restricted", "research"]
 jobs_dir = "~/.push/jobs"
 drafts_dir = "~/.push/drafts"
 jobs_agent = "codex"
@@ -331,14 +330,16 @@ Backend translation is intentionally conservative:
   Code has no equivalent to Codex filesystem sandboxing; Codex uses
   `workspace-write` with approvals disabled.
 - `full-access`: maps to backend bypass modes, but Push rejects it for
-  unattended routes and jobs because it cannot protect installed jobs,
-  configuration, or state from direct writes.
+  unattended routes because it cannot protect installed jobs, configuration,
+  or state from direct writes.
 
-Future jobs request only a profile name explicitly listed in
-`job_permission_profiles`. The allow-list defaults to only `restricted`; adding
-`workspace` or a contained custom profile is an explicit operator choice.
-Unknown route profiles fail startup. Unknown or unapproved job references return
-a job-scoped validation error without invalidating messaging routes.
+Jobs do not select a profile. A job runs with the backend's own permission
+configuration: Claude Code uses the operator's settings (permission mode, allow
+and deny rules), and Codex uses its configured default sandbox. Push passes no
+tool restrictions to job runs, so what a job may do is decided entirely by the
+backend configuration the operator already maintains. Because jobs may
+therefore write, every job work directory must stay clear of Push-owned paths.
+Unknown route profiles fail startup.
 
 Legacy raw settings such as `claude_permission_mode`, `claude_tools`,
 `claude_allowed_tools`, `claude_disallowed_tools`, `codex_sandbox`, and
@@ -353,7 +354,6 @@ lowercase slug and the body is sent verbatim to a fresh backend session:
 ```markdown
 +++
 version = 1
-permission_profile = "restricted"
 timeout = "5m"
 workdir = "~/Code"
 backend = "codex"
@@ -373,9 +373,9 @@ push job runs repo-review --config config.toml
 ```
 
 Validation rejects unknown frontmatter, unsafe filenames, symlinks, missing
-work directories, unknown backends, excessive timeouts, and permission profiles
-not explicitly allowed by `job_permission_profiles`. Invalid jobs are disabled
-individually and do not stop messaging or other valid jobs.
+work directories, unknown backends, excessive timeouts, and work directories
+that overlap Push-owned paths. Invalid jobs are disabled individually and do
+not stop messaging or other valid jobs.
 
 Manual runs execute in the invoking CLI process. Push records and claims the
 run in SQLite before execution and holds a non-blocking per-job OS advisory lock
@@ -416,7 +416,7 @@ runbook to the identity-specific inbox Push provides beneath `drafts_dir`, which
 defaults to `~/.push/drafts`. Push gives the backend only that opaque inbox as
 its extra writable root, so concurrent senders and topics cannot claim each
 other's files. `restricted` routes
-remain read-only, and `full-access` routes and jobs are rejected because their
+remain read-only, and `full-access` routes are rejected because their
 backend bypass modes cannot enforce this boundary.
 
 After a route run finishes, fails, times out, or resumes from a persisted

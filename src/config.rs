@@ -7,6 +7,8 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
+use crate::util::expand_home;
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     #[serde(default = "default_channel")]
@@ -39,8 +41,6 @@ pub struct Config {
     pub routes: Vec<RouteRule>,
     #[serde(default = "default_permission_profile")]
     pub permission_profile: String,
-    #[serde(default = "default_job_permission_profiles")]
-    pub job_permission_profiles: Vec<String>,
     #[serde(default)]
     pub permission_profiles: HashMap<String, PermissionProfileConfig>,
     #[serde(default = "default_jobs_dir")]
@@ -214,29 +214,6 @@ impl Config {
         })
     }
 
-    pub fn permission_for_job(&self, name: &str) -> Result<PermissionProfile> {
-        let profile = self
-            .resolve_permission_profile(name)
-            .with_context(|| format!("invalid job permission profile {name:?}"))?;
-        if !self
-            .job_permission_profiles
-            .iter()
-            .any(|allowed| allowed == name)
-        {
-            bail!(
-                "job permission profile {:?} is not included in job_permission_profiles",
-                profile.name
-            );
-        }
-        if profile.capability == PermissionCapability::FullAccess {
-            bail!(
-                "job permission profile {:?} uses full-access, which cannot protect Push jobs, drafts, or state",
-                profile.name
-            );
-        }
-        Ok(profile)
-    }
-
     pub fn jobs_backend(&self) -> Result<AgentBackend> {
         AgentBackend::parse(self.jobs_agent.as_deref().unwrap_or(&self.agent))
             .context("invalid jobs_agent")
@@ -247,14 +224,9 @@ impl Config {
             .with_context(|| format!("invalid jobs_max_timeout {}", self.jobs_max_timeout))
     }
 
-    pub fn validate_job_workdir(
-        &self,
-        workdir: &Path,
-        capability: PermissionCapability,
-    ) -> Result<()> {
-        if capability == PermissionCapability::ReadOnly {
-            return Ok(());
-        }
+    // Jobs run with the backend's own permission configuration, which may
+    // allow writes, so every job workdir must stay clear of Push-owned paths.
+    pub fn validate_job_workdir(&self, workdir: &Path) -> Result<()> {
         let workdir = resolved_absolute("job workdir", workdir)?;
         for (label, protected) in [
             ("assistant_dir", self.assistant_dir.as_str()),
@@ -385,10 +357,6 @@ impl Config {
             profile
                 .capability()
                 .with_context(|| format!("invalid permission profile {name:?}"))?;
-        }
-        for name in &self.job_permission_profiles {
-            self.permission_for_job(name)
-                .with_context(|| format!("invalid job permission profile {name:?}"))?;
         }
         for route in &self.routes {
             AgentBackend::parse(&route.agent)
@@ -590,10 +558,14 @@ pub struct PermissionProfile {
     pub capability: PermissionCapability,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionCapability {
     ReadOnly,
     Workspace,
+    /// Defer to the backend's own permission configuration. Push passes no
+    /// tool allow or deny lists; the operator's backend settings decide.
+    /// Not selectable from config (`parse` rejects it); only jobs use it.
+    Inherit,
     FullAccess,
 }
 
@@ -690,15 +662,6 @@ impl AgentBackend {
     }
 }
 
-fn expand_home(p: &str) -> String {
-    if p == "~" || p.starts_with("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return format!("{}{}", home.to_string_lossy(), &p[1..]);
-        }
-    }
-    p.to_string()
-}
-
 fn default_db_path() -> String {
     "~/Library/Messages/chat.db".to_string()
 }
@@ -725,9 +688,6 @@ fn default_codex_bin() -> String {
 }
 fn default_permission_profile() -> String {
     "restricted".to_string()
-}
-fn default_job_permission_profiles() -> Vec<String> {
-    vec!["restricted".to_string()]
 }
 fn default_jobs_dir() -> String {
     "~/.push/jobs".to_string()
@@ -787,7 +747,6 @@ mod tests {
             agent: "codex".to_string(),
             routes: Vec::new(),
             permission_profile: "workspace".to_string(),
-            job_permission_profiles: vec!["restricted".to_string()],
             permission_profiles: HashMap::new(),
             jobs_dir: root.join("jobs").to_string_lossy().to_string(),
             drafts_dir: root.join("drafts").to_string_lossy().to_string(),
@@ -821,14 +780,6 @@ mod tests {
             .contains("full-access"));
 
         cfg.permission_profile = "workspace".to_string();
-        cfg.job_permission_profiles = vec!["full-access".to_string()];
-        assert!(cfg
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("full-access"));
-
-        cfg.job_permission_profiles = vec!["restricted".to_string()];
         cfg.drafts_dir = format!("{}/drafts", cfg.jobs_dir);
         assert!(cfg
             .validate()
