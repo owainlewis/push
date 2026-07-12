@@ -1,6 +1,6 @@
-# push Architecture
+# Push Architecture
 
-push is one local Rust process. It polls one or more configured iMessage and
+Push is one local Rust process. It polls one or more configured iMessage and
 Telegram channels, filters messages,
 loads the assistant identity, runs a configured agent backend, and sends the
 final reply.
@@ -17,7 +17,7 @@ The gateway owns the personal assistant state. The backend owns execution.
 
 ### 1. Gateway First
 
-push is a messaging gateway for a personal assistant. It should stay small and
+Push is a messaging gateway for a personal assistant. It should stay small and
 own the durable pieces:
 
 - channels
@@ -46,7 +46,7 @@ Those belong to the selected backend.
 
 ### 3. Polling Only
 
-push polls channel state and shells out to local agent commands. It opens no
+Push polls channel state and shells out to local agent commands. It opens no
 server port and accepts no inbound network connection. Telegram uses outbound
 HTTPS long polling.
 
@@ -61,7 +61,7 @@ flowchart LR
     user -->|private chat| tg[Telegram Bot API]
     db -->|poll| push
     tg -->|long poll| push
-    subgraph push[push gateway]
+    subgraph push[Push gateway]
         poller[Channel poller] --> gateway[Gateway loop]
         gateway --> worker[Per-thread worker]
         store[(state.json)] <--> gateway
@@ -147,7 +147,7 @@ rehydration. Audit metadata records the rehydrated message count.
 
 ### Claude Code Adapter
 
-Claude Code lets push choose the session id.
+Claude Code lets Push choose the session id.
 
 - New conversation: `claude -p --session-id <uuid>`
 - Existing conversation: `claude -p --resume <uuid>`
@@ -191,7 +191,7 @@ stores that id for future turns.
 field named `uuid` also remains for compatibility, but it
 now means "backend session id".
 
-If the configured backend changes for a thread, push starts a fresh backend
+If the configured backend changes for a thread, Push starts a fresh backend
 session instead of trying to resume the old runtime's session.
 
 With advanced `channels = ["imessage", "telegram"]` configuration, one
@@ -270,7 +270,7 @@ content logging.
 
 ## Assistant Identity
 
-push loads only `SOUL.md` from `assistant_dir`, which defaults to `~/.push`.
+Push loads only `SOUL.md` from `assistant_dir`, which defaults to `~/.push`.
 The gateway appends invariants in memory without changing the file, then injects
 the result at instruction priority. Missing `SOUL.md` means no custom identity;
 backend runs continue with the gateway invariants. The backend still owns how

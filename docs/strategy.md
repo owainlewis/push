@@ -1,4 +1,4 @@
-# push Strategy
+# Push Strategy
 
 ## The Bet
 
@@ -9,15 +9,15 @@ open-source agents are all racing to own the same capabilities: reasoning,
 coding, file edits, shell commands, MCP, plugins, permissions, repo context, and
 task execution.
 
-push should not compete there.
+Push should not compete there.
 
-push should own the durable personal assistant layer: messages, identity,
+Push should own the durable personal assistant layer: messages, identity,
 memory, user preferences, business context, routing, and state. The agent
 runtime should be replaceable.
 
 ## Product Thesis
 
-push is a personal assistant gateway, not an agent runtime.
+Push is a personal assistant gateway, not an agent runtime.
 
 The gateway answers these questions:
 
@@ -34,7 +34,7 @@ The backend agent answers a smaller question:
   response should be sent back?
 
 That contract keeps the hard and fast-moving agent work inside products with
-large teams behind them, while push owns the layer that makes the interaction a
+large teams behind them, while Push owns the layer that makes the interaction a
 personal assistant.
 
 ## What Personal Assistant Means
@@ -51,7 +51,7 @@ A personal assistant needs:
 - A stable identity across backend changes.
 - Permission and routing rules that match the user's life.
 
-For now, push stores assistant identity in one user-owned `SOUL.md`. That is
+For now, Push stores assistant identity in one user-owned `SOUL.md`. That is
 small, legible, and stable across backends.
 
 ## What The Gateway Owns
@@ -100,7 +100,7 @@ Claude Code and Codex already fit this shape:
 
 - Claude Code accepts a gateway-generated session id with `--session-id` and
   resumes with `--resume`.
-- Codex creates its own thread id through `codex exec`; push stores it and later
+- Codex creates its own thread id through `codex exec`; Push stores it and later
   resumes with `codex exec resume`.
 
 The state store must therefore track backend-owned session ids, not just
@@ -114,14 +114,14 @@ Hermes is powerful because it builds a full agent runtime and memory system. The
 cost is complexity and a second agent layer between the user and the underlying
 model or tool runtime.
 
-push takes the opposite bet. It delegates agent quality to first-party or
+Push takes the opposite bet. It delegates agent quality to first-party or
 specialized coding agents and focuses on the personal gateway layer.
 
-This means push can be smaller and more durable:
+This means Push can be smaller and more durable:
 
 - When Claude Code improves, the Claude backend improves.
 - When Codex improves, the Codex backend improves.
-- When another agent becomes better, push can add an adapter instead of
+- When another agent becomes better, Push can add an adapter instead of
   rewriting the product.
 
 ## Current Direction
