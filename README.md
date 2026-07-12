@@ -1,16 +1,27 @@
 # Push
 
-Push is a tiny personal assistant gateway. You text it, it sends the message to
-a configured coding-agent runtime, then it sends the answer back.
+Push is an always-on AI assistant that does real work for you. It runs 24/7 on
+your own machine. You text it like a person, and it answers. You give it jobs,
+and it runs them on a schedule: reviewing your repositories, watching pull
+requests, checking your task list, and reporting back to your phone.
 
-The product is the gateway: messaging, allowlists, routing, assistant identity,
-and conversation state. The agent runtime is deliberately disposable.
-Claude Code and Codex are the first two backends.
+Push has two surfaces:
+
+- **Conversations.** Message it over iMessage or Telegram and get a reply from
+  a real coding agent with full context.
+- **Jobs.** Plain Markdown runbooks in `~/.push/jobs/`. Each one is an
+  instruction body plus a cron trigger. Push runs them unattended, records
+  every run, and delivers the result to your chat.
+
+The agent runtime underneath is deliberately disposable. Claude Code and Codex
+are the first two backends. Push owns the relationship: messaging, identity,
+scheduling, run history, and delivery.
 
 ## How it works
 
 ```text
 iMessage or Telegram -> Push gateway -> Claude Code or Codex -> same-channel reply
+cron trigger        -> Push gateway -> Claude Code or Codex -> result to your chat
 ```
 
 1. Poll `~/Library/Messages/chat.db` or the Telegram Bot API for new messages.
@@ -21,8 +32,38 @@ iMessage or Telegram -> Push gateway -> Claude Code or Codex -> same-channel rep
 6. Run the configured backend headlessly.
 7. Store the generated reply, then deliver it to the originating conversation.
 
+Jobs follow the same path with a schedule instead of a message: a cron trigger
+claims a run, a fresh backend session executes the runbook with your own agent
+permissions, and the bounded result is stored and delivered to your primary
+chat. Conversations and jobs run concurrently and never block each other.
+
 Identity is plain Markdown you own. The gateway injects it into each run, so
 you can read it, edit it, and version it without learning a custom format.
+
+## A job is a Markdown file
+
+```markdown
++++
+version = 1
+timeout = "5m"
+workdir = "~/Code"
+
+[[triggers]]
+id = "morning"
+kind = "cron"
+schedule = "0 9 * * *"
+timezone = "Europe/London"
+enabled = true
++++
+
+List my Todoist tasks for today using the `td` CLI. Group them into Overdue
+and Today. Read-only: do not add, complete, or edit any tasks.
+```
+
+That is the whole format: TOML frontmatter for policy, Markdown for
+instructions. No pipeline DSL, no YAML workflow graph. The agent's
+capabilities come from your own backend configuration, so anything you can do
+in a terminal session with your agent, a job can do on a schedule.
 
 ## The Bet
 
@@ -41,10 +82,14 @@ Push owns the personal assistant layer:
 - User-owned assistant identity.
 - Conversation to backend-session mapping.
 - Routing between channels and runtimes.
+- Scheduled jobs: triggers, overlap locks, a durable run ledger, and delivery.
+- The approval flow when an agent proposes a new job.
 
-The framing is personal assistant first, coding agent second. The backend may be
-Claude Code today and Codex tomorrow, but the assistant identity, memory, and
-messaging relationship stay with Push.
+Push is the orchestrator, not the agent. Intelligence lives in the backend and
+in your runbooks; Push provides the triggers, state, and delivery that turn a
+capable agent into an assistant that works while you sleep. The backend may be
+Claude Code today and Codex tomorrow, but the assistant identity, jobs, run
+history, and messaging relationship stay with Push.
 
 See [docs/strategy.md](docs/strategy.md) for the full direction.
 
@@ -64,13 +109,14 @@ Codex thread id from JSONL output; later turns resume that session with
 `codex exec resume`. `SOUL.md` is passed as Codex developer instructions, kept
 separate from the user's message on new and resumed sessions.
 
-## v1 Scope
+## Scope today
 
-- iMessage and Telegram private-chat channels.
-- Claude Code backend.
-- Codex backend.
-- Read-only assistant identity.
-- One configured backend at a time.
+- iMessage and Telegram private-chat channels, polled concurrently.
+- Claude Code and Codex backends, selectable per route and per job.
+- Markdown jobs with cron triggers, manual runs, a durable run ledger, and
+  delivery of results to your primary chat.
+- Agent-drafted jobs installed only after explicit approval in chat.
+- Read-only assistant identity from `~/.push/SOUL.md`.
 
 ## Requirements
 
