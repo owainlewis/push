@@ -1,6 +1,6 @@
 //! Gateway configuration loaded from a TOML file.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -32,22 +32,16 @@ pub struct Config {
     pub agent: String,
     #[serde(default)]
     pub routes: Vec<RouteRule>,
+    #[serde(default = "default_permission_profile")]
+    pub permission_profile: String,
+    #[serde(default = "default_job_permission_profiles")]
+    pub job_permission_profiles: Vec<String>,
+    #[serde(default)]
+    pub permission_profiles: HashMap<String, PermissionProfileConfig>,
     #[serde(default = "default_claude_bin")]
     pub claude_bin: String,
-    #[serde(default = "default_claude_permission_mode", alias = "permission_mode")]
-    pub claude_permission_mode: String,
-    #[serde(default, alias = "tools")]
-    pub claude_tools: Option<Vec<String>>,
-    #[serde(default, alias = "allowed_tools")]
-    pub claude_allowed_tools: Vec<String>,
-    #[serde(default, alias = "disallowed_tools")]
-    pub claude_disallowed_tools: Vec<String>,
     #[serde(default = "default_codex_bin")]
     pub codex_bin: String,
-    #[serde(default = "default_codex_sandbox")]
-    pub codex_sandbox: String,
-    #[serde(default = "default_codex_approval_policy")]
-    pub codex_approval_policy: String,
     #[serde(default)]
     pub codex_model: Option<String>,
     #[serde(default = "default_sessions_dir")]
@@ -78,6 +72,24 @@ impl Config {
             bail!(
                 "structured [assistant] settings are no longer supported; move assistant identity into assistant_dir/SOUL.md"
             );
+        }
+        for legacy in [
+            "permission_mode",
+            "tools",
+            "allowed_tools",
+            "disallowed_tools",
+            "claude_permission_mode",
+            "claude_tools",
+            "claude_allowed_tools",
+            "claude_disallowed_tools",
+            "codex_sandbox",
+            "codex_approval_policy",
+        ] {
+            if root.contains_key(legacy) {
+                bail!(
+                    "legacy permission setting {legacy:?} is no longer supported; select a named permission_profile instead"
+                );
+            }
         }
         flatten_provider_section(
             root,
@@ -141,25 +153,73 @@ impl Config {
             })
     }
 
-    pub fn agent_for_message(&self, channel: &str, thread: &str) -> Result<AgentBackend> {
+    pub fn route_for_message(&self, channel: &str, thread: &str) -> Result<RouteSelection> {
         for route in self.routes.iter().filter(|route| route.thread.is_some()) {
             if route.matches_thread(channel, thread) {
-                return AgentBackend::parse(&route.agent);
+                return self.resolve_route(route);
             }
         }
         if let Some(parent) = telegram_parent_thread(channel, thread) {
             for route in self.routes.iter().filter(|route| route.thread.is_some()) {
                 if route.matches_thread(channel, parent) {
-                    return AgentBackend::parse(&route.agent);
+                    return self.resolve_route(route);
                 }
             }
         }
         for route in self.routes.iter().filter(|route| route.thread.is_none()) {
             if route.matches(channel, thread) {
-                return AgentBackend::parse(&route.agent);
+                return self.resolve_route(route);
             }
         }
-        self.agent_backend()
+        Ok(RouteSelection {
+            backend: self.agent_backend()?,
+            permission: self.resolve_permission_profile(&self.permission_profile)?,
+        })
+    }
+
+    pub fn permission_for_job(&self, name: &str) -> Result<PermissionProfile> {
+        let profile = self
+            .resolve_permission_profile(name)
+            .with_context(|| format!("invalid job permission profile {name:?}"))?;
+        if !self
+            .job_permission_profiles
+            .iter()
+            .any(|allowed| allowed == name)
+        {
+            bail!(
+                "job permission profile {:?} is not included in job_permission_profiles",
+                profile.name
+            );
+        }
+        Ok(profile)
+    }
+
+    fn resolve_route(&self, route: &RouteRule) -> Result<RouteSelection> {
+        let profile = route
+            .permission_profile
+            .as_deref()
+            .unwrap_or(&self.permission_profile);
+        Ok(RouteSelection {
+            backend: AgentBackend::parse(&route.agent)?,
+            permission: self.resolve_permission_profile(profile)?,
+        })
+    }
+
+    fn resolve_permission_profile(&self, name: &str) -> Result<PermissionProfile> {
+        let capability = match name {
+            "restricted" => PermissionCapability::ReadOnly,
+            "workspace" => PermissionCapability::Workspace,
+            "full-access" => PermissionCapability::FullAccess,
+            custom => self
+                .permission_profiles
+                .get(custom)
+                .with_context(|| format!("unknown permission profile {custom:?}"))?
+                .capability()?,
+        };
+        Ok(PermissionProfile {
+            name: name.to_string(),
+            capability,
+        })
     }
 
     pub fn required_agent_bins(&self) -> Result<Vec<&str>> {
@@ -209,6 +269,23 @@ impl Config {
             }
         }
         self.agent_backend()?;
+        self.resolve_permission_profile(&self.permission_profile)
+            .context("invalid default permission profile")?;
+        for (name, profile) in &self.permission_profiles {
+            if name.trim().is_empty() {
+                bail!("permission profile names cannot be empty");
+            }
+            if matches!(name.as_str(), "restricted" | "workspace" | "full-access") {
+                bail!("built-in permission profile {name:?} cannot be redefined");
+            }
+            profile
+                .capability()
+                .with_context(|| format!("invalid permission profile {name:?}"))?;
+        }
+        for name in &self.job_permission_profiles {
+            self.permission_for_job(name)
+                .with_context(|| format!("invalid job permission profile {name:?}"))?;
+        }
         for route in &self.routes {
             AgentBackend::parse(&route.agent)
                 .with_context(|| format!("invalid route agent for {route:?}"))?;
@@ -221,33 +298,12 @@ impl Config {
             if let Some(channel) = &route.channel {
                 ChannelKind::parse(channel).context("invalid route channel")?;
             }
-        }
-        for tool in self
-            .claude_allowed_tools
-            .iter()
-            .chain(self.claude_disallowed_tools.iter())
-        {
-            if tool.trim().is_empty() {
-                bail!("claude tool filters cannot contain empty entries");
-            }
-        }
-        if self.claude_tools.as_ref().is_some_and(Vec::is_empty) {
-            bail!("claude_tools must be null or contain at least one entry");
-        }
-        if !matches!(
-            self.codex_sandbox.as_str(),
-            "read-only" | "workspace-write" | "danger-full-access"
-        ) {
-            bail!("invalid codex_sandbox {}; expected read-only, workspace-write, or danger-full-access", self.codex_sandbox);
-        }
-        if !matches!(
-            self.codex_approval_policy.as_str(),
-            "untrusted" | "on-request" | "never"
-        ) {
-            bail!(
-                "invalid codex_approval_policy {}; expected untrusted, on-request, or never",
-                self.codex_approval_policy
-            );
+            let profile = route
+                .permission_profile
+                .as_deref()
+                .unwrap_or(&self.permission_profile);
+            self.resolve_permission_profile(profile)
+                .with_context(|| format!("invalid permission profile for route {route:?}"))?;
         }
         self.poll_interval_dur()?;
         self.run_timeout_dur()?;
@@ -291,6 +347,51 @@ pub struct RouteRule {
     #[serde(default)]
     pub channel: Option<String>,
     pub agent: String,
+    #[serde(default)]
+    pub permission_profile: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteSelection {
+    pub backend: AgentBackend,
+    pub permission: PermissionProfile,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct PermissionProfileConfig {
+    pub capability: String,
+}
+
+impl PermissionProfileConfig {
+    fn capability(&self) -> Result<PermissionCapability> {
+        PermissionCapability::parse(&self.capability)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionProfile {
+    pub name: String,
+    pub capability: PermissionCapability,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PermissionCapability {
+    ReadOnly,
+    Workspace,
+    FullAccess,
+}
+
+impl PermissionCapability {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "read-only" => Ok(Self::ReadOnly),
+            "workspace" => Ok(Self::Workspace),
+            "full-access" => Ok(Self::FullAccess),
+            other => bail!(
+                "invalid permission capability {other:?}; expected read-only, workspace, or full-access"
+            ),
+        }
+    }
 }
 
 impl RouteRule {
@@ -396,17 +497,14 @@ fn default_agent() -> String {
 fn default_claude_bin() -> String {
     "claude".to_string()
 }
-fn default_claude_permission_mode() -> String {
-    "bypassPermissions".to_string()
-}
 fn default_codex_bin() -> String {
     "codex".to_string()
 }
-fn default_codex_sandbox() -> String {
-    "workspace-write".to_string()
+fn default_permission_profile() -> String {
+    "restricted".to_string()
 }
-fn default_codex_approval_policy() -> String {
-    "never".to_string()
+fn default_job_permission_profiles() -> Vec<String> {
+    vec!["restricted".to_string()]
 }
 fn default_sessions_dir() -> String {
     "~/.push/sessions".to_string()

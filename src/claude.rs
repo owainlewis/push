@@ -6,14 +6,11 @@ use serde::Deserialize;
 use tokio::process::Command;
 
 use crate::agent::{Request, RunError, RunOutput};
+use crate::config::PermissionCapability;
 
 /// Runner invokes the `claude` binary in print mode.
 pub struct Runner {
     pub bin: String,
-    pub permission_mode: String,
-    pub tools: Option<Vec<String>>,
-    pub allowed_tools: Vec<String>,
-    pub disallowed_tools: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -55,12 +52,13 @@ impl Runner {
 
     fn command(&self, req: &Request<'_>) -> Command {
         let mut cmd = Command::new(&self.bin);
+        let controls = controls(req.permission);
         cmd.arg("-p")
             .arg(req.prompt)
             .arg("--output-format")
             .arg("json")
             .arg("--permission-mode")
-            .arg(&self.permission_mode)
+            .arg(controls.permission_mode)
             .arg("--add-dir")
             .arg(req.work_dir);
         if req.is_new {
@@ -71,14 +69,14 @@ impl Runner {
         if !req.instructions.trim().is_empty() {
             cmd.arg("--append-system-prompt").arg(req.instructions);
         }
-        if let Some(tools) = &self.tools {
+        if let Some(tools) = controls.tools {
             cmd.arg("--tools");
             cmd.args(tools);
         }
-        for tool in &self.allowed_tools {
+        for tool in controls.allowed_tools {
             cmd.arg("--allowed-tools").arg(tool);
         }
-        for tool in &self.disallowed_tools {
+        for tool in controls.disallowed_tools {
             cmd.arg("--disallowed-tools").arg(tool);
         }
         cmd.current_dir(req.work_dir);
@@ -115,6 +113,42 @@ impl Runner {
                 }
             }
         }
+    }
+}
+
+struct Controls {
+    permission_mode: &'static str,
+    tools: Option<&'static [&'static str]>,
+    allowed_tools: &'static [&'static str],
+    disallowed_tools: &'static [&'static str],
+}
+
+const READ_ONLY_TOOLS: &[&str] = &["Read", "Grep", "Glob"];
+const WORKSPACE_TOOLS: &[&str] = &["Read", "Grep", "Glob", "Edit", "Write", "NotebookEdit"];
+const NO_TOOLS: &[&str] = &[];
+const DENY_SHELL_AND_WRITES: &[&str] = &["Bash", "Edit", "Write", "NotebookEdit"];
+const DENY_SHELL: &[&str] = &["Bash"];
+
+fn controls(capability: PermissionCapability) -> Controls {
+    match capability {
+        PermissionCapability::ReadOnly => Controls {
+            permission_mode: "dontAsk",
+            tools: Some(READ_ONLY_TOOLS),
+            allowed_tools: READ_ONLY_TOOLS,
+            disallowed_tools: DENY_SHELL_AND_WRITES,
+        },
+        PermissionCapability::Workspace => Controls {
+            permission_mode: "dontAsk",
+            tools: Some(WORKSPACE_TOOLS),
+            allowed_tools: WORKSPACE_TOOLS,
+            disallowed_tools: DENY_SHELL,
+        },
+        PermissionCapability::FullAccess => Controls {
+            permission_mode: "bypassPermissions",
+            tools: None,
+            allowed_tools: NO_TOOLS,
+            disallowed_tools: NO_TOOLS,
+        },
     }
 }
 
@@ -159,6 +193,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn translates_all_permission_capabilities() {
+        let read_only = controls(PermissionCapability::ReadOnly);
+        assert_eq!(read_only.permission_mode, "dontAsk");
+        assert_eq!(read_only.tools, Some(READ_ONLY_TOOLS));
+        assert!(read_only.disallowed_tools.contains(&"Bash"));
+        assert!(read_only.disallowed_tools.contains(&"Edit"));
+
+        let workspace = controls(PermissionCapability::Workspace);
+        assert_eq!(workspace.permission_mode, "dontAsk");
+        assert_eq!(workspace.tools, Some(WORKSPACE_TOOLS));
+        assert!(workspace.allowed_tools.contains(&"Edit"));
+        assert!(workspace.disallowed_tools.contains(&"Bash"));
+
+        let full = controls(PermissionCapability::FullAccess);
+        assert_eq!(full.permission_mode, "bypassPermissions");
+        assert_eq!(full.tools, None);
+        assert!(full.disallowed_tools.is_empty());
+    }
+
     #[tokio::test]
     async fn satisfies_runner_contract() {
         assert_runner_contract(RunnerContract {
@@ -180,13 +234,7 @@ mod tests {
             sh_arg(&args_path)
         );
         let cli = FakeCli::new("claude", &script);
-        let runner = Runner {
-            bin: cli.bin(),
-            permission_mode: "bypassPermissions".to_string(),
-            tools: Some(vec!["Read".to_string(), "Grep".to_string()]),
-            allowed_tools: vec!["Read".to_string(), "Bash(git status:*)".to_string()],
-            disallowed_tools: vec!["Edit".to_string()],
-        };
+        let runner = Runner { bin: cli.bin() };
 
         let out = runner
             .run(
@@ -195,6 +243,7 @@ mod tests {
                     is_new: true,
                     work_dir: work_dir.to_str().unwrap(),
                     instructions: "assistant identity",
+                    permission: PermissionCapability::ReadOnly,
                     prompt: "hello",
                 },
                 Duration::from_secs(5),
@@ -206,14 +255,15 @@ mod tests {
         assert_eq!(out.session_id, Some("claude-returned".to_string()));
         let args = read_args(&args_path);
         assert_arg_pair(&args, "--session-id", "push-session");
-        assert_arg_pair(&args, "--permission-mode", "bypassPermissions");
+        assert_arg_pair(&args, "--permission-mode", "dontAsk");
         assert_arg_pair(&args, "--append-system-prompt", "assistant identity");
         assert_arg_pair(&args, "-p", "hello");
         assert_arg_pair(&args, "--tools", "Read");
         assert_arg_pair(&args, "--allowed-tools", "Read");
-        assert_arg_pair(&args, "--disallowed-tools", "Edit");
+        assert_arg_pair(&args, "--disallowed-tools", "Bash");
         assert!(args.contains(&"Grep".to_string()));
-        assert!(args.contains(&"Bash(git status:*)".to_string()));
+        assert!(args.contains(&"Glob".to_string()));
+        assert!(args.contains(&"Edit".to_string()));
         assert!(!args.contains(&"--resume".to_string()));
     }
 
@@ -226,13 +276,7 @@ mod tests {
             sh_arg(&args_path)
         );
         let cli = FakeCli::new("claude", &script);
-        let runner = Runner {
-            bin: cli.bin(),
-            permission_mode: "default".to_string(),
-            tools: None,
-            allowed_tools: Vec::new(),
-            disallowed_tools: Vec::new(),
-        };
+        let runner = Runner { bin: cli.bin() };
 
         let out = runner
             .run(
@@ -241,6 +285,7 @@ mod tests {
                     is_new: false,
                     work_dir: work_dir.to_str().unwrap(),
                     instructions: "assistant identity",
+                    permission: PermissionCapability::Workspace,
                     prompt: "continue",
                 },
                 Duration::from_secs(5),
@@ -254,6 +299,10 @@ mod tests {
         assert!(!args.contains(&"--session-id".to_string()));
         assert_arg_pair(&args, "--append-system-prompt", "assistant identity");
         assert_arg_pair(&args, "-p", "continue");
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--allowed-tools", "Edit"]));
+        assert_arg_pair(&args, "--disallowed-tools", "Bash");
     }
 
     #[tokio::test]
@@ -263,13 +312,7 @@ mod tests {
             "claude",
             "#!/bin/sh\nprintf '%s\\n' '{\"is_error\":true,\"result\":\"api down\"}'\nexit 1\n",
         );
-        let runner = Runner {
-            bin: cli.bin(),
-            permission_mode: "default".to_string(),
-            tools: None,
-            allowed_tools: Vec::new(),
-            disallowed_tools: Vec::new(),
-        };
+        let runner = Runner { bin: cli.bin() };
 
         let err = match runner
             .run(request(work_dir.to_str().unwrap()), Duration::from_secs(5))
@@ -286,13 +329,7 @@ mod tests {
     async fn reports_timeout() {
         let work_dir = temp_dir("claude-timeout-work");
         let cli = FakeCli::new("claude", "#!/bin/sh\nsleep 2\n");
-        let runner = Runner {
-            bin: cli.bin(),
-            permission_mode: "default".to_string(),
-            tools: None,
-            allowed_tools: Vec::new(),
-            disallowed_tools: Vec::new(),
-        };
+        let runner = Runner { bin: cli.bin() };
 
         let err = match runner
             .run(
@@ -314,6 +351,7 @@ mod tests {
             is_new: true,
             work_dir,
             instructions: "",
+            permission: PermissionCapability::ReadOnly,
             prompt: "hello",
         }
     }
@@ -357,13 +395,7 @@ mod tests {
         let bin = cli.bin();
         ContractCase {
             fake_cli: cli,
-            runner: Box::new(Runner {
-                bin,
-                permission_mode: "default".to_string(),
-                tools: None,
-                allowed_tools: Vec::new(),
-                disallowed_tools: Vec::new(),
-            }),
+            runner: Box::new(Runner { bin }),
             request: contract_request(work_dir, true),
             timeout: Duration::from_secs(5),
         }
@@ -378,13 +410,7 @@ mod tests {
         let bin = cli.bin();
         ContractCase {
             fake_cli: cli,
-            runner: Box::new(Runner {
-                bin,
-                permission_mode: "default".to_string(),
-                tools: None,
-                allowed_tools: Vec::new(),
-                disallowed_tools: Vec::new(),
-            }),
+            runner: Box::new(Runner { bin }),
             request: contract_request(work_dir, false),
             timeout: Duration::from_secs(5),
         }
@@ -399,13 +425,7 @@ mod tests {
         let bin = cli.bin();
         ContractCase {
             fake_cli: cli,
-            runner: Box::new(Runner {
-                bin,
-                permission_mode: "default".to_string(),
-                tools: None,
-                allowed_tools: Vec::new(),
-                disallowed_tools: Vec::new(),
-            }),
+            runner: Box::new(Runner { bin }),
             request: contract_request(work_dir, true),
             timeout: Duration::from_secs(5),
         }
@@ -417,13 +437,7 @@ mod tests {
         let bin = cli.bin();
         ContractCase {
             fake_cli: cli,
-            runner: Box::new(Runner {
-                bin,
-                permission_mode: "default".to_string(),
-                tools: None,
-                allowed_tools: Vec::new(),
-                disallowed_tools: Vec::new(),
-            }),
+            runner: Box::new(Runner { bin }),
             request: contract_request(work_dir, true),
             timeout: Duration::from_millis(10),
         }
@@ -435,6 +449,7 @@ mod tests {
             is_new,
             work_dir,
             instructions: String::new(),
+            permission: PermissionCapability::ReadOnly,
             prompt: "hello".to_string(),
         }
     }

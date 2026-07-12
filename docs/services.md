@@ -173,9 +173,9 @@ is completed.
 
 Managed services run without a person watching the terminal. An allowed sender
 can instruct the configured backend to use its tools, subject to your backend
-settings. Keep `imessage.allow_from` narrow, use the least-powerful backend permissions
-that still work, and consider Claude Code `claude_tools`,
-`claude_allowed_tools`, and `claude_disallowed_tools` when running headlessly.
+settings. Keep `imessage.allow_from` narrow and use the least-powerful named
+permission profile that works. The default `restricted` profile omits shell and
+write tools; select `full-access` only in an environment you control.
 
 Store config files, state files, audit logs, backend credentials, and service
 logs with permissions appropriate for the service user. Logs may contain

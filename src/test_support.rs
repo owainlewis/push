@@ -3,6 +3,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::agent::{Request, RunError, RunOutput};
+use crate::config::PermissionCapability;
 
 pub struct FakeCli {
     root: PathBuf,
@@ -74,6 +75,7 @@ pub struct ContractRequest {
     pub is_new: bool,
     pub work_dir: PathBuf,
     pub instructions: String,
+    pub permission: PermissionCapability,
     pub prompt: String,
 }
 
@@ -84,6 +86,7 @@ impl ContractRequest {
             is_new: self.is_new,
             work_dir: self.work_dir.to_str().unwrap(),
             instructions: &self.instructions,
+            permission: self.permission,
             prompt: &self.prompt,
         }
     }
