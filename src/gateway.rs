@@ -24,6 +24,7 @@ use crate::claude;
 use crate::codex;
 use crate::config::{AgentBackend, Config, PermissionProfile};
 use crate::history::{DeliveryStatus, History, OutboundMessage, OutboundOrigin};
+use crate::rehydration::{self, RehydrationPrompt};
 use crate::soul;
 use crate::store::Store;
 
@@ -499,42 +500,145 @@ async fn handle(ctx: &Ctx, job: Job) {
         }
     };
 
-    // Some backends let push choose the session id. Mark those before the run
-    // so a post-create failure does not retry the same create call.
-    if is_new && runner.mark_started_before_run() {
-        let _ = ctx.store.lock().unwrap().mark_started(&job.thread, None);
-    }
-
-    let req = |is_new| Request {
-        session_id: &session_id,
-        is_new,
-        work_dir: &work_dir,
-        instructions: &instructions,
-        permission: job.permission.capability,
-        prompt: &job.text,
-    };
-
-    audit(
-        ctx,
-        ctx.audit
-            .backend_started(job.row_id, &job.thread, job.backend, is_new),
-    );
-    info!(
-        "[{}] sending message to {} (new_session={is_new})",
-        job.thread,
-        runner.label()
-    );
     let run = async {
-        let mut result = runner.run(req(is_new), ctx.run_timeout).await;
+        let mut session_id = session_id;
+        let mut rehydration = if is_new {
+            match rehydration_prompt(ctx, &job) {
+                Ok(prompt) => Some(prompt),
+                Err(error) => {
+                    return Err(RunError::Failed(format!(
+                        "load canonical history for rehydration: {error}"
+                    )));
+                }
+            }
+        } else {
+            None
+        };
+
+        // Some backends let push choose the session id. Mark those before the
+        // run so a post-create failure does not retry the same create call.
+        if is_new && runner.mark_started_before_run() {
+            let _ = ctx.store.lock().unwrap().mark_started(&job.thread, None);
+        }
+        let prompt = rehydration
+            .as_ref()
+            .filter(|prompt| prompt.message_count > 0)
+            .map_or(job.text.as_str(), |prompt| prompt.text.as_str());
+        audit(
+            ctx,
+            ctx.audit.backend_started(
+                job.row_id,
+                &job.thread,
+                job.backend,
+                is_new,
+                rehydration
+                    .as_ref()
+                    .map_or(0, |prompt| prompt.message_count),
+            ),
+        );
+        info!(
+            "[{}] sending message to {} (new_session={is_new}, rehydrated_messages={})",
+            job.thread,
+            runner.label(),
+            rehydration
+                .as_ref()
+                .map_or(0, |prompt| prompt.message_count)
+        );
+        let mut result = runner
+            .run(
+                backend_request(
+                    &session_id,
+                    is_new,
+                    &work_dir,
+                    &instructions,
+                    job.permission.capability,
+                    prompt,
+                ),
+                ctx.run_timeout,
+            )
+            .await;
         // If the session id already exists (e.g. left over from a previous run
         // or a different build), resume it instead of trying to create it again.
         if is_new {
             if let Err(RunError::Failed(msg)) = &result {
                 if msg.to_lowercase().contains("already in use") {
                     warn!("[{}] session id already existed, resuming", job.thread);
-                    result = runner.run(req(false), ctx.run_timeout).await;
+                    result = runner
+                        .run(
+                            backend_request(
+                                &session_id,
+                                false,
+                                &work_dir,
+                                &instructions,
+                                job.permission.capability,
+                                &job.text,
+                            ),
+                            ctx.run_timeout,
+                        )
+                        .await;
                 }
             }
+        } else if matches!(&result, Err(RunError::SessionMissing(_))) {
+            warn!(
+                "[{}] backend session is missing; rotating and rehydrating",
+                job.thread
+            );
+            audit(
+                ctx,
+                ctx.audit.failed(
+                    "backend_session_missing",
+                    job.row_id,
+                    &job.thread,
+                    Some(job.backend),
+                    "backend could not resume the stored session",
+                ),
+            );
+            session_id = runner.initial_session_id();
+            if let Err(error) = ctx.store.lock().unwrap().rotate(
+                &job.thread,
+                runner.backend().as_str(),
+                session_id.clone(),
+            ) {
+                return Err(RunError::Failed(format!(
+                    "rotate missing backend session: {error}"
+                )));
+            }
+            rehydration = match rehydration_prompt(ctx, &job) {
+                Ok(prompt) => Some(prompt),
+                Err(error) => {
+                    return Err(RunError::Failed(format!(
+                        "load canonical history for rehydration: {error}"
+                    )));
+                }
+            };
+            if runner.mark_started_before_run() {
+                let _ = ctx.store.lock().unwrap().mark_started(&job.thread, None);
+            }
+            let count = rehydration
+                .as_ref()
+                .map_or(0, |prompt| prompt.message_count);
+            audit(
+                ctx,
+                ctx.audit
+                    .backend_started(job.row_id, &job.thread, job.backend, true, count),
+            );
+            let prompt = rehydration
+                .as_ref()
+                .filter(|prompt| prompt.message_count > 0)
+                .map_or(job.text.as_str(), |prompt| prompt.text.as_str());
+            result = runner
+                .run(
+                    backend_request(
+                        &session_id,
+                        true,
+                        &work_dir,
+                        &instructions,
+                        job.permission.capability,
+                        prompt,
+                    ),
+                    ctx.run_timeout,
+                )
+                .await;
         }
         result
     };
@@ -649,7 +753,7 @@ async fn handle(ctx: &Ctx, job: Job) {
                 Err(error) => history_error(ctx, &job, "record timeout reply", error),
             }
         }
-        Err(RunError::Failed(msg)) => {
+        Err(RunError::Failed(msg) | RunError::SessionMissing(msg)) => {
             error!("[{}] {} error: {msg}", job.thread, runner.label());
             audit(
                 ctx,
@@ -972,6 +1076,34 @@ fn short(msg: &str) -> String {
 fn sandbox(sessions_dir: &str, thread: &str) -> String {
     let directory_key = thread.strip_prefix("imessage:").unwrap_or(thread);
     format!("{sessions_dir}/{}", sanitize(directory_key))
+}
+
+fn rehydration_prompt(ctx: &Ctx, job: &Job) -> Result<RehydrationPrompt> {
+    let messages = ctx.history.lock().unwrap().recent_messages_before(
+        ctx.channel.id(),
+        &job.thread,
+        job.inbound_id,
+        rehydration::MAX_HISTORY_MESSAGES,
+    )?;
+    Ok(rehydration::compose(&messages, &job.text))
+}
+
+fn backend_request<'a>(
+    session_id: &'a str,
+    is_new: bool,
+    work_dir: &'a str,
+    instructions: &'a str,
+    permission: crate::config::PermissionCapability,
+    prompt: &'a str,
+) -> Request<'a> {
+    Request {
+        session_id,
+        is_new,
+        work_dir,
+        instructions,
+        permission,
+        prompt,
+    }
 }
 
 /// Turns a thread key into a filesystem-safe directory name.
@@ -1631,6 +1763,169 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn missing_backend_session_rotates_and_rehydrates_once() {
+        let state_path = temp_state_path();
+        let sessions_dir = temp_path("missing-session-rehydration");
+        let assistant_dir = temp_path("missing-session-assistant");
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let missing = Arc::new(AtomicBool::new(true));
+        let mut gateway = Gateway::new(test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        ))
+        .unwrap();
+        let mut runners = HashMap::new();
+        runners.insert(
+            AgentBackend::Codex,
+            Runner::Fake(FakeRunner {
+                backend: AgentBackend::Codex,
+                session_id: "fake-session".to_string(),
+                calls: calls.clone(),
+                before_return: None,
+                resume_missing_once: Some(missing),
+            }),
+        );
+        gateway.ctx.runners = Arc::new(runners);
+
+        run_messages(
+            &mut gateway,
+            vec![message(1, "+15551234567", "+15551234567", false, "first")],
+        )
+        .await;
+        run_messages(
+            &mut gateway,
+            vec![message(2, "+15551234567", "+15551234567", false, "second")],
+        )
+        .await;
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        assert!(!calls[1].is_new);
+        assert_eq!(calls[1].prompt, "second");
+        assert!(calls[2].is_new);
+        assert!(calls[2]
+            .prompt
+            .contains(r#"{"role":"user","content":"first"}"#));
+        assert!(calls[2]
+            .prompt
+            .contains(r#"{"role":"assistant","content":"fake reply: first"}"#));
+        assert!(calls[2]
+            .prompt
+            .ends_with(r#"{"role":"user","content":"second"}"#));
+        drop(calls);
+
+        let events = audit_events(&format!("{state_path}.audit.jsonl"));
+        assert!(events
+            .iter()
+            .any(|event| event.event == "backend_session_missing"));
+        assert!(events.iter().any(|event| {
+            event.event == "backend_run_started"
+                && event.row_id == Some(2)
+                && event.is_new_session == Some(true)
+                && event.rehydrated_messages == Some(2)
+        }));
+
+        let _ = std::fs::remove_file(&state_path);
+        let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+        let _ = std::fs::remove_file(format!("{state_path}.db"));
+        let _ = std::fs::remove_dir_all(sessions_dir);
+        let _ = std::fs::remove_dir_all(assistant_dir);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn backend_switch_and_clear_start_fresh_sessions_with_history() {
+        let state_path = temp_state_path();
+        let sessions_dir = temp_path("switch-rehydration");
+        let assistant_dir = temp_path("switch-rehydration-assistant");
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        let codex_calls = Arc::new(Mutex::new(Vec::new()));
+        let claude_calls = Arc::new(Mutex::new(Vec::new()));
+        let mut gateway = Gateway::new(test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        ))
+        .unwrap();
+        let mut runners = HashMap::new();
+        runners.insert(
+            AgentBackend::Codex,
+            Runner::Fake(FakeRunner {
+                backend: AgentBackend::Codex,
+                session_id: "codex-session".to_string(),
+                calls: codex_calls.clone(),
+                before_return: None,
+                resume_missing_once: None,
+            }),
+        );
+        runners.insert(
+            AgentBackend::Claude,
+            Runner::Fake(FakeRunner {
+                backend: AgentBackend::Claude,
+                session_id: "claude-session".to_string(),
+                calls: claude_calls.clone(),
+                before_return: None,
+                resume_missing_once: None,
+            }),
+        );
+        gateway.ctx.runners = Arc::new(runners);
+
+        run_messages(
+            &mut gateway,
+            vec![message(1, "+15551234567", "+15551234567", false, "first")],
+        )
+        .await;
+        gateway.cfg.routes = vec![crate::config::RouteRule {
+            thread: Some("imessage:dm:+15551234567".to_string()),
+            channel: None,
+            agent: "claude".to_string(),
+            permission_profile: None,
+        }];
+        run_messages(
+            &mut gateway,
+            vec![message(2, "+15551234567", "+15551234567", false, "switch")],
+        )
+        .await;
+        run_messages(
+            &mut gateway,
+            vec![message(3, "+15551234567", "+15551234567", false, "/clear")],
+        )
+        .await;
+        run_messages(
+            &mut gateway,
+            vec![message(
+                4,
+                "+15551234567",
+                "+15551234567",
+                false,
+                "after clear",
+            )],
+        )
+        .await;
+
+        assert_eq!(codex_calls.lock().unwrap().len(), 1);
+        let claude_calls = claude_calls.lock().unwrap();
+        assert_eq!(claude_calls.len(), 2);
+        assert!(claude_calls[0].is_new);
+        assert!(claude_calls[0].prompt.contains("first"));
+        assert!(claude_calls[0]
+            .prompt
+            .ends_with(r#"{"role":"user","content":"switch"}"#));
+        assert!(claude_calls[1].is_new);
+        assert!(claude_calls[1].prompt.contains("switch"));
+        assert!(claude_calls[1]
+            .prompt
+            .ends_with(r#"{"role":"user","content":"after clear"}"#));
+
+        let _ = std::fs::remove_file(&state_path);
+        let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+        let _ = std::fs::remove_file(format!("{state_path}.db"));
+        let _ = std::fs::remove_dir_all(sessions_dir);
+        let _ = std::fs::remove_dir_all(assistant_dir);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn canonical_history_failure_prevents_backend_dispatch_and_cursor_advance() {
         let state_path = temp_state_path();
         let sessions_dir = temp_path("history-failure-sessions");
@@ -2070,9 +2365,19 @@ mod tests {
                 session_id: "fake-session".to_string(),
                 calls,
                 before_return,
+                resume_missing_once: None,
             }),
         );
         runners
+    }
+
+    async fn run_messages(gateway: &mut Gateway, messages: Vec<RawMessage>) {
+        let mut handles = Vec::new();
+        gateway.tick_fake(messages, &mut handles).await;
+        gateway.queues.clear();
+        for handle in handles {
+            handle.await.unwrap();
+        }
     }
 
     fn message(row_id: i64, chat: &str, handle: &str, is_from_me: bool, text: &str) -> RawMessage {

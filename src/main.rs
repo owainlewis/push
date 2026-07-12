@@ -11,6 +11,7 @@ mod config;
 mod gateway;
 mod history;
 mod imessage;
+mod rehydration;
 mod soul;
 mod store;
 mod telegram;

@@ -101,7 +101,10 @@ sequenceDiagram
         G->>W: enqueue job by thread
         W->>W: load SOUL.md identity
         W->>W: resolve routed backend session
-        W->>A: run prompt with context
+        opt fresh backend session
+            W->>H: read bounded recent conversation
+        end
+        W->>A: run new message or rehydrated prompt
         A-->>W: reply and optional backend session id
         W->>W: persist generated outbound message
         W->>S: send reply
@@ -131,6 +134,14 @@ RunOutput {
 ```
 
 That keeps the gateway independent of backend-specific mechanics.
+
+Normal resumed turns contain only the new request. Fresh sessions use at most
+20 prior messages from the exact channel-qualified conversation. Push caps each
+historical message at 4 KiB and the history block at 16 KiB, then JSON-delimits
+roles and content before appending the current user message. This transcript is
+prompt content; `SOUL.md` remains separate instruction context. A recognized
+missing-session error rotates the stored backend session and retries once with
+rehydration. Audit metadata records the rehydrated message count.
 
 ### Claude Code Adapter
 

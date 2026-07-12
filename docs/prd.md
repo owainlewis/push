@@ -167,6 +167,8 @@ user prompt.
 - `/clear` starts a fresh backend session.
 - Claude backend can create and resume a session.
 - Codex backend can create a session, store the Codex thread id, and resume it.
+- Fresh or lost backend sessions receive bounded recent canonical history;
+  resumed sessions receive only the new request.
 - Assistant identity is included in backend runs at instruction priority.
 - Exact thread routes can choose a non-default backend.
 - Tests cover filtering and backend output parsing.
