@@ -1,6 +1,7 @@
 //! Canonical SQLite conversation history owned by the gateway.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -10,7 +11,7 @@ use crate::approval::{
     NormalizedAnswer, Question, QuestionState,
 };
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const MAX_HISTORY_READ_BYTES: usize = 8 * 1024;
 const READ_TRUNCATED: &str = "\n[truncated by push while reading history]";
 
@@ -98,6 +99,8 @@ impl History {
         let conn = Connection::open(&path)
             .with_context(|| format!("open conversation database {}", path.display()))?;
         restrict_permissions(&path)?;
+        conn.busy_timeout(Duration::from_secs(5))
+            .context("configure conversation database busy timeout")?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")
             .context("enable conversation database foreign keys")?;
         migrate(&conn).context("migrate conversation database")?;
@@ -522,6 +525,7 @@ impl History {
 }
 
 fn migrate(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if version > SCHEMA_VERSION {
         bail!(
@@ -530,8 +534,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     if version == 0 {
         conn.execute_batch(
-            "BEGIN IMMEDIATE;
-             CREATE TABLE conversations (
+            "CREATE TABLE conversations (
                  id INTEGER PRIMARY KEY,
                  channel TEXT NOT NULL,
                  thread_key TEXT NOT NULL,
@@ -570,14 +573,12 @@ fn migrate(conn: &Connection) -> Result<()> {
              );
              CREATE INDEX messages_conversation_id_idx
                  ON messages(conversation_id, id);
-             PRAGMA user_version = 1;
-             COMMIT;",
+             PRAGMA user_version = 1;",
         )?;
     }
     if version <= 1 {
         conn.execute_batch(
-            "BEGIN IMMEDIATE;
-             CREATE TABLE approval_questions (
+            "CREATE TABLE approval_questions (
                  id TEXT PRIMARY KEY,
                  channel TEXT NOT NULL,
                  thread_key TEXT NOT NULL,
@@ -606,10 +607,47 @@ fn migrate(conn: &Connection) -> Result<()> {
              CREATE INDEX approval_questions_origin_idx ON approval_questions (
                  channel, thread_key, sender_key, chat_key, status, expires_at_ms
              );
-             PRAGMA user_version = 2;
-             COMMIT;",
+             PRAGMA user_version = 2;",
         )?;
     }
+    if version <= 2 {
+        conn.execute_batch(
+            "CREATE TABLE job_runs (
+                 id TEXT PRIMARY KEY,
+                 job_name TEXT NOT NULL,
+                 snapshot_hash TEXT NOT NULL,
+                 trigger_kind TEXT NOT NULL,
+                 trigger_id TEXT,
+                 owner_kind TEXT NOT NULL,
+                 scheduled_at_ms INTEGER,
+                 queued_at_ms INTEGER NOT NULL,
+                 started_at_ms INTEGER,
+                 finished_at_ms INTEGER,
+                 backend TEXT NOT NULL,
+                 permission_profile TEXT NOT NULL,
+                 timeout_ms INTEGER NOT NULL,
+                 workdir TEXT NOT NULL,
+                 state TEXT NOT NULL CHECK(state IN (
+                     'queued', 'running', 'succeeded', 'failed', 'timed_out',
+                     'skipped_overlap', 'cancelled'
+                 )),
+                 result TEXT,
+                 error TEXT,
+                 delivery_state TEXT NOT NULL DEFAULT 'not_requested' CHECK(
+                     delivery_state IN ('not_requested', 'pending', 'delivered', 'failed')
+                 ),
+                 delivery_attempts INTEGER NOT NULL DEFAULT 0,
+                 delivery_last_attempt_ms INTEGER,
+                 delivery_error TEXT
+             );
+             CREATE INDEX job_runs_name_time_idx
+                 ON job_runs(job_name, queued_at_ms DESC);
+             CREATE UNIQUE INDEX job_runs_one_active_per_job
+                 ON job_runs(job_name) WHERE state IN ('queued', 'running');
+             PRAGMA user_version = 3;",
+        )?;
+    }
+    conn.execute_batch("COMMIT;")?;
     Ok(())
 }
 
@@ -732,7 +770,9 @@ mod tests {
         let inbound = history
             .record_inbound("imessage", "imessage:self:me", "imessage:1", "hello")
             .unwrap();
-        history.execute_batch_for_test("DROP TABLE approval_questions; PRAGMA user_version = 1;");
+        history.execute_batch_for_test(
+            "DROP TABLE job_runs; DROP TABLE approval_questions; PRAGMA user_version = 1;",
+        );
         drop(history);
 
         let mut reopened = History::open(path.to_str().unwrap()).unwrap();
@@ -741,11 +781,45 @@ mod tests {
                 .conn
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            2
+            SCHEMA_VERSION
         );
         assert!(reopened.outbound_for(inbound).unwrap().is_none());
         let question = question(2_000);
         reopened.create_question(&question, 1_000).unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn migrates_v2_approval_database_and_preserves_pending_question() {
+        let path = temp_path("jobs-v2-migration");
+        let mut history = History::open(path.to_str().unwrap()).unwrap();
+        let question = question(2_000);
+        history.create_question(&question, 1_000).unwrap();
+        history.execute_batch_for_test("DROP TABLE job_runs; PRAGMA user_version = 2;");
+        drop(history);
+
+        let mut reopened = History::open(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(
+            reopened.question_state(&question.id, 1_100).unwrap(),
+            Some(QuestionState::Pending)
+        );
+        assert_eq!(
+            reopened
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        let run_table: i64 = reopened
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'job_runs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(run_table, 1);
         let _ = std::fs::remove_file(path);
     }
 

@@ -233,6 +233,10 @@ database_path = "~/.push/push.db"
 assistant_dir = "~/.push"
 permission_profile = "restricted"
 job_permission_profiles = ["restricted", "research"]
+jobs_dir = "~/.push/jobs"
+jobs_agent = "codex"
+jobs_max_timeout = "30m"
+jobs_run_dir = "~/.push/run"
 
 [permission_profiles.research]
 capability = "read-only"
@@ -304,6 +308,47 @@ Legacy raw settings such as `claude_permission_mode`, `claude_tools`,
 `claude_allowed_tools`, `claude_disallowed_tools`, `codex_sandbox`, and
 `codex_approval_policy` now produce a migration error; replace them with a named
 profile.
+
+## Manual Jobs
+
+Jobs are user-owned Markdown runbooks in `~/.push/jobs/`. The filename is a
+lowercase slug and the body is sent verbatim to a fresh backend session:
+
+```markdown
++++
+version = 1
+permission_profile = "restricted"
+timeout = "5m"
+workdir = "~/Code"
+backend = "codex"
++++
+
+Review repositories with uncommitted work. Do not change files or remote state.
+```
+
+Use:
+
+```bash
+push job validate --config config.toml
+push job list --config config.toml
+push job show repo-review --config config.toml
+push job run repo-review --config config.toml
+push job runs repo-review --config config.toml
+```
+
+Validation rejects unknown frontmatter, unsafe filenames, symlinks, missing
+work directories, unknown backends, excessive timeouts, and permission profiles
+not explicitly allowed by `job_permission_profiles`. Invalid jobs are disabled
+individually and do not stop messaging or other valid jobs.
+
+Manual runs execute in the invoking CLI process. Push records and claims the
+run in SQLite before execution and holds a non-blocking per-job OS advisory lock
+for its full lifetime. An overlap is recorded as `skipped_overlap`. Once the
+lock is released, the next start safely marks a stale `running` manual claim as
+failed before claiming a new run. Results and diagnostics are bounded and
+remain visible through `push job runs`; manual results are printed to the
+terminal and are never proactively sent to a chat. Scheduling is not enabled in
+this release.
 
 push reads TOML only. Convert any earlier `config.json` file to `config.toml`
 before upgrading. The old JSON filename remains gitignored to reduce the risk

@@ -83,6 +83,7 @@ push takes a narrower bet:
 - `src/imessage/sender.rs`: sends replies through AppleScript.
 - `src/gateway.rs`: poll loop, filtering, commands, queues, worker dispatch.
 - `src/history.rs`: canonical SQLite conversations and messages.
+- `src/jobs.rs`: validated runbooks, advisory locking, manual execution, and run ledger.
 - `src/approval.rs`: durable bounded questions and normalized answers.
 - `src/agent.rs`: backend boundary.
 - `src/claude.rs`: Claude Code adapter.
@@ -135,6 +136,10 @@ user prompt.
 | `permission_profile` | Default named profile; defaults to `restricted`. |
 | `permission_profiles` | Custom names mapped to a common capability. |
 | `job_permission_profiles` | Explicit profile names future jobs may request; defaults to `restricted`. |
+| `jobs_dir` | Installed Markdown runbooks; defaults to `~/.push/jobs`. |
+| `jobs_agent` | Optional default job backend; otherwise uses `agent`. |
+| `jobs_max_timeout` | Maximum validated job timeout; defaults to `30m`. |
+| `jobs_run_dir` | Local advisory-lock state; defaults to `~/.push/run`. |
 | `imessage.db_path` | Path to Messages `chat.db`. |
 | `poll_interval` | How often to poll. |
 | `run_timeout` | Max backend run time. |
