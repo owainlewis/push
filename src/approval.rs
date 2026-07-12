@@ -1,9 +1,4 @@
 //! Channel-neutral, durable user questions and normalized answers.
-//!
-//! Creation and answer-consumption entry points are intentionally ready for
-//! the drafted-jobs workflow; inbound answer resolution is active now.
-
-#![allow(dead_code)]
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -162,6 +157,7 @@ pub enum DeliveryStatus {
     Failed,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuestionState {
     Pending,
@@ -171,6 +167,7 @@ pub enum QuestionState {
     Cancelled,
 }
 
+#[cfg(test)]
 impl QuestionState {
     pub fn parse(value: &str) -> Result<Self> {
         match value {

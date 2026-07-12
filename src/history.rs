@@ -6,9 +6,11 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
+#[cfg(test)]
+use crate::approval::QuestionState;
 use crate::approval::{
     parse_answer, AnswerOrigin, AnswerOutcome, DeliveryStatus as ApprovalDeliveryStatus,
-    NormalizedAnswer, Question, QuestionState,
+    NormalizedAnswer, Question,
 };
 
 const SCHEMA_VERSION: i64 = 5;
@@ -274,7 +276,9 @@ impl History {
         Ok(messages)
     }
 
-    #[allow(dead_code)]
+    /// Test-only seeding for the inbound answer-resolution flow; production
+    /// questions are created through `create_draft_question`.
+    #[cfg(test)]
     pub fn create_question(&mut self, question: &Question, now_ms: i64) -> Result<()> {
         question.validate()?;
         if question.expires_at_ms <= now_ms {
@@ -501,7 +505,6 @@ impl History {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn mark_question_delivery(
         &mut self,
         id: &str,
@@ -657,7 +660,7 @@ impl History {
         }))
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn take_answer(&mut self, id: &str, now_ms: i64) -> Result<Option<NormalizedAnswer>> {
         let tx = self.conn.transaction()?;
         tx.execute(
@@ -695,7 +698,7 @@ impl History {
         }))
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn question_state(&mut self, id: &str, now_ms: i64) -> Result<Option<QuestionState>> {
         self.conn.execute(
             "UPDATE approval_questions SET status = 'expired', updated_at_ms = ?2
@@ -713,7 +716,7 @@ impl History {
             .transpose()
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn cancel_question(&mut self, id: &str, now_ms: i64) -> Result<bool> {
         let tx = self.conn.transaction()?;
         tx.execute(

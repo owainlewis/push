@@ -984,6 +984,7 @@ pub struct Scheduler {
     next: HashMap<(String, String), NextOccurrence>,
     workers: JoinSet<Result<()>>,
     scheduling_enabled: bool,
+    ledger: Option<Ledger>,
 }
 
 impl Scheduler {
@@ -995,6 +996,7 @@ impl Scheduler {
             next: HashMap::new(),
             workers: JoinSet::new(),
             scheduling_enabled: true,
+            ledger: None,
         }
     }
 
@@ -1006,6 +1008,7 @@ impl Scheduler {
             next: HashMap::new(),
             workers: JoinSet::new(),
             scheduling_enabled: false,
+            ledger: None,
         }
     }
 
@@ -1017,7 +1020,12 @@ impl Scheduler {
         while let Some(result) = self.workers.try_join_next() {
             result.context("scheduled worker task failed")??;
         }
-        let mut ledger = Ledger::open(&self.cfg.database_path)?;
+        // Reuse one connection across ticks. Any error drops it, so the next
+        // tick starts from a freshly opened ledger.
+        let mut ledger = match self.ledger.take() {
+            Some(ledger) => ledger,
+            None => Ledger::open(&self.cfg.database_path)?,
+        };
         ledger.recover_stale_runs(&self.cfg, now)?;
 
         let catalog = Catalog::load(&self.cfg)?;
@@ -1082,6 +1090,7 @@ impl Scheduler {
                 }
             }
         }
+        self.ledger = Some(ledger);
         Ok(())
     }
 

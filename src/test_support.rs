@@ -40,6 +40,45 @@ impl Drop for FakeCli {
     }
 }
 
+/// A minimal valid iMessage config over /fake paths, for tests that never
+/// touch the filesystem through it.
+pub fn test_config() -> crate::config::Config {
+    crate::config::Config {
+        channel: "imessage".to_string(),
+        channels: Vec::new(),
+        primary_delivery: None,
+        db_path: "/fake/chat.db".to_string(),
+        poll_interval: "1s".to_string(),
+        run_timeout: "1s".to_string(),
+        self_handles: vec!["me@icloud.com".to_string()],
+        allow_from: Vec::new(),
+        telegram_bot_token: None,
+        telegram_bot_token_env: "TELEGRAM_BOT_TOKEN".to_string(),
+        telegram_allow_user_ids: Vec::new(),
+        telegram_allow_chat_ids: Vec::new(),
+        agent: "codex".to_string(),
+        routes: Vec::new(),
+        permission_profile: "restricted".to_string(),
+        permission_profiles: std::collections::HashMap::new(),
+        jobs_dir: "/fake/jobs".to_string(),
+        drafts_dir: "/fake/drafts".to_string(),
+        jobs_agent: None,
+        jobs_max_timeout: "30m".to_string(),
+        jobs_run_dir: "/fake/run".to_string(),
+        jobs_max_workers: 2,
+        claude_bin: "/fake/claude".to_string(),
+        codex_bin: "/fake/codex".to_string(),
+        codex_model: None,
+        sessions_dir: "/fake/sessions".to_string(),
+        state_path: "/fake/state.json".to_string(),
+        audit_log_path: "/fake/audit.jsonl".to_string(),
+        database_path: "/fake/push.db".to_string(),
+        audit_log_content: false,
+        assistant_dir: "/fake/assistant".to_string(),
+        reply_marker: "\n\n-- sent by push".to_string(),
+    }
+}
+
 pub fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("push-test-{name}-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();

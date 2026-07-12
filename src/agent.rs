@@ -45,9 +45,7 @@ pub enum Runner {
 /// replaced. Retry only that transient spawn error, within the caller's
 /// overall timeout, and preserve every other error unchanged. `spawn` must
 /// build a fresh child process attempt on every call.
-pub(crate) async fn output_with_retry<F, Fut>(
-    mut spawn: F,
-) -> std::io::Result<std::process::Output>
+pub(crate) async fn output_with_retry<F, Fut>(mut spawn: F) -> std::io::Result<std::process::Output>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = std::io::Result<std::process::Output>>,
@@ -139,6 +137,38 @@ pub struct FakeRunCall {
 }
 
 #[cfg(test)]
+impl FakeRunner {
+    async fn run(&self, req: Request<'_>, _timeout: Duration) -> Result<RunOutput, RunError> {
+        self.calls.lock().unwrap().push(FakeRunCall {
+            session_id: req.session_id.to_string(),
+            is_new: req.is_new,
+            prompt: req.prompt.to_string(),
+            permission: req.permission,
+        });
+        if !req.is_new
+            && self
+                .resume_missing_once
+                .as_ref()
+                .is_some_and(|missing| missing.swap(false, std::sync::atomic::Ordering::SeqCst))
+        {
+            return Err(RunError::SessionMissing(
+                "No conversation found with session ID fake-session".to_string(),
+            ));
+        }
+        if let Some(before_return) = &self.before_return {
+            before_return();
+        }
+        if let Some(message) = &self.failure {
+            return Err(RunError::Failed(message.clone()));
+        }
+        Ok(RunOutput {
+            reply: format!("fake reply: {}", req.prompt),
+            session_id: req.is_new.then(|| self.session_id.clone()),
+        })
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::VecDeque;
@@ -212,37 +242,5 @@ mod tests {
 
         assert_eq!(error.raw_os_error(), Some(2));
         assert_eq!(*calls.lock().unwrap(), 1);
-    }
-}
-
-#[cfg(test)]
-impl FakeRunner {
-    async fn run(&self, req: Request<'_>, _timeout: Duration) -> Result<RunOutput, RunError> {
-        self.calls.lock().unwrap().push(FakeRunCall {
-            session_id: req.session_id.to_string(),
-            is_new: req.is_new,
-            prompt: req.prompt.to_string(),
-            permission: req.permission,
-        });
-        if !req.is_new
-            && self
-                .resume_missing_once
-                .as_ref()
-                .is_some_and(|missing| missing.swap(false, std::sync::atomic::Ordering::SeqCst))
-        {
-            return Err(RunError::SessionMissing(
-                "No conversation found with session ID fake-session".to_string(),
-            ));
-        }
-        if let Some(before_return) = &self.before_return {
-            before_return();
-        }
-        if let Some(message) = &self.failure {
-            return Err(RunError::Failed(message.clone()));
-        }
-        Ok(RunOutput {
-            reply: format!("fake reply: {}", req.prompt),
-            session_id: req.is_new.then(|| self.session_id.clone()),
-        })
     }
 }
