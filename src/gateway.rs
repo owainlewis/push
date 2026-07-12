@@ -34,6 +34,7 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 const TYPING_REFRESH: Duration = Duration::from_secs(4);
 const DELIVERY_ATTEMPTS: usize = 3;
+const QUEUE_FULL_REPLY: &str = "I'm a bit behind on this thread - resend that in a moment.";
 const SESSION_SETUP_FAILURE: &str =
     "Push could not prepare this conversation. Check the local logs, then resend.";
 const SANDBOX_SETUP_FAILURE: &str =
@@ -79,6 +80,7 @@ pub struct Gateway {
     cfg: Config,
     poll_interval: Duration,
     queues: HashMap<String, mpsc::Sender<Job>>,
+    queue_full: Option<mpsc::Sender<Job>>,
 }
 
 #[derive(Default)]
@@ -128,6 +130,7 @@ impl Gateway {
             cfg,
             poll_interval,
             queues: HashMap::new(),
+            queue_full: None,
         })
     }
 
@@ -162,6 +165,7 @@ impl Gateway {
         // Dropping the senders lets each worker finish its current job, drain
         // its queue, and exit. Then wait, bounded by a grace period.
         self.queues.clear();
+        self.queue_full = None;
         let drain = async {
             for h in handles {
                 let _ = h.await;
@@ -292,7 +296,6 @@ impl Gateway {
     async fn route(&mut self, job: Job, handles: &mut Vec<JoinHandle<()>>) -> bool {
         let row_id = job.row_id;
         let thread = job.thread.clone();
-        let target = job.target.clone();
         let backend = job.backend;
         if !self.queues.contains_key(&thread) {
             let (tx, rx) = mpsc::channel::<Job>(QUEUE_DEPTH);
@@ -306,7 +309,6 @@ impl Gateway {
             Err(mpsc::error::TrySendError::Full(_))
         );
         if full {
-            self.ack.lock().unwrap().in_flight.insert(row_id);
             warn!("[{thread}] queue full, asking sender to resend");
             self.audit(self.ctx.audit.failed(
                 "message_queue_failed",
@@ -315,28 +317,40 @@ impl Gateway {
                 Some(backend),
                 "queue full",
             ));
-            let reply = "I'm a bit behind on this thread - resend that in a moment.";
-            match record_and_deliver(&self.ctx, &job, OutboundOrigin::Gateway, reply).await {
-                Ok(DeliveryOutcome::Delivered | DeliveryOutcome::AlreadyDelivered) => {
-                    self.audit(self.ctx.audit.reply_sent(
-                        row_id,
-                        &thread,
-                        &target,
-                        Some(backend),
-                        reply,
-                    ));
-                    self.complete_row(row_id, "queue_full");
+            if self.queue_full.is_none() {
+                let (tx, rx) = mpsc::channel::<Job>(QUEUE_DEPTH);
+                let ctx = self.ctx.clone();
+                handles.push(tokio::spawn(queue_full_worker(ctx, rx)));
+                self.queue_full = Some(tx);
+            }
+            match self.queue_full.as_ref().unwrap().try_send(job) {
+                Ok(()) => {
+                    self.ack.lock().unwrap().in_flight.insert(row_id);
                 }
-                Err(error) => {
-                    error!("[{thread}] canonical history write failed: {error}");
-                    self.audit(self.ctx.audit.failed(
-                        "message_history_failed",
-                        row_id,
-                        &thread,
-                        Some(backend),
-                        error.to_string(),
-                    ));
-                    self.ack.lock().unwrap().in_flight.remove(&row_id);
+                Err(mpsc::error::TrySendError::Full(job)) => {
+                    warn!("queue-full delivery backlog full; dropping notification");
+                    match record_failed_queue_full(&self.ctx, &job) {
+                        Ok(QueueFullFallback::Completed) => {}
+                        Ok(QueueFullFallback::RetryExisting) => {
+                            warn!("[{thread}] existing reply is waiting for delivery capacity");
+                            return false;
+                        }
+                        Err(error) => {
+                            error!("[{thread}] canonical history write failed: {error}");
+                            self.audit(self.ctx.audit.failed(
+                                "message_history_failed",
+                                row_id,
+                                &thread,
+                                Some(backend),
+                                error.to_string(),
+                            ));
+                            return false;
+                        }
+                    }
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    error!("queue-full delivery worker stopped; message will be retried");
+                    self.queue_full = None;
                     return false;
                 }
             }
@@ -361,6 +375,95 @@ async fn worker(ctx: Ctx, mut rx: mpsc::Receiver<Job>) {
     while let Some(job) = rx.recv().await {
         handle(&ctx, job).await;
     }
+}
+
+async fn queue_full_worker(ctx: Ctx, mut rx: mpsc::Receiver<Job>) {
+    while let Some(job) = rx.recv().await {
+        handle_queue_full(&ctx, &job).await;
+    }
+}
+
+async fn handle_queue_full(ctx: &Ctx, job: &Job) {
+    loop {
+        match record_and_deliver(ctx, job, OutboundOrigin::Gateway, QUEUE_FULL_REPLY).await {
+            Ok(DeliveryOutcome::Delivered | DeliveryOutcome::AlreadyDelivered) => {
+                audit(
+                    ctx,
+                    ctx.audit.reply_sent(
+                        job.row_id,
+                        &job.thread,
+                        &job.target,
+                        Some(job.backend),
+                        QUEUE_FULL_REPLY,
+                    ),
+                );
+                complete_job(ctx, job, "queue_full");
+                return;
+            }
+            Err(error) => {
+                error!("[{}] canonical history write failed: {error}", job.thread);
+                audit(
+                    ctx,
+                    ctx.audit.failed(
+                        "message_history_failed",
+                        job.row_id,
+                        &job.thread,
+                        Some(job.backend),
+                        error.to_string(),
+                    ),
+                );
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueueFullFallback {
+    Completed,
+    RetryExisting,
+}
+
+fn record_failed_queue_full(ctx: &Ctx, job: &Job) -> Result<QueueFullFallback> {
+    if let Some(existing) = ctx.history.lock().unwrap().outbound_for(job.inbound_id)? {
+        if existing.status != DeliveryStatus::Delivered {
+            return Ok(QueueFullFallback::RetryExisting);
+        }
+        audit(
+            ctx,
+            ctx.audit.reply_sent(
+                job.row_id,
+                &job.thread,
+                &job.target,
+                Some(job.backend),
+                &existing.content,
+            ),
+        );
+        complete_job(ctx, job, "queue_full");
+        return Ok(QueueFullFallback::Completed);
+    }
+    let outbound = ctx.history.lock().unwrap().record_outbound(
+        job.inbound_id,
+        OutboundOrigin::Gateway,
+        Some(job.backend.as_str()),
+        QUEUE_FULL_REPLY,
+    )?;
+    ctx.history
+        .lock()
+        .unwrap()
+        .mark_delivery(outbound.id, DeliveryStatus::Failed)?;
+    audit(
+        ctx,
+        ctx.audit.reply_failed(
+            job.row_id,
+            &job.thread,
+            &job.target,
+            Some(job.backend),
+            "queue-full delivery backlog full",
+        ),
+    );
+    complete_job(ctx, job, "queue_full_reply_failed");
+    Ok(QueueFullFallback::Completed)
 }
 
 async fn handle(ctx: &Ctx, job: Job) {
@@ -2200,6 +2303,154 @@ mod tests {
                 .status,
             DeliveryStatus::Delivered
         );
+
+        let _ = std::fs::remove_file(&state_path);
+        let _ = std::fs::remove_file(format!("{state_path}.db"));
+        let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+        let _ = std::fs::remove_dir_all(sessions_dir);
+        let _ = std::fs::remove_dir_all(assistant_dir);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn queue_full_delivery_retry_is_bounded_and_does_not_block_unrelated_messages() {
+        let state_path = temp_state_path();
+        let audit_path = format!("{state_path}.audit.jsonl");
+        let sessions_dir = temp_path("queue-full-sessions");
+        let assistant_dir = temp_path("queue-full-assistant");
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        let mut gateway = Gateway::new(test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        ))
+        .unwrap();
+        let thread = "imessage:dm:+15551234567";
+        let (sender, _receiver) = mpsc::channel(QUEUE_DEPTH);
+        for row_id in 100..100 + QUEUE_DEPTH as i64 {
+            sender.try_send(setup_failure_job(row_id)).unwrap();
+        }
+        gateway.queues.insert(thread.to_string(), sender);
+        *gateway.ctx.send_failures_remaining.lock().unwrap() = usize::MAX;
+        let mut handles = Vec::new();
+        let mut messages = (1..=QUEUE_DEPTH as i64 + 2)
+            .map(|row_id| message(row_id, "+15551234567", "+15551234567", false, "overflow"))
+            .collect::<Vec<_>>();
+        messages.push(message(
+            100,
+            "+19998887777",
+            "+19998887777",
+            false,
+            "unrelated",
+        ));
+
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            gateway.tick_fake(messages, &mut handles),
+        )
+        .await
+        .expect("queue-full delivery retry must not block the poll loop");
+
+        assert_eq!(handles.len(), 1, "queue-full retries share one worker");
+        assert!(audit_events(&audit_path).iter().any(|event| {
+            event.event == "message_ignored"
+                && event.row_id == Some(100)
+                && event.reason.as_deref() == Some("not_allowlisted")
+        }));
+        let saturated_inbound = gateway
+            .ctx
+            .history
+            .lock()
+            .unwrap()
+            .record_inbound(
+                "imessage",
+                thread,
+                &format!("imessage:{}", QUEUE_DEPTH as i64 + 1),
+                "overflow",
+            )
+            .unwrap();
+        assert_eq!(
+            gateway
+                .ctx
+                .history
+                .lock()
+                .unwrap()
+                .outbound_for(saturated_inbound)
+                .unwrap()
+                .unwrap()
+                .status,
+            DeliveryStatus::Failed
+        );
+        for handle in handles {
+            handle.abort();
+        }
+
+        let _ = std::fs::remove_file(&state_path);
+        let _ = std::fs::remove_file(format!("{state_path}.db"));
+        let _ = std::fs::remove_file(audit_path);
+        let _ = std::fs::remove_dir_all(sessions_dir);
+        let _ = std::fs::remove_dir_all(assistant_dir);
+    }
+
+    #[test]
+    fn saturated_queue_preserves_existing_pending_backend_reply() {
+        let state_path = temp_state_path();
+        let sessions_dir = temp_path("queue-full-pending-sessions");
+        let assistant_dir = temp_path("queue-full-pending-assistant");
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        let gateway = Gateway::new(test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        ))
+        .unwrap();
+        let thread = "imessage:dm:+15551234567";
+        let inbound_id = gateway
+            .ctx
+            .history
+            .lock()
+            .unwrap()
+            .record_inbound("imessage", thread, "imessage:1", "hello")
+            .unwrap();
+        gateway
+            .ctx
+            .history
+            .lock()
+            .unwrap()
+            .record_outbound(
+                inbound_id,
+                OutboundOrigin::Backend,
+                Some("codex"),
+                "stored backend reply",
+            )
+            .unwrap();
+        let job = Job {
+            row_id: 1,
+            inbound_id,
+            thread: thread.to_string(),
+            target: "+15551234567".to_string(),
+            backend: AgentBackend::Codex,
+            permission: PermissionProfile {
+                name: "restricted".to_string(),
+                capability: crate::config::PermissionCapability::ReadOnly,
+            },
+            text: "hello".to_string(),
+        };
+
+        assert_eq!(
+            record_failed_queue_full(&gateway.ctx, &job).unwrap(),
+            QueueFullFallback::RetryExisting
+        );
+        let existing = gateway
+            .ctx
+            .history
+            .lock()
+            .unwrap()
+            .outbound_for(inbound_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(existing.content, "stored backend reply");
+        assert_eq!(existing.status, DeliveryStatus::Pending);
+        assert_eq!(gateway.store.lock().unwrap().cursor("imessage"), 0);
 
         let _ = std::fs::remove_file(&state_path);
         let _ = std::fs::remove_file(format!("{state_path}.db"));
