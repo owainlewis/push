@@ -12,6 +12,7 @@ mod config;
 mod gateway;
 mod history;
 mod imessage;
+mod jobs;
 mod rehydration;
 mod soul;
 mod store;
@@ -29,12 +30,16 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
 
     let args = Args::parse(std::env::args().skip(1).collect())?;
-    if args.command == Command::Doctor {
-        return doctor(&args.config_path);
+    match args.command {
+        Command::Doctor => doctor(&args.config_path),
+        Command::Job(command) => run_job_command(&args.config_path, command).await,
+        Command::Run => {
+            let cfg = config::Config::load(&args.config_path).context("config")?;
+            preflight(&cfg).context("preflight")?;
+            report_invalid_jobs(&cfg)?;
+            gateway::Gateway::new(cfg).context("init")?.run().await
+        }
     }
-    let cfg = config::Config::load(&args.config_path).context("config")?;
-    preflight(&cfg).context("preflight")?;
-    gateway::Gateway::new(cfg).context("init")?.run().await
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -47,19 +52,25 @@ struct Args {
 enum Command {
     Run,
     Doctor,
+    Job(JobCommand),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum JobCommand {
+    Validate,
+    List,
+    Show(String),
+    Run(String),
+    Runs(Option<String>),
 }
 
 impl Args {
     fn parse(args: Vec<String>) -> Result<Self> {
-        let mut command = Command::Run;
         let mut config_path = "config.toml".to_string();
+        let mut positional = Vec::new();
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
-                "doctor" if command == Command::Run => {
-                    command = Command::Doctor;
-                    i += 1;
-                }
                 "--config" => {
                     let Some(path) = args.get(i + 1) else {
                         bail!("--config requires a path");
@@ -67,14 +78,116 @@ impl Args {
                     config_path = path.clone();
                     i += 2;
                 }
-                other => bail!("unknown argument {other:?}; expected doctor or --config <path>"),
+                value => {
+                    positional.push(value.to_string());
+                    i += 1;
+                }
             }
         }
+        let command = match positional.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+            [] => Command::Run,
+            ["doctor"] => Command::Doctor,
+            ["job", "validate"] => Command::Job(JobCommand::Validate),
+            ["job", "list"] => Command::Job(JobCommand::List),
+            ["job", "show", name] => Command::Job(JobCommand::Show((*name).to_string())),
+            ["job", "run", name] => Command::Job(JobCommand::Run((*name).to_string())),
+            ["job", "runs"] => Command::Job(JobCommand::Runs(None)),
+            ["job", "runs", name] => Command::Job(JobCommand::Runs(Some((*name).to_string()))),
+            _ => bail!(
+                "unknown command; expected doctor, job validate, job list, job show <name>, job run <name>, job runs [<name>], or --config <path>"
+            ),
+        };
         Ok(Self {
             command,
             config_path,
         })
     }
+}
+
+async fn run_job_command(config_path: &str, command: JobCommand) -> Result<()> {
+    let cfg = config::Config::load(config_path).context("config")?;
+    match command {
+        JobCommand::Validate => {
+            let catalog = jobs::Catalog::load(&cfg)?;
+            for job in catalog.jobs.values() {
+                println!("VALID\t{}", job.name);
+            }
+            for error in &catalog.errors {
+                println!(
+                    "INVALID\t{}\t{}\t{}",
+                    error.name,
+                    error.path.display(),
+                    error.message
+                );
+            }
+            if catalog.errors.is_empty() {
+                Ok(())
+            } else {
+                bail!("{} invalid job(s)", catalog.errors.len())
+            }
+        }
+        JobCommand::List => {
+            let catalog = jobs::Catalog::load(&cfg)?;
+            for job in catalog.jobs.values() {
+                println!(
+                    "{}\tvalid\t{}\t{}",
+                    job.name,
+                    job.backend.as_str(),
+                    job.permission.name
+                );
+            }
+            for error in catalog.errors {
+                println!("{}\tinvalid\t{}", error.name, error.message);
+            }
+            Ok(())
+        }
+        JobCommand::Show(name) => {
+            let job = jobs::Catalog::load_named(&cfg, &name)?;
+            print!("{}", jobs::format_job(&job));
+            Ok(())
+        }
+        JobCommand::Run(name) => {
+            let job = jobs::Catalog::load_named(&cfg, &name)?;
+            let (run_id, output) = jobs::run_manual(&cfg, job).await?;
+            println!("run_id: {run_id}");
+            println!("{output}");
+            Ok(())
+        }
+        JobCommand::Runs(name) => {
+            if let Some(name) = name.as_deref() {
+                jobs::validate_job_name(name)?;
+            }
+            let ledger = jobs::Ledger::open(&cfg.database_path)?;
+            for run in ledger.runs(name.as_deref())? {
+                println!(
+                    "{}\t{}\t{}\t{}\t{}\t{}",
+                    run.id,
+                    run.job_name,
+                    run.state,
+                    run.backend,
+                    run.queued_at_ms,
+                    run.result
+                        .or(run.error)
+                        .unwrap_or_default()
+                        .replace('\n', " ")
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn report_invalid_jobs(cfg: &config::Config) -> Result<()> {
+    let catalog = jobs::Catalog::load(cfg)?;
+    for error in catalog.errors {
+        tracing::warn!(
+            "job {:?} disabled ({}): {}",
+            error.name,
+            error.path.display(),
+            error.message
+        );
+    }
+    Ok(())
 }
 
 /// Fails fast with actionable messages when the environment is not ready.
@@ -423,6 +536,71 @@ mod tests {
     }
 
     #[test]
+    fn parses_all_job_commands_with_config_anywhere() {
+        assert_eq!(
+            Args::parse(vec!["job".into(), "validate".into()])
+                .unwrap()
+                .command,
+            Command::Job(JobCommand::Validate)
+        );
+        assert_eq!(
+            Args::parse(vec![
+                "--config".into(),
+                "x.toml".into(),
+                "job".into(),
+                "list".into()
+            ])
+            .unwrap(),
+            Args {
+                command: Command::Job(JobCommand::List),
+                config_path: "x.toml".to_string(),
+            }
+        );
+        assert_eq!(
+            Args::parse(vec!["job".into(), "show".into(), "daily".into()])
+                .unwrap()
+                .command,
+            Command::Job(JobCommand::Show("daily".to_string()))
+        );
+        assert_eq!(
+            Args::parse(vec!["job".into(), "run".into(), "daily".into()])
+                .unwrap()
+                .command,
+            Command::Job(JobCommand::Run("daily".to_string()))
+        );
+        assert_eq!(
+            Args::parse(vec!["job".into(), "runs".into()])
+                .unwrap()
+                .command,
+            Command::Job(JobCommand::Runs(None))
+        );
+        assert_eq!(
+            Args::parse(vec!["job".into(), "runs".into(), "daily".into()])
+                .unwrap()
+                .command,
+            Command::Job(JobCommand::Runs(Some("daily".to_string())))
+        );
+    }
+
+    #[test]
+    fn invalid_jobs_are_non_fatal_during_gateway_startup() {
+        let jobs_dir = temp_dir("invalid-startup-jobs");
+        std::fs::write(jobs_dir.join("invalid.md"), "not a runbook").unwrap();
+        let state_path = temp_path("invalid-startup-state");
+        let sessions_dir = temp_dir("invalid-startup-sessions");
+        let assistant_dir = temp_dir("invalid-startup-assistant");
+        let mut cfg = crate::gateway::tests::test_config_for_jobs(
+            state_path.to_str().unwrap(),
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        );
+        cfg.jobs_dir = jobs_dir.to_string_lossy().to_string();
+
+        assert!(report_invalid_jobs(&cfg).is_ok());
+        assert!(gateway::Gateway::new(cfg).is_ok());
+    }
+
+    #[test]
     fn defaults_to_toml_config_path() {
         assert_eq!(
             Args::parse(Vec::new()).unwrap(),
@@ -446,6 +624,14 @@ mod tests {
         assert!(cfg.telegram_allow_chat_ids.is_empty());
         assert_eq!(cfg.permission_profile, "restricted");
         assert!(cfg.permission_profiles.is_empty());
+        assert_eq!(cfg.jobs_agent, None);
+        assert_eq!(cfg.jobs_max_timeout, "30m");
+        assert_eq!(
+            cfg.jobs_dir,
+            Path::new(&std::env::var("HOME").unwrap())
+                .join(".push/jobs")
+                .to_string_lossy()
+        );
         assert_eq!(
             cfg.database_path,
             Path::new(&std::env::var("HOME").unwrap())
@@ -951,6 +1137,10 @@ capability = "workspace"
             permission_profile: "restricted".to_string(),
             job_permission_profiles: vec!["restricted".to_string()],
             permission_profiles: std::collections::HashMap::new(),
+            jobs_dir: "/fake/jobs".to_string(),
+            jobs_agent: None,
+            jobs_max_timeout: "30m".to_string(),
+            jobs_run_dir: "/fake/run".to_string(),
             claude_bin: "/fake/claude".to_string(),
             codex_bin: "/fake/codex".to_string(),
             codex_model: None,

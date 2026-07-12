@@ -1258,7 +1258,7 @@ async fn shutdown_signal() {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::agent::{FakeRunCall, FakeRunner};
     use crate::channel::{normalize_handle, thread_handle};
@@ -2697,6 +2697,10 @@ mod tests {
             permission_profile: "restricted".to_string(),
             job_permission_profiles: vec!["restricted".to_string()],
             permission_profiles: HashMap::new(),
+            jobs_dir: format!("{state_path}.jobs"),
+            jobs_agent: None,
+            jobs_max_timeout: "30m".to_string(),
+            jobs_run_dir: format!("{state_path}.run"),
             claude_bin: "claude".to_string(),
             codex_bin: "codex".to_string(),
             codex_model: None,
@@ -2708,6 +2712,14 @@ mod tests {
             assistant_dir: assistant_dir.to_string(),
             reply_marker: "\n\n-- sent by push".to_string(),
         }
+    }
+
+    pub(crate) fn test_config_for_jobs(
+        state_path: &str,
+        sessions_dir: &str,
+        assistant_dir: &str,
+    ) -> Config {
+        test_config(state_path, sessions_dir, assistant_dir)
     }
 
     fn audit_events(path: &str) -> Vec<crate::audit::AuditEvent> {

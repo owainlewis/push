@@ -24,6 +24,7 @@ own the durable pieces:
 - routing
 - assistant identity
 - canonical conversation history
+- validated runbook jobs and their durable run ledger
 - cursor and backend-session state
 - delivery
 
@@ -200,6 +201,15 @@ unique channel event ID makes inbound retries idempotent, and a unique link from
 each inbound message to its outbound response preserves the generation/delivery
 crash boundary. SQLite history does not replace `state.json` cursors or backend
 session IDs in this phase.
+
+The same database stores immutable job-run claims and bounded terminal results.
+Markdown runbooks remain operator-owned files under `jobs_dir`. A manual CLI
+start rereads and validates the exact file, acquires a non-blocking per-job lock,
+then records and claims the run in one immediate SQLite transaction before
+spawning a fresh backend session. The CLI holds the lock through result
+persistence. Only a process that acquired the released lock may fail a stale
+manual claim, so a live local executor is never reclaimed from ledger state
+alone. Manual runs do not reuse chat history or backend session ids.
 
 The same database stores `ask_user` questions before delivery. Each question
 has a UUID correlation id, two to nine bounded choices, an expiry, delivery
