@@ -8,19 +8,19 @@
 
 Push jobs are user-owned Markdown runbooks stored under `~/.push/jobs/`. A job
 contains one instruction body plus execution policy such as its permission
-profile, timeout, working directory, backend override, and delivery target.
+profile, timeout, working directory, and backend override.
 Manual and cron starts are triggers attached to the same job rather than
 different job types. Every run uses a fresh backend session. Once the scheduler
-and ledger ship, Push records each run in SQLite before execution, allowing
-scheduling and delivery to remain durable without turning Push into an agent
-runtime.
+ships, it uses the same SQLite claim and execution path as manual runs,
+allowing scheduling and delivery to remain durable without turning Push into
+an agent runtime.
 
 ## Goals
 
 - Keep jobs readable, reviewable, and editable without a database UI.
 - Use one execution path for manual and scheduled runs.
-- Require permissions, timeouts, working directories, and delivery behavior to
-  be explicit and validated before execution.
+- Require permissions, timeouts, and working directories to be explicit and
+  validated before execution.
 - Prevent jobs from exceeding the operator-configured permission ceiling.
 - Make scheduling safe across restarts, overlap, timezones, and delivery
   failures.
@@ -38,13 +38,15 @@ runtime.
 
 ## Constraints
 
-- Push remains one local process with no inbound server port.
+- Push has one long-running gateway process with no inbound server port.
+  Commands may run as short-lived local processes against the same SQLite
+  store.
 - Claude Code and Codex have different permission controls, but a job selects
   only a named Push permission profile.
 - Scheduled work can have external side effects, so duplicate execution is more
   dangerous than skipping a missed run.
 - Job files and `SOUL.md` are user-owned inputs. Runtime and ledger state remain
-  gateway-owned.
+  Push-owned.
 - Existing installations without a jobs directory continue to start normally.
 
 ## Proposed design
@@ -66,7 +68,6 @@ Markdown instruction body. Version 1 supports these fields:
 - `workdir`: required fixed directory, expanded and canonicalised at validation.
 - `backend`: optional `claude` or `codex` override; otherwise use the configured
   jobs default.
-- `delivery`: required `primary` or `none`.
 - `triggers`: optional list of separately identified trigger definitions.
 
 Unknown fields are errors. The Markdown body is sent as the current request
@@ -82,7 +83,6 @@ permission_profile = "research-readonly"
 timeout = "10m"
 workdir = "~/Code"
 backend = "codex"
-delivery = "none"
 +++
 
 Review the repositories in this directory. Summarise branches with uncommitted
@@ -98,7 +98,6 @@ version = 1
 permission_profile = "calendar-readonly"
 timeout = "5m"
 workdir = "~/.push/workspaces/morning-agenda"
-delivery = "primary"
 
 [[triggers]]
 id = "weekday-morning"
@@ -112,20 +111,22 @@ Prepare today's agenda. List fixed appointments, useful preparation, and the
 three most important open loops. Keep the reply below 500 words.
 ```
 
-Cron expressions use five fields with minute granularity. Each cron trigger
-has a job-local slug id, an IANA timezone, and an explicit enabled flag. IANA
-timezone rules determine daylight-saving transitions: a nonexistent local
-time does not run, while an ambiguous repeated local time runs once at the
-first matching instant. Trigger ids make schedule edits inspectable without
-changing the job's identity.
+Cron expressions use five fields with minute granularity. Six-field expressions
+and aliases such as `@daily` are rejected. Each cron trigger has a job-local
+slug id, an IANA timezone, and an explicit enabled flag. IANA timezone rules
+determine daylight-saving transitions: a nonexistent local time does not run,
+while an ambiguous repeated local time runs once at the first matching instant.
+Trigger ids make schedule edits inspectable without changing the job's
+identity.
 
 ### Validation and capability ceiling
 
 Push validates all installed jobs during startup preflight and through a
-read-only `push job validate` command. If any installed job is invalid, startup
-reports every error and stops before polling or scheduling. A missing jobs
-directory and an empty directory are valid. Draft files outside the jobs
-directory are not installed jobs and do not affect startup.
+read-only `push job validate` command. Invalid jobs are disabled, reported
+together, and make the validation command return non-zero, but they do not
+prevent channel polling or valid jobs from starting. A missing jobs directory
+and an empty directory are valid. Draft files outside the jobs directory are
+not installed jobs and do not affect startup.
 
 The running gateway checks job files before each schedule evaluation. A changed
 file replaces its prior definition only after full validation; an invalid
@@ -147,17 +148,20 @@ job passes validation. The timeout must not exceed the configured jobs maximum,
 and the canonical work directory must meet the restrictions of the permission
 profile.
 
-Scheduled jobs must use `delivery = "primary"` and require a validated primary
-destination. Manual-only jobs may use `none`; their result is always printed to
-the invoking terminal. Secrets are referenced through the selected profile or
-process environment policy, never embedded as special job fields.
+Notification behavior follows the trigger rather than job metadata. A manual
+run prints its result to the invoking terminal and does not send a message. A
+scheduled run sends its success, failure, or timeout result to the configured
+primary destination. If no primary destination is valid, scheduled triggers
+remain disabled with an actionable error while the job remains manually
+runnable. Secrets are referenced through the selected profile or process
+environment policy, never embedded as special job fields.
 
 ### Execution
 
 Manual and cron triggers create the same immutable run request containing a
 snapshot hash of the validated job, trigger information, scheduled time,
-backend, permission profile, timeout, canonical work directory, and delivery
-target. Editing the job affects later runs but not an already claimed run.
+backend, permission profile, timeout, and canonical work directory. Editing the
+job affects later runs but not an already claimed run.
 
 Each run starts a fresh Claude or Codex session. Push supplies the composed
 `SOUL.md` instructions at instruction priority and the job body as the current
@@ -166,18 +170,23 @@ history. Their backend session ids are not saved for reuse. The working
 directory is stable across runs, so filesystem state may persist even though
 conversation state does not.
 
-Only one run of a given job may be queued or running at a time. A manual start
-or scheduled occurrence that loses this atomic claim is recorded as
-`skipped_overlap`; it does not wait in an unbounded queue. Different jobs may
-run concurrently subject to a configured global worker limit.
+Before backend execution, both manual and scheduled starts attempt a
+non-blocking OS advisory lock for the job under `~/.push/run/locks/`. The
+winning process holds that lock until its run finishes. It then uses one SQLite
+transaction to check queued and running state, record the run, and claim the
+job. A start that loses the file lock or database claim is recorded as
+`skipped_overlap`; it does not wait in an unbounded queue. Advisory locks are
+the local liveness signal and SQLite is the durable history and uniqueness
+boundary.
 
-Once scheduling ships, the long-running gateway is the sole executor and owns
-the global worker limit. `push job run` is a short-lived local producer: it
-validates the requested job, inserts a manual `queued` run into the same SQLite
-ledger, and waits for the gateway to complete it. If no gateway holds the local
-runtime lock, the CLI temporarily acquires that lock and executes its own run
-through the same claim path. A second gateway process is rejected. This local
-coordination does not expose a network listener or create a distributed queue.
+`push job run` executes directly in its CLI process after winning the claim.
+The long-running gateway executes scheduled claims and applies its configured
+worker limit to scheduled work. Explicit operator-run CLI jobs do not consume
+that scheduler limit, but they obey the same per-job overlap rule. This avoids
+a local request queue, daemon handoff, global runtime lock, or network listener
+while keeping cross-process claims durable. The jobs directory and lock
+directory must be on a local filesystem that provides process-scoped advisory
+locks.
 
 Push does not catch up cron occurrences missed while it was stopped. On
 startup it schedules the next future occurrence. A unique ledger key over job,
@@ -191,10 +200,10 @@ effects before failing. The operator can start a new manual run instead.
 The SQLite ledger records each run before backend execution. Its minimum
 logical fields are:
 
-- run id, job name, job snapshot hash, and trigger kind/id;
+- run id, job name, job snapshot hash, trigger kind/id, and claim owner kind;
 - scheduled, queued, started, and finished timestamps;
-- backend, permission profile, timeout, canonical work directory, and delivery
-  target;
+- backend, permission profile, timeout, canonical work directory, and resolved
+  notification destination when applicable;
 - lifecycle state and a bounded result or error reference;
 - delivery state, attempt count, last attempt time, and delivery error.
 
@@ -207,12 +216,17 @@ Successful output is stored before delivery. Failures and timeouts produce a
 bounded diagnostic result and follow the same delivery policy. Delivery may be
 retried up to three times with backoff using the already stored result; it
 never reruns the agent. Exhausted delivery remains `failed` and is visible in
-the read-only run log. On restart, valid `queued` rows remain eligible for the
-gateway to claim because backend execution has not begun. Recovery marks an
-interrupted `running` row as failed with an interruption reason and releases
-its overlap claim. It resumes pending delivery attempts, but never backend
-execution. A queued row whose job snapshot is no longer installed remains
-cancelled with a diagnostic rather than running different content.
+the read-only run log. Manual runs move directly to `running` in their claim
+transaction and are never handed to the gateway. On restart, valid scheduled
+`queued` rows remain eligible for the gateway because backend execution has not
+begun. Push only marks a `running` row interrupted after it can acquire that
+job's advisory lock, proving no local executor still holds it. If the lock is
+held, recovery leaves the live run unchanged. The same stale-claim check runs
+before each new claim, so a crashed CLI cannot block a job indefinitely even
+while the gateway remains up. Recovery resumes pending delivery attempts, but
+never backend execution. A queued row whose job snapshot is no longer
+installed remains cancelled with a diagnostic rather than running different
+content.
 
 ### Commands and ownership
 
@@ -223,10 +237,10 @@ execution:
 - `push job list`
 - `push job show <name>`
 - `push job run <name>`
-- `push log [--job <name>]`
+- `push job runs [<name>]`
 
-Push is the only writer to the run ledger: the gateway owns execution state and
-the CLI may insert a manual queued request. Installed job files remain
+Push is the only writer to the run ledger. The CLI owns the manual run it
+claims, and the gateway owns scheduled runs. Installed job files remain
 operator-owned. A later draft workflow may let an agent write under
 `~/.push/drafts/`, but activation must revalidate and atomically install the
 exact approved revision into `~/.push/jobs/`.
@@ -266,6 +280,14 @@ duplicate external side effects after downtime or ambiguous backend failure.
 The first version prefers an inspectable skipped or failed run and an explicit
 manual retry.
 
+### Send manual runs through the gateway
+
+A daemon-owned queue would provide one global worker limit, but it requires IPC
+or polling, waiting semantics, daemon availability handling, and a second
+execution mode when the gateway is stopped. Direct CLI execution with a shared
+SQLite claim and process-scoped advisory lock preserves per-job safety with
+fewer moving parts.
+
 ## Risks
 
 - A permissive profile can still grant broad machine access. Named profiles,
@@ -282,20 +304,20 @@ manual retry.
   auditable.
 - A process crash can leave external side effects without a successful result.
   Interrupted runs are never automatically replayed.
+- Advisory locking is a local-filesystem assumption. Push rejects a lock setup
+  it cannot verify rather than relying on SQLite state alone for executor
+  liveness.
 - Stored outputs may contain sensitive data. Results and errors must be
   bounded, locally permissioned, and excluded from normal logs.
 
 ## Rollout
 
-1. Ship parsing, validation, listing, inspection, and one-shot manual execution
-   without enabling a scheduler. This transitional command acquires a local
-   per-job lock, prints its result, and has no durable run ledger.
-2. Add the SQLite run ledger, make the gateway the sole long-running executor,
-   route manual requests through durable claims, and expose recent runs through
-   `push log`. From this step onward every run is recorded before execution.
-3. Add cron evaluation and primary-channel delivery behind that same validated
-   execution path.
-4. Enable agent-authored drafts only after approval and filesystem isolation
+1. Ship parsing, validation, listing, inspection, direct manual execution, the
+   SQLite run ledger, and `push job runs` without enabling a scheduler. Every
+   manual run is claimed and recorded before execution.
+2. Add cron evaluation and primary-channel delivery behind the same
+   transactional claim and execution path.
+3. Enable agent-authored drafts only after approval and filesystem isolation
    rules are implemented.
 
 Backout disables scheduling and manual execution while preserving job files
