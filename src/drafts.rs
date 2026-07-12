@@ -12,6 +12,7 @@ use crate::approval::AnswerOrigin;
 use crate::config::Config;
 use crate::history::{DraftProposal, History};
 use crate::jobs;
+use crate::util::{restrict_permissions, same_file};
 
 const MAX_DRAFT_BYTES: usize = 64 * 1024;
 
@@ -407,32 +408,6 @@ fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-#[cfg(unix)]
-fn same_file(expected: &std::fs::Metadata, opened: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    expected.dev() == opened.dev() && expected.ino() == opened.ino()
-}
-
-#[cfg(not(unix))]
-fn same_file(expected: &std::fs::Metadata, opened: &std::fs::Metadata) -> bool {
-    expected.len() == opened.len()
-        && expected.modified().ok() == opened.modified().ok()
-        && opened.is_file()
-}
-
-#[cfg(unix)]
-fn restrict_permissions(path: &Path, directory: bool) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = if directory { 0o700 } else { 0o600 };
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn restrict_permissions(_path: &Path, _directory: bool) -> Result<()> {
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,7 +437,6 @@ mod tests {
                 agent: "codex".to_string(),
                 routes: Vec::new(),
                 permission_profile: "workspace".to_string(),
-                job_permission_profiles: vec!["restricted".to_string(), "workspace".to_string()],
                 permission_profiles: HashMap::new(),
                 jobs_dir: root.join("jobs").to_string_lossy().to_string(),
                 drafts_dir: root.join("drafts").to_string_lossy().to_string(),
@@ -478,6 +452,7 @@ mod tests {
                 audit_log_path: root.join("audit.jsonl").to_string_lossy().to_string(),
                 database_path: root.join("push.db").to_string_lossy().to_string(),
                 audit_log_content: false,
+                config_path: String::new(),
                 assistant_dir: root.to_string_lossy().to_string(),
                 reply_marker: String::new(),
             },
@@ -485,9 +460,9 @@ mod tests {
         )
     }
 
-    fn runbook(workdir: &Path, profile: &str) -> String {
+    fn runbook(workdir: &Path) -> String {
         format!(
-            "+++\nversion = 1\npermission_profile = {profile:?}\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"codex\"\n+++\n\nInspect safely.\n",
+            "+++\nversion = 1\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"codex\"\n+++\n\nInspect safely.\n",
             workdir.to_string_lossy()
         )
     }
@@ -524,7 +499,7 @@ mod tests {
     fn candidate(cfg: &Config, workdir: &Path, name: &str) -> Candidate {
         let directory = origin_directory(cfg, &origin()).unwrap();
         let path = directory.join(format!("{name}.md"));
-        std::fs::write(&path, runbook(workdir, "restricted")).unwrap();
+        std::fs::write(&path, runbook(workdir)).unwrap();
         read_candidate(cfg, &path).unwrap()
     }
 
@@ -593,7 +568,11 @@ mod tests {
         let race_question = question();
         let mut history = History::open(&cfg.database_path).unwrap();
         record(&mut history, &raced, &race_question);
-        std::fs::write(&raced.path, runbook(&workdir, "workspace")).unwrap();
+        std::fs::write(
+            &raced.path,
+            runbook(&workdir).replace("Inspect safely.", "Inspect after the edit."),
+        )
+        .unwrap();
         history
             .answer_question(&origin(), &format!("{} 1", race_question.id), 2_000)
             .unwrap();
@@ -621,36 +600,28 @@ mod tests {
     fn invalid_escape_symlink_and_permission_escalation_never_become_candidates() {
         let (cfg, workdir) = cfg();
         assert!(cfg
-            .validate_job_workdir(
-                Path::new(&cfg.assistant_dir),
-                crate::config::PermissionCapability::Workspace,
-            )
+            .validate_job_workdir(Path::new(&cfg.assistant_dir))
             .is_err());
-        assert_eq!(
-            cfg.permission_for_job("workspace").unwrap().capability,
-            crate::config::PermissionCapability::Workspace
-        );
         let parsed = jobs::validate_contents(
             &cfg,
             "push-state",
             Path::new(&cfg.drafts_dir).join("push-state.md").as_path(),
-            runbook(Path::new(&cfg.assistant_dir), "workspace").as_bytes(),
+            runbook(Path::new(&cfg.assistant_dir)).as_bytes(),
         );
         assert!(parsed.is_err(), "parsed={parsed:?}");
         let directory = origin_directory(&cfg, &origin()).unwrap();
-        std::fs::write(
-            directory.join("../escape.md"),
-            runbook(&workdir, "restricted"),
-        )
-        .unwrap();
+        std::fs::write(directory.join("../escape.md"), runbook(&workdir)).unwrap();
         std::fs::write(
             directory.join("too-powerful.md"),
-            runbook(&workdir, "full-access"),
+            runbook(&workdir).replace(
+                "version = 1\n",
+                "version = 1\npermission_profile = \"full-access\"\n",
+            ),
         )
         .unwrap();
         std::fs::write(
             directory.join("push-state.md"),
-            runbook(Path::new(&cfg.assistant_dir), "workspace"),
+            runbook(Path::new(&cfg.assistant_dir)),
         )
         .unwrap();
         #[cfg(unix)]
@@ -663,11 +634,7 @@ mod tests {
         let changed = candidates(&cfg, &directory).unwrap();
         assert!(changed.iter().any(|(name, result)| {
             name == "too-powerful.md"
-                && result
-                    .as_ref()
-                    .unwrap_err()
-                    .to_string()
-                    .contains("full-access")
+                && format!("{:#}", result.as_ref().unwrap_err()).contains("permission_profile")
         }));
         assert!(changed.iter().any(|(name, result)| {
             name == "push-state.md"

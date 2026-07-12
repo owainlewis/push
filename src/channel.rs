@@ -48,11 +48,6 @@ pub enum Channel {
 }
 
 impl Channel {
-    #[allow(dead_code)]
-    pub fn new(cfg: &Config) -> Result<Self> {
-        Self::new_for(cfg, cfg.channel_kind()?)
-    }
-
     pub fn new_for(cfg: &Config, kind: ChannelKind) -> Result<Self> {
         match kind {
             ChannelKind::IMessage => Ok(Self::IMessage {
@@ -79,7 +74,6 @@ impl Channel {
         }
     }
 
-    #[allow(dead_code)]
     pub fn primary_target(&self, configured: &str) -> Result<String> {
         if configured.trim().is_empty() {
             bail!("primary delivery target cannot be empty");

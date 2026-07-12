@@ -7,6 +7,8 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
+use crate::util::expand_home;
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     #[serde(default = "default_channel")]
@@ -39,8 +41,6 @@ pub struct Config {
     pub routes: Vec<RouteRule>,
     #[serde(default = "default_permission_profile")]
     pub permission_profile: String,
-    #[serde(default = "default_job_permission_profiles")]
-    pub job_permission_profiles: Vec<String>,
     #[serde(default)]
     pub permission_profiles: HashMap<String, PermissionProfileConfig>,
     #[serde(default = "default_jobs_dir")]
@@ -75,6 +75,9 @@ pub struct Config {
     pub assistant_dir: String,
     #[serde(default = "default_reply_marker")]
     pub reply_marker: String,
+    /// Canonical path of the loaded config file. Set by `load`, never parsed.
+    #[serde(skip)]
+    pub config_path: String,
 }
 
 impl Config {
@@ -108,6 +111,11 @@ impl Config {
                 );
             }
         }
+        if root.contains_key("job_permission_profiles") {
+            bail!(
+                "job_permission_profiles is no longer supported; jobs run with the backend's own permission configuration, so remove this key"
+            );
+        }
         flatten_provider_section(
             root,
             "imessage",
@@ -138,7 +146,7 @@ impl Config {
         c.drafts_dir = expand_home(&c.drafts_dir);
         c.jobs_run_dir = expand_home(&c.jobs_run_dir);
         c.validate()?;
-        validate_config_path(path, &c)?;
+        c.config_path = validate_config_path(path, &c)?;
         Ok(c)
     }
 
@@ -214,29 +222,6 @@ impl Config {
         })
     }
 
-    pub fn permission_for_job(&self, name: &str) -> Result<PermissionProfile> {
-        let profile = self
-            .resolve_permission_profile(name)
-            .with_context(|| format!("invalid job permission profile {name:?}"))?;
-        if !self
-            .job_permission_profiles
-            .iter()
-            .any(|allowed| allowed == name)
-        {
-            bail!(
-                "job permission profile {:?} is not included in job_permission_profiles",
-                profile.name
-            );
-        }
-        if profile.capability == PermissionCapability::FullAccess {
-            bail!(
-                "job permission profile {:?} uses full-access, which cannot protect Push jobs, drafts, or state",
-                profile.name
-            );
-        }
-        Ok(profile)
-    }
-
     pub fn jobs_backend(&self) -> Result<AgentBackend> {
         AgentBackend::parse(self.jobs_agent.as_deref().unwrap_or(&self.agent))
             .context("invalid jobs_agent")
@@ -247,16 +232,12 @@ impl Config {
             .with_context(|| format!("invalid jobs_max_timeout {}", self.jobs_max_timeout))
     }
 
-    pub fn validate_job_workdir(
-        &self,
-        workdir: &Path,
-        capability: PermissionCapability,
-    ) -> Result<()> {
-        if capability == PermissionCapability::ReadOnly {
-            return Ok(());
-        }
+    // Jobs run with the backend's own permission configuration, which may
+    // allow writes, so every job workdir must stay clear of Push-owned paths,
+    // including the loaded config file itself.
+    pub fn validate_job_workdir(&self, workdir: &Path) -> Result<()> {
         let workdir = resolved_absolute("job workdir", workdir)?;
-        for (label, protected) in [
+        let protected_paths = [
             ("assistant_dir", self.assistant_dir.as_str()),
             ("sessions_dir", self.sessions_dir.as_str()),
             ("jobs_dir", self.jobs_dir.as_str()),
@@ -265,7 +246,12 @@ impl Config {
             ("state_path", self.state_path.as_str()),
             ("database_path", self.database_path.as_str()),
             ("audit_log_path", self.audit_log_path.as_str()),
-        ] {
+            ("config file", self.config_path.as_str()),
+        ];
+        for (label, protected) in protected_paths
+            .into_iter()
+            .filter(|(_, protected)| !protected.is_empty())
+        {
             let protected = resolved_absolute(label, Path::new(protected))?;
             if paths_overlap(&workdir, &protected) {
                 bail!(
@@ -386,10 +372,6 @@ impl Config {
                 .capability()
                 .with_context(|| format!("invalid permission profile {name:?}"))?;
         }
-        for name in &self.job_permission_profiles {
-            self.permission_for_job(name)
-                .with_context(|| format!("invalid job permission profile {name:?}"))?;
-        }
         for route in &self.routes {
             AgentBackend::parse(&route.agent)
                 .with_context(|| format!("invalid route agent for {route:?}"))?;
@@ -468,7 +450,7 @@ fn validate_protected_paths(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-fn validate_config_path(path: &str, cfg: &Config) -> Result<()> {
+fn validate_config_path(path: &str, cfg: &Config) -> Result<String> {
     let config = std::fs::canonicalize(path).with_context(|| format!("resolve config {path}"))?;
     let sessions = resolved_absolute("sessions_dir", Path::new(&cfg.sessions_dir))?;
     let drafts = resolved_absolute("drafts_dir", Path::new(&cfg.drafts_dir))?;
@@ -478,7 +460,7 @@ fn validate_config_path(path: &str, cfg: &Config) -> Result<()> {
     if config.starts_with(&drafts) {
         bail!("config file must not be inside drafts_dir");
     }
-    Ok(())
+    Ok(config.to_string_lossy().to_string())
 }
 
 fn normalized_absolute(label: &str, path: &Path) -> Result<PathBuf> {
@@ -590,10 +572,14 @@ pub struct PermissionProfile {
     pub capability: PermissionCapability,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionCapability {
     ReadOnly,
     Workspace,
+    /// Defer to the backend's own permission configuration. Push passes no
+    /// tool allow or deny lists; the operator's backend settings decide.
+    /// Not selectable from config (`parse` rejects it); only jobs use it.
+    Inherit,
     FullAccess,
 }
 
@@ -690,15 +676,6 @@ impl AgentBackend {
     }
 }
 
-fn expand_home(p: &str) -> String {
-    if p == "~" || p.starts_with("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return format!("{}{}", home.to_string_lossy(), &p[1..]);
-        }
-    }
-    p.to_string()
-}
-
 fn default_db_path() -> String {
     "~/Library/Messages/chat.db".to_string()
 }
@@ -725,9 +702,6 @@ fn default_codex_bin() -> String {
 }
 fn default_permission_profile() -> String {
     "restricted".to_string()
-}
-fn default_job_permission_profiles() -> Vec<String> {
-    vec!["restricted".to_string()]
 }
 fn default_jobs_dir() -> String {
     "~/.push/jobs".to_string()
@@ -787,7 +761,6 @@ mod tests {
             agent: "codex".to_string(),
             routes: Vec::new(),
             permission_profile: "workspace".to_string(),
-            job_permission_profiles: vec!["restricted".to_string()],
             permission_profiles: HashMap::new(),
             jobs_dir: root.join("jobs").to_string_lossy().to_string(),
             drafts_dir: root.join("drafts").to_string_lossy().to_string(),
@@ -803,6 +776,7 @@ mod tests {
             audit_log_path: root.join("audit.jsonl").to_string_lossy().to_string(),
             database_path: root.join("push.db").to_string_lossy().to_string(),
             audit_log_content: false,
+            config_path: String::new(),
             assistant_dir: root.to_string_lossy().to_string(),
             reply_marker: String::new(),
         }
@@ -821,14 +795,6 @@ mod tests {
             .contains("full-access"));
 
         cfg.permission_profile = "workspace".to_string();
-        cfg.job_permission_profiles = vec!["full-access".to_string()];
-        assert!(cfg
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("full-access"));
-
-        cfg.job_permission_profiles = vec!["restricted".to_string()];
         cfg.drafts_dir = format!("{}/drafts", cfg.jobs_dir);
         assert!(cfg
             .validate()
