@@ -38,6 +38,14 @@ pub struct Config {
     pub job_permission_profiles: Vec<String>,
     #[serde(default)]
     pub permission_profiles: HashMap<String, PermissionProfileConfig>,
+    #[serde(default = "default_jobs_dir")]
+    pub jobs_dir: String,
+    #[serde(default)]
+    pub jobs_agent: Option<String>,
+    #[serde(default = "default_jobs_max_timeout")]
+    pub jobs_max_timeout: String,
+    #[serde(default = "default_jobs_run_dir")]
+    pub jobs_run_dir: String,
     #[serde(default = "default_claude_bin")]
     pub claude_bin: String,
     #[serde(default = "default_codex_bin")]
@@ -117,6 +125,8 @@ impl Config {
         c.audit_log_path = expand_home(&c.audit_log_path);
         c.database_path = expand_home(&c.database_path);
         c.assistant_dir = expand_home(&c.assistant_dir);
+        c.jobs_dir = expand_home(&c.jobs_dir);
+        c.jobs_run_dir = expand_home(&c.jobs_run_dir);
         c.validate()?;
         Ok(c)
     }
@@ -194,6 +204,16 @@ impl Config {
         Ok(profile)
     }
 
+    pub fn jobs_backend(&self) -> Result<AgentBackend> {
+        AgentBackend::parse(self.jobs_agent.as_deref().unwrap_or(&self.agent))
+            .context("invalid jobs_agent")
+    }
+
+    pub fn jobs_max_timeout_dur(&self) -> Result<Duration> {
+        humantime::parse_duration(&self.jobs_max_timeout)
+            .with_context(|| format!("invalid jobs_max_timeout {}", self.jobs_max_timeout))
+    }
+
     fn resolve_route(&self, route: &RouteRule) -> Result<RouteSelection> {
         let profile = route
             .permission_profile
@@ -269,6 +289,13 @@ impl Config {
             }
         }
         self.agent_backend()?;
+        self.jobs_backend()?;
+        if self.jobs_max_timeout_dur()?.is_zero() {
+            bail!("jobs_max_timeout must be positive");
+        }
+        if self.jobs_dir.trim().is_empty() || self.jobs_run_dir.trim().is_empty() {
+            bail!("jobs_dir and jobs_run_dir cannot be empty");
+        }
         self.resolve_permission_profile(&self.permission_profile)
             .context("invalid default permission profile")?;
         for (name, profile) in &self.permission_profiles {
@@ -505,6 +532,15 @@ fn default_permission_profile() -> String {
 }
 fn default_job_permission_profiles() -> Vec<String> {
     vec!["restricted".to_string()]
+}
+fn default_jobs_dir() -> String {
+    "~/.push/jobs".to_string()
+}
+fn default_jobs_max_timeout() -> String {
+    "30m".to_string()
+}
+fn default_jobs_run_dir() -> String {
+    "~/.push/run".to_string()
 }
 fn default_sessions_dir() -> String {
     "~/.push/sessions".to_string()
