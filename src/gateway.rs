@@ -18,6 +18,9 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::agent::{Request, RunError, Runner};
+use crate::approval::{
+    AnswerOrigin, AnswerOutcome, DeliveryStatus as ApprovalDeliveryStatus, Question,
+};
 use crate::audit::{AuditEvent, AuditLog};
 use crate::channel::{Channel, RawMessage};
 use crate::claude;
@@ -131,6 +134,36 @@ impl Gateway {
         })
     }
 
+    #[allow(dead_code)]
+    pub async fn ask_user(&self, question: Question) -> Result<String> {
+        if question.channel != self.channel.id() {
+            anyhow::bail!(
+                "question channel {:?} does not match running channel {:?}",
+                question.channel,
+                self.channel.id()
+            );
+        }
+        let id = question.id.clone();
+        self.ctx
+            .history
+            .lock()
+            .unwrap()
+            .create_question(&question, now_ms())?;
+        let delivered = reply_to(&self.ctx, &question.target, &question.render_text()).await;
+        self.ctx.history.lock().unwrap().mark_question_delivery(
+            &id,
+            if delivered {
+                ApprovalDeliveryStatus::Delivered
+            } else {
+                ApprovalDeliveryStatus::Failed
+            },
+        )?;
+        if !delivered {
+            anyhow::bail!("approval question {id} could not be delivered");
+        }
+        Ok(id)
+    }
+
     /// Runs until SIGINT/SIGTERM, then drains in-flight runs and returns.
     pub async fn run(mut self) -> Result<()> {
         self.skip_backlog().await?;
@@ -223,6 +256,30 @@ impl Gateway {
                 continue;
             }
             if let Some((thread, target)) = self.channel.accept(m) {
+                let approval = self.ctx.history.lock().unwrap().answer_question(
+                    &approval_origin(m, &thread),
+                    m.text.trim(),
+                    now_ms(),
+                );
+                match approval {
+                    Ok(AnswerOutcome::NotAnAnswer) => {}
+                    Ok(outcome) => {
+                        self.audit_approval(m.row_id, &thread, &outcome);
+                        self.complete_row(m.row_id, "approval_answer");
+                        continue;
+                    }
+                    Err(error) => {
+                        error!("[{thread}] approval lookup failed: {error}");
+                        self.audit(self.ctx.audit.failed(
+                            "approval_answer_failed",
+                            m.row_id,
+                            &thread,
+                            None,
+                            error.to_string(),
+                        ));
+                        return;
+                    }
+                }
                 let inbound_id = match self.ctx.history.lock().unwrap().record_inbound(
                     m.channel,
                     &thread,
@@ -353,6 +410,33 @@ impl Gateway {
 
     fn audit(&self, event: AuditEvent) {
         audit(&self.ctx, event);
+    }
+
+    fn audit_approval(&self, row_id: i64, thread: &str, outcome: &AnswerOutcome) {
+        let (event, reason) = match outcome {
+            AnswerOutcome::Selected(answer) => (
+                "approval_answer_selected",
+                format!(
+                    "correlation_id={}, selected_number={}",
+                    answer.correlation_id, answer.selected_number
+                ),
+            ),
+            AnswerOutcome::Expired(id) => ("approval_answer_rejected", format!("expired:{id}")),
+            AnswerOutcome::Duplicate(id) => ("approval_answer_rejected", format!("duplicate:{id}")),
+            AnswerOutcome::Cancelled(id) => ("approval_answer_rejected", format!("cancelled:{id}")),
+            AnswerOutcome::Mismatched(id) => {
+                ("approval_answer_rejected", format!("mismatched:{id}"))
+            }
+            AnswerOutcome::InvalidChoice(id) => {
+                ("approval_answer_rejected", format!("invalid_choice:{id}"))
+            }
+            AnswerOutcome::Ambiguous => (
+                "approval_answer_rejected",
+                "ambiguous_plain_number".to_string(),
+            ),
+            AnswerOutcome::NotAnAnswer => return,
+        };
+        self.audit(self.ctx.audit.approval(event, row_id, thread, reason));
     }
 }
 
@@ -1106,6 +1190,37 @@ fn backend_request<'a>(
     }
 }
 
+fn approval_origin(message: &RawMessage, thread: &str) -> AnswerOrigin {
+    if message.channel == "imessage" {
+        let chat_key = crate::channel::normalize_handle(&message.chat_identifier);
+        let sender_key = if thread.starts_with("imessage:self:") {
+            chat_key.clone()
+        } else {
+            crate::channel::normalize_handle(&message.handle)
+        };
+        AnswerOrigin {
+            channel: message.channel.to_string(),
+            thread_key: thread.to_string(),
+            sender_key,
+            chat_key,
+        }
+    } else {
+        AnswerOrigin {
+            channel: message.channel.to_string(),
+            thread_key: thread.to_string(),
+            sender_key: message.handle.clone(),
+            chat_key: message.chat_identifier.clone(),
+        }
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or_default()
+}
+
 /// Turns a thread key into a filesystem-safe directory name.
 fn sanitize(s: &str) -> String {
     s.chars()
@@ -1763,6 +1878,260 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn imessage_question_delivers_and_plain_number_resolves_once() {
+        let state_path = temp_state_path();
+        let sessions_dir = temp_path("imessage-approval-sessions");
+        let assistant_dir = temp_path("imessage-approval-assistant");
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut gateway = Gateway::new(test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        ))
+        .unwrap();
+        gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+        let question = approval_question(
+            "imessage",
+            "imessage:self:me@icloud.com",
+            "me@icloud.com",
+            "me@icloud.com",
+            "me@icloud.com",
+        );
+        let id = gateway.ask_user(question).await.unwrap();
+
+        run_messages(
+            &mut gateway,
+            vec![
+                message(1, "me@icloud.com", "", true, "2"),
+                message(2, "me@icloud.com", "", true, "2"),
+            ],
+        )
+        .await;
+
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(gateway.ctx.sent_replies.lock().unwrap()[0]
+            .1
+            .contains("1. Approve"));
+        assert_eq!(
+            gateway
+                .ctx
+                .history
+                .lock()
+                .unwrap()
+                .take_answer(&id, now_ms())
+                .unwrap()
+                .unwrap()
+                .value,
+            "reject"
+        );
+        run_messages(
+            &mut gateway,
+            vec![message(3, "me@icloud.com", "", true, "hello")],
+        )
+        .await;
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        assert_eq!(calls.lock().unwrap()[0].prompt, "hello");
+        let events = audit_events(&format!("{state_path}.audit.jsonl"));
+        assert!(events
+            .iter()
+            .any(|event| event.event == "approval_answer_selected"));
+        assert!(events.iter().any(|event| {
+            event.event == "approval_answer_rejected"
+                && event.reason.as_deref() == Some(&format!("duplicate:{id}"))
+        }));
+
+        let _ = std::fs::remove_file(&state_path);
+        let _ = std::fs::remove_file(format!("{state_path}.db"));
+        let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+        let _ = std::fs::remove_dir_all(sessions_dir);
+        let _ = std::fs::remove_dir_all(assistant_dir);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn telegram_question_rejects_wrong_topic_sender_and_duplicate() {
+        let state_path = temp_state_path();
+        let sessions_dir = temp_path("telegram-approval-sessions");
+        let assistant_dir = temp_path("telegram-approval-assistant");
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut cfg = test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        );
+        cfg.channel = "telegram".to_string();
+        cfg.self_handles.clear();
+        cfg.allow_from.clear();
+        cfg.telegram_bot_token = Some("secret".to_string());
+        cfg.telegram_allow_user_ids = vec![7, 8];
+        let mut gateway = Gateway::new(cfg).unwrap();
+        gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+        let question = approval_question("telegram", "telegram:dm:7:topic:9", "7", "7", "7:9");
+        let id = gateway.ask_user(question).await.unwrap();
+        let correlated = format!("{id} 1");
+        let mut wrong_topic = telegram_message(10, 7, 7, false, &correlated);
+        wrong_topic.thread_id = None;
+        let mut unallowlisted = telegram_message(11, 9, 7, false, &correlated);
+        unallowlisted.thread_id = Some(9);
+        let mut wrong_sender = telegram_message(12, 8, 7, false, &correlated);
+        wrong_sender.thread_id = Some(9);
+        let mut malformed = telegram_message(13, 7, 7, false, &format!("{id} junk"));
+        malformed.thread_id = Some(9);
+        let mut valid = telegram_message(14, 7, 7, false, "1");
+        valid.thread_id = Some(9);
+        let mut duplicate = telegram_message(15, 7, 7, false, &correlated);
+        duplicate.thread_id = Some(9);
+
+        run_messages(
+            &mut gateway,
+            vec![
+                wrong_topic,
+                unallowlisted,
+                wrong_sender,
+                malformed,
+                valid,
+                duplicate,
+            ],
+        )
+        .await;
+
+        assert!(calls.lock().unwrap().is_empty());
+        let events = audit_events(&format!("{state_path}.audit.jsonl"));
+        assert!(events.iter().any(|event| {
+            event.event == "approval_answer_rejected"
+                && event.reason.as_deref() == Some(&format!("mismatched:{id}"))
+        }));
+        assert!(events
+            .iter()
+            .any(|event| { event.event == "message_ignored" && event.row_id == Some(11) }));
+        assert!(events.iter().any(|event| {
+            event.event == "approval_answer_rejected"
+                && event.reason.as_deref() == Some(&format!("duplicate:{id}"))
+        }));
+        assert!(events.iter().any(|event| {
+            event.event == "approval_answer_rejected"
+                && event.reason.as_deref() == Some(&format!("invalid_choice:{id}"))
+        }));
+        assert_eq!(
+            gateway
+                .ctx
+                .history
+                .lock()
+                .unwrap()
+                .take_answer(&id, now_ms())
+                .unwrap()
+                .unwrap()
+                .value,
+            "approve"
+        );
+
+        let _ = std::fs::remove_file(&state_path);
+        let _ = std::fs::remove_file(format!("{state_path}.db"));
+        let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+        let _ = std::fs::remove_dir_all(sessions_dir);
+        let _ = std::fs::remove_dir_all(assistant_dir);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_question_delivery_keeps_the_durable_pending_question() {
+        let state_path = temp_state_path();
+        let sessions_dir = temp_path("approval-delivery-sessions");
+        let assistant_dir = temp_path("approval-delivery-assistant");
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        let gateway = Gateway::new(test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        ))
+        .unwrap();
+        *gateway.ctx.send_failures_remaining.lock().unwrap() = 1;
+        let question = approval_question(
+            "imessage",
+            "imessage:self:me@icloud.com",
+            "me@icloud.com",
+            "me@icloud.com",
+            "me@icloud.com",
+        );
+        let id = question.id.clone();
+
+        assert!(gateway.ask_user(question).await.is_err());
+        assert!(matches!(
+            gateway.ctx.history.lock().unwrap().answer_question(
+                &AnswerOrigin {
+                    channel: "imessage".to_string(),
+                    thread_key: "imessage:self:me@icloud.com".to_string(),
+                    sender_key: "me@icloud.com".to_string(),
+                    chat_key: "me@icloud.com".to_string(),
+                },
+                &format!("{id} 1"),
+                now_ms(),
+            ),
+            Ok(AnswerOutcome::Selected(_))
+        ));
+
+        let _ = std::fs::remove_file(&state_path);
+        let _ = std::fs::remove_file(format!("{state_path}.db"));
+        let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+        let _ = std::fs::remove_dir_all(sessions_dir);
+        let _ = std::fs::remove_dir_all(assistant_dir);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn expired_answer_is_audited_without_reaching_the_backend() {
+        let state_path = temp_state_path();
+        let sessions_dir = temp_path("approval-expiry-sessions");
+        let assistant_dir = temp_path("approval-expiry-assistant");
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut gateway = Gateway::new(test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        ))
+        .unwrap();
+        gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+        let mut question = approval_question(
+            "imessage",
+            "imessage:self:me@icloud.com",
+            "me@icloud.com",
+            "me@icloud.com",
+            "me@icloud.com",
+        );
+        let created_at = now_ms();
+        question.expires_at_ms = created_at + 10;
+        let id = question.id.clone();
+        gateway
+            .ctx
+            .history
+            .lock()
+            .unwrap()
+            .create_question(&question, created_at)
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        run_messages(
+            &mut gateway,
+            vec![message(1, "me@icloud.com", "", true, &format!("{id} 1"))],
+        )
+        .await;
+
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(audit_events(&format!("{state_path}.audit.jsonl"))
+            .iter()
+            .any(|event| {
+                event.event == "approval_answer_rejected"
+                    && event.reason.as_deref() == Some(&format!("expired:{id}"))
+            }));
+
+        let _ = std::fs::remove_file(&state_path);
+        let _ = std::fs::remove_file(format!("{state_path}.db"));
+        let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+        let _ = std::fs::remove_dir_all(sessions_dir);
+        let _ = std::fs::remove_dir_all(assistant_dir);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn missing_backend_session_rotates_and_rehydrates_once() {
         let state_path = temp_state_path();
         let sessions_dir = temp_path("missing-session-rehydration");
@@ -2378,6 +2747,37 @@ mod tests {
         for handle in handles {
             handle.await.unwrap();
         }
+    }
+
+    fn approval_question(
+        channel: &str,
+        thread: &str,
+        sender: &str,
+        chat: &str,
+        target: &str,
+    ) -> Question {
+        Question::new(
+            AnswerOrigin {
+                channel: channel.to_string(),
+                thread_key: thread.to_string(),
+                sender_key: sender.to_string(),
+                chat_key: chat.to_string(),
+            },
+            target,
+            "Apply the draft?",
+            vec![
+                crate::approval::Choice {
+                    label: "Approve".to_string(),
+                    value: "approve".to_string(),
+                },
+                crate::approval::Choice {
+                    label: "Reject".to_string(),
+                    value: "reject".to_string(),
+                },
+            ],
+            now_ms() + 60_000,
+        )
+        .unwrap()
     }
 
     fn message(row_id: i64, chat: &str, handle: &str, is_from_me: bool, text: &str) -> RawMessage {

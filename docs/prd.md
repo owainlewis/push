@@ -83,6 +83,7 @@ push takes a narrower bet:
 - `src/imessage/sender.rs`: sends replies through AppleScript.
 - `src/gateway.rs`: poll loop, filtering, commands, queues, worker dispatch.
 - `src/history.rs`: canonical SQLite conversations and messages.
+- `src/approval.rs`: durable bounded questions and normalized answers.
 - `src/agent.rs`: backend boundary.
 - `src/claude.rs`: Claude Code adapter.
 - `src/codex.rs`: Codex adapter.

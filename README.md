@@ -150,6 +150,18 @@ message is capped at 4 KiB, and the complete history block is capped at 16 KiB.
 `SOUL.md` remains separate backend instruction context. Audit events record
 whether a run was new and how many messages were used for rehydration.
 
+`ask_user` is the durable approval boundary for later workflows. It stores a
+bounded question in `push.db` before sending the same plain numbered list on
+iMessage or Telegram. A reply may be a number when exactly one question is
+pending for that origin, or `<correlation-id> <number>`. Answers are bound to
+the allowlisted sender, chat, channel, and exact thread or Telegram topic. The
+workflow can consume the normalized selected value once. Pending questions
+survive restart; expired, cancelled, duplicate, ambiguous, and mismatched
+replies never reach an agent and are recorded in the audit log. Failed delivery
+leaves the question persisted with failed delivery status for diagnosis or
+cancellation. Approval replies are control inputs, so they update approval and
+audit state without entering the conversation transcript used for rehydration.
+
 ## Telegram Support
 
 Telegram uses Bot API long polling, so push opens no public port and needs no

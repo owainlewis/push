@@ -206,6 +206,18 @@ impl AuditLog {
         event.reason = Some(reason.into());
         event
     }
+
+    pub fn approval(
+        &self,
+        event_name: &'static str,
+        row_id: i64,
+        thread: &str,
+        reason: impl Into<String>,
+    ) -> AuditEvent {
+        let mut event = self.base(event_name, Some(row_id), Some(thread), None);
+        event.reason = Some(reason.into());
+        event
+    }
     fn base(
         &self,
         event: &'static str,

@@ -5,7 +5,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
-const SCHEMA_VERSION: i64 = 1;
+use crate::approval::{
+    parse_answer, AnswerOrigin, AnswerOutcome, DeliveryStatus as ApprovalDeliveryStatus,
+    NormalizedAnswer, Question, QuestionState,
+};
+
+const SCHEMA_VERSION: i64 = 2;
 const MAX_HISTORY_READ_BYTES: usize = 8 * 1024;
 const READ_TRUNCATED: &str = "\n[truncated by push while reading history]";
 
@@ -253,6 +258,263 @@ impl History {
         Ok(messages)
     }
 
+    #[allow(dead_code)]
+    pub fn create_question(&mut self, question: &Question, now_ms: i64) -> Result<()> {
+        question.validate()?;
+        if question.expires_at_ms <= now_ms {
+            bail!("approval question expiry must be in the future");
+        }
+        let choices = serde_json::to_string(&question.choices)?;
+        self.conn.execute(
+            "INSERT INTO approval_questions (
+                id, channel, thread_key, sender_key, chat_key, target,
+                prompt, choices_json, expires_at_ms, status, delivery_status
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', 'pending')",
+            params![
+                question.id,
+                question.channel,
+                question.thread_key,
+                question.sender_key,
+                question.chat_key,
+                question.target,
+                question.prompt,
+                choices,
+                question.expires_at_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn mark_question_delivery(
+        &mut self,
+        id: &str,
+        status: ApprovalDeliveryStatus,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE approval_questions
+             SET delivery_status = ?2, updated_at_ms = unixepoch('subsec') * 1000
+             WHERE id = ?1",
+            params![id, status.as_str()],
+        )?;
+        if changed != 1 {
+            bail!("approval question {id:?} does not exist");
+        }
+        Ok(())
+    }
+
+    pub fn answer_question(
+        &mut self,
+        origin: &AnswerOrigin,
+        text: &str,
+        now_ms: i64,
+    ) -> Result<AnswerOutcome> {
+        let Some(attempt) = parse_answer(text) else {
+            return Ok(AnswerOutcome::NotAnAnswer);
+        };
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE approval_questions SET status = 'expired', updated_at_ms = ?1
+             WHERE status = 'pending' AND expires_at_ms <= ?1",
+            [now_ms],
+        )?;
+        let id = if let Some(id) = attempt.correlation_id {
+            id
+        } else {
+            let mut statement = tx.prepare(
+                "SELECT id FROM approval_questions
+                 WHERE channel = ?1 AND thread_key = ?2
+                   AND sender_key = ?3 AND chat_key = ?4
+                   AND status = 'pending'
+                 ORDER BY created_at_ms, id",
+            )?;
+            let ids = statement
+                .query_map(
+                    params![
+                        origin.channel,
+                        origin.thread_key,
+                        origin.sender_key,
+                        origin.chat_key
+                    ],
+                    |row| row.get::<_, String>(0),
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(statement);
+            match ids.as_slice() {
+                [] => {
+                    let recent = tx
+                        .query_row(
+                            "SELECT id FROM approval_questions
+                             WHERE channel = ?1 AND thread_key = ?2
+                               AND sender_key = ?3 AND chat_key = ?4
+                               AND (
+                                   (status IN ('answered', 'consumed', 'cancelled')
+                                    AND expires_at_ms >= ?5)
+                                   OR
+                                   (status = 'expired' AND expires_at_ms >= ?5 - 86400000)
+                               )
+                             ORDER BY created_at_ms DESC, id DESC LIMIT 1",
+                            params![
+                                origin.channel,
+                                origin.thread_key,
+                                origin.sender_key,
+                                origin.chat_key,
+                                now_ms
+                            ],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .optional()?;
+                    let Some(id) = recent else {
+                        return Ok(AnswerOutcome::NotAnAnswer);
+                    };
+                    id
+                }
+                [id] => id.clone(),
+                _ => return Ok(AnswerOutcome::Ambiguous),
+            }
+        };
+
+        let row = tx
+            .query_row(
+                "SELECT channel, thread_key, sender_key, chat_key, choices_json,
+                        expires_at_ms, status
+                 FROM approval_questions WHERE id = ?1",
+                [&id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((channel, thread, sender, chat, choices, expires_at, status)) = row else {
+            return Ok(AnswerOutcome::Mismatched(id));
+        };
+        if channel != origin.channel
+            || thread != origin.thread_key
+            || sender != origin.sender_key
+            || chat != origin.chat_key
+        {
+            return Ok(AnswerOutcome::Mismatched(id));
+        }
+        if status == "answered" || status == "consumed" {
+            return Ok(AnswerOutcome::Duplicate(id));
+        }
+        if status == "cancelled" {
+            return Ok(AnswerOutcome::Cancelled(id));
+        }
+        if status == "expired" || expires_at <= now_ms {
+            tx.execute(
+                "UPDATE approval_questions SET status = 'expired', updated_at_ms = ?2
+                 WHERE id = ?1 AND status = 'pending'",
+                params![id, now_ms],
+            )?;
+            tx.commit()?;
+            return Ok(AnswerOutcome::Expired(id));
+        }
+        let choices: Vec<crate::approval::Choice> = serde_json::from_str(&choices)?;
+        let Some(choice) = attempt
+            .selected_number
+            .checked_sub(1)
+            .and_then(|index| choices.get(index))
+        else {
+            return Ok(AnswerOutcome::InvalidChoice(id));
+        };
+        tx.execute(
+            "UPDATE approval_questions
+             SET status = 'answered', answer_index = ?2, answered_at_ms = ?3,
+                 updated_at_ms = ?3
+             WHERE id = ?1 AND status = 'pending'",
+            params![id, attempt.selected_number as i64, now_ms],
+        )?;
+        tx.commit()?;
+        Ok(AnswerOutcome::Selected(NormalizedAnswer {
+            correlation_id: id,
+            selected_number: attempt.selected_number,
+            value: choice.value.clone(),
+        }))
+    }
+
+    #[allow(dead_code)]
+    pub fn take_answer(&mut self, id: &str, now_ms: i64) -> Result<Option<NormalizedAnswer>> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE approval_questions SET status = 'expired', updated_at_ms = ?2
+             WHERE id = ?1 AND status = 'pending' AND expires_at_ms <= ?2",
+            params![id, now_ms],
+        )?;
+        let row = tx
+            .query_row(
+                "SELECT choices_json, answer_index FROM approval_questions
+                 WHERE id = ?1 AND status = 'answered'",
+                [id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        let Some((choices, selected_number)) = row else {
+            tx.commit()?;
+            return Ok(None);
+        };
+        let choices: Vec<crate::approval::Choice> = serde_json::from_str(&choices)?;
+        let choice = choices
+            .get(selected_number.saturating_sub(1) as usize)
+            .context("stored approval answer index is invalid")?;
+        tx.execute(
+            "UPDATE approval_questions
+             SET status = 'consumed', consumed_at_ms = ?2, updated_at_ms = ?2
+             WHERE id = ?1 AND status = 'answered'",
+            params![id, now_ms],
+        )?;
+        tx.commit()?;
+        Ok(Some(NormalizedAnswer {
+            correlation_id: id.to_string(),
+            selected_number: selected_number as usize,
+            value: choice.value.clone(),
+        }))
+    }
+
+    #[allow(dead_code)]
+    pub fn question_state(&mut self, id: &str, now_ms: i64) -> Result<Option<QuestionState>> {
+        self.conn.execute(
+            "UPDATE approval_questions SET status = 'expired', updated_at_ms = ?2
+             WHERE id = ?1 AND status = 'pending' AND expires_at_ms <= ?2",
+            params![id, now_ms],
+        )?;
+        self.conn
+            .query_row(
+                "SELECT status FROM approval_questions WHERE id = ?1",
+                [id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|status| QuestionState::parse(&status))
+            .transpose()
+    }
+
+    #[allow(dead_code)]
+    pub fn cancel_question(&mut self, id: &str, now_ms: i64) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE approval_questions SET status = 'expired', updated_at_ms = ?2
+             WHERE id = ?1 AND status = 'pending' AND expires_at_ms <= ?2",
+            params![id, now_ms],
+        )?;
+        let cancelled = tx.execute(
+            "UPDATE approval_questions
+             SET status = 'cancelled', updated_at_ms = ?2
+             WHERE id = ?1 AND status = 'pending' AND expires_at_ms > ?2",
+            params![id, now_ms],
+        )? == 1;
+        tx.commit()?;
+        Ok(cancelled)
+    }
+
     #[cfg(test)]
     pub fn execute_batch_for_test(&self, sql: &str) {
         self.conn.execute_batch(sql).unwrap();
@@ -309,6 +571,42 @@ fn migrate(conn: &Connection) -> Result<()> {
              CREATE INDEX messages_conversation_id_idx
                  ON messages(conversation_id, id);
              PRAGMA user_version = 1;
+             COMMIT;",
+        )?;
+    }
+    if version <= 1 {
+        conn.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE approval_questions (
+                 id TEXT PRIMARY KEY,
+                 channel TEXT NOT NULL,
+                 thread_key TEXT NOT NULL,
+                 sender_key TEXT NOT NULL,
+                 chat_key TEXT NOT NULL,
+                 target TEXT NOT NULL,
+                 prompt TEXT NOT NULL,
+                 choices_json TEXT NOT NULL,
+                 expires_at_ms INTEGER NOT NULL,
+                 status TEXT NOT NULL CHECK(status IN (
+                     'pending', 'answered', 'consumed', 'expired', 'cancelled'
+                 )),
+                 delivery_status TEXT NOT NULL CHECK(delivery_status IN (
+                     'pending', 'delivered', 'failed'
+                 )),
+                 answer_index INTEGER,
+                 answered_at_ms INTEGER,
+                 consumed_at_ms INTEGER,
+                 created_at_ms INTEGER NOT NULL DEFAULT (
+                     CAST(strftime('%s', 'now') AS INTEGER) * 1000
+                 ),
+                 updated_at_ms INTEGER NOT NULL DEFAULT (
+                     CAST(strftime('%s', 'now') AS INTEGER) * 1000
+                 )
+             );
+             CREATE INDEX approval_questions_origin_idx ON approval_questions (
+                 channel, thread_key, sender_key, chat_key, status, expires_at_ms
+             );
+             PRAGMA user_version = 2;
              COMMIT;",
         )?;
     }
@@ -375,7 +673,42 @@ fn restrict_permissions(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval::{Choice, Question};
     use crate::test_support::temp_path;
+
+    fn question(expires_at_ms: i64) -> Question {
+        Question::new(
+            AnswerOrigin {
+                channel: "telegram".to_string(),
+                thread_key: "telegram:dm:7:topic:9".to_string(),
+                sender_key: "7".to_string(),
+                chat_key: "7".to_string(),
+            },
+            "7:9",
+            "Apply the draft?",
+            vec![
+                Choice {
+                    label: "Approve".to_string(),
+                    value: "approve".to_string(),
+                },
+                Choice {
+                    label: "Reject".to_string(),
+                    value: "reject".to_string(),
+                },
+            ],
+            expires_at_ms,
+        )
+        .unwrap()
+    }
+
+    fn origin() -> AnswerOrigin {
+        AnswerOrigin {
+            channel: "telegram".to_string(),
+            thread_key: "telegram:dm:7:topic:9".to_string(),
+            sender_key: "7".to_string(),
+            chat_key: "7".to_string(),
+        }
+    }
 
     #[test]
     fn migrates_new_database_and_reopens_it() {
@@ -389,6 +722,134 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn migrates_v1_history_database_without_losing_messages() {
+        let path = temp_path("approval-v1-migration");
+        let mut history = History::open(path.to_str().unwrap()).unwrap();
+        let inbound = history
+            .record_inbound("imessage", "imessage:self:me", "imessage:1", "hello")
+            .unwrap();
+        history.execute_batch_for_test("DROP TABLE approval_questions; PRAGMA user_version = 1;");
+        drop(history);
+
+        let mut reopened = History::open(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            reopened
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert!(reopened.outbound_for(inbound).unwrap().is_none());
+        let question = question(2_000);
+        reopened.create_question(&question, 1_000).unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pending_question_survives_restart_and_answer_is_consumed_once() {
+        let path = temp_path("approval-restart");
+        let mut history = History::open(path.to_str().unwrap()).unwrap();
+        let question = question(2_000);
+        history.create_question(&question, 1_000).unwrap();
+        drop(history);
+
+        let mut reopened = History::open(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            reopened.answer_question(&origin(), "1", 1_100).unwrap(),
+            AnswerOutcome::Selected(NormalizedAnswer {
+                correlation_id: question.id.clone(),
+                selected_number: 1,
+                value: "approve".to_string(),
+            })
+        );
+        assert_eq!(
+            reopened.take_answer(&question.id, 1_200).unwrap(),
+            Some(NormalizedAnswer {
+                correlation_id: question.id.clone(),
+                selected_number: 1,
+                value: "approve".to_string(),
+            })
+        );
+        assert_eq!(reopened.take_answer(&question.id, 1_300).unwrap(), None);
+        assert_eq!(
+            reopened
+                .answer_question(&origin(), &format!("{} 1", question.id), 1_400)
+                .unwrap(),
+            AnswerOutcome::Duplicate(question.id.clone())
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn question_rejects_mismatch_expiry_invalid_choice_and_cancellation() {
+        let path = temp_path("approval-rejections");
+        let mut history = History::open(path.to_str().unwrap()).unwrap();
+        let expired = question(2_000);
+        history.create_question(&expired, 1_000).unwrap();
+        let mut wrong_topic = origin();
+        wrong_topic.thread_key = "telegram:dm:7".to_string();
+        assert_eq!(
+            history
+                .answer_question(&wrong_topic, &format!("{} 1", expired.id), 1_100)
+                .unwrap(),
+            AnswerOutcome::Mismatched(expired.id.clone())
+        );
+        assert_eq!(
+            history
+                .answer_question(&origin(), &format!("{} 3", expired.id), 1_200)
+                .unwrap(),
+            AnswerOutcome::InvalidChoice(expired.id.clone())
+        );
+        assert_eq!(
+            history
+                .answer_question(&origin(), &format!("{} 1", expired.id), 2_000)
+                .unwrap(),
+            AnswerOutcome::Expired(expired.id.clone())
+        );
+        assert_eq!(
+            history.question_state(&expired.id, 2_001).unwrap(),
+            Some(QuestionState::Expired)
+        );
+
+        let cancelled = question(4_000);
+        history.create_question(&cancelled, 2_100).unwrap();
+        assert!(history.cancel_question(&cancelled.id, 2_200).unwrap());
+        assert!(!history.cancel_question(&cancelled.id, 2_300).unwrap());
+        assert_eq!(
+            history
+                .answer_question(&origin(), &format!("{} 1", cancelled.id), 2_400)
+                .unwrap(),
+            AnswerOutcome::Cancelled(cancelled.id.clone())
+        );
+        assert_eq!(
+            history.question_state(&cancelled.id, 2_500).unwrap(),
+            Some(QuestionState::Cancelled)
+        );
+
+        let timed_out = question(3_000);
+        history.create_question(&timed_out, 2_600).unwrap();
+        assert!(!history.cancel_question(&timed_out.id, 3_100).unwrap());
+        assert_eq!(
+            history.question_state(&timed_out.id, 3_100).unwrap(),
+            Some(QuestionState::Expired)
+        );
+
+        let stale = question(4_000);
+        history.create_question(&stale, 3_200).unwrap();
+        let live = question(6_000);
+        history.create_question(&live, 3_300).unwrap();
+        assert_eq!(
+            history.answer_question(&origin(), "1", 5_000).unwrap(),
+            AnswerOutcome::Selected(NormalizedAnswer {
+                correlation_id: live.id,
+                selected_number: 1,
+                value: "approve".to_string(),
+            })
+        );
         let _ = std::fs::remove_file(path);
     }
 
