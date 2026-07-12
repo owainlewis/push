@@ -23,14 +23,13 @@ use crate::approval::{
 };
 use crate::audit::{AuditEvent, AuditLog};
 use crate::channel::{Channel, RawMessage};
-use crate::claude;
-use crate::codex;
 use crate::config::{AgentBackend, ChannelKind, Config, PermissionProfile, PrimaryDeliveryConfig};
 use crate::history::{DeliveryStatus, History, OutboundMessage, OutboundOrigin};
 use crate::jobs;
 use crate::rehydration::{self, RehydrationPrompt};
 use crate::soul;
 use crate::store::Store;
+use crate::util::now_ms;
 
 const QUEUE_DEPTH: usize = 32;
 #[cfg(not(test))]
@@ -530,12 +529,10 @@ impl Gateway {
 
     async fn process_messages(&mut self, msgs: Vec<RawMessage>) {
         let since = self.store.lock().unwrap().cursor(self.channel.id());
-        let mut max_row = 0i64;
         for m in &msgs {
             if m.row_id <= since {
                 continue;
             }
-            max_row = max_row.max(m.row_id);
             if self.ack.lock().unwrap().is_known(m.row_id) {
                 continue;
             }
@@ -650,9 +647,6 @@ impl Gateway {
                 self.audit(self.ctx.audit.ignored(m, self.channel.reject_reason(m)));
                 self.complete_row(m.row_id, "ignored");
             }
-        }
-        if max_row > 0 && msgs.is_empty() {
-            self.complete_row(max_row, "empty_poll");
         }
     }
 
@@ -822,22 +816,14 @@ async fn handle(ctx: &Ctx, job: Job) {
                     return;
                 }
             }
-            match deliver_stored(ctx, &job, &outbound).await {
-                Ok(DeliveryOutcome::Delivered | DeliveryOutcome::AlreadyDelivered) => {
-                    audit(
-                        ctx,
-                        ctx.audit.reply_sent(
-                            job.row_id,
-                            &job.thread,
-                            &job.target,
-                            Some(job.backend),
-                            &outbound.content,
-                        ),
-                    );
-                    complete_job(ctx, &job, "recovered_outbound");
-                }
-                Err(error) => history_error(ctx, &job, "recover outbound", error),
-            }
+            report_delivery(
+                ctx,
+                &job,
+                deliver_stored(ctx, &job, &outbound).await,
+                &outbound.content,
+                "recovered_outbound",
+                "recover outbound",
+            );
             return;
         }
         Ok(None) => {}
@@ -848,27 +834,15 @@ async fn handle(ctx: &Ctx, job: Job) {
     }
 
     if let Some(reply) = command(ctx, &job) {
-        match record_and_deliver(ctx, &job, OutboundOrigin::Gateway, &reply).await {
-            Ok(DeliveryOutcome::Delivered | DeliveryOutcome::AlreadyDelivered) => {
-                info!(
-                    "[{}] command reply sent via {}",
-                    job.thread,
-                    ctx.channel.id()
-                );
-                audit(
-                    ctx,
-                    ctx.audit.reply_sent(
-                        job.row_id,
-                        &job.thread,
-                        &job.target,
-                        Some(job.backend),
-                        &reply,
-                    ),
-                );
-                complete_job(ctx, &job, "command");
-            }
-            Err(error) => history_error(ctx, &job, "record command reply", error),
+        let delivery = record_and_deliver(ctx, &job, OutboundOrigin::Gateway, &reply).await;
+        if delivery.is_ok() {
+            info!(
+                "[{}] command reply sent via {}",
+                job.thread,
+                ctx.channel.id()
+            );
         }
+        report_delivery(ctx, &job, delivery, &reply, "command", "record command reply");
         return;
     }
 
@@ -1170,6 +1144,8 @@ async fn handle(ctx: &Ctx, job: Job) {
                 );
                 return;
             }
+            // Deliver the reply before presenting drafts so the user reads the
+            // answer first, then any job proposal it produced.
             let delivery = deliver_stored(ctx, &job, &outbound).await;
             if let Some(directory) = &draft_directory {
                 if let Err(error) = present_drafts(ctx, &job, directory).await {
@@ -1187,23 +1163,17 @@ async fn handle(ctx: &Ctx, job: Job) {
                     return;
                 }
             }
-            match delivery {
-                Ok(DeliveryOutcome::Delivered | DeliveryOutcome::AlreadyDelivered) => {
-                    info!("[{}] reply sent via {}", job.thread, ctx.channel.id());
-                    audit(
-                        ctx,
-                        ctx.audit.reply_sent(
-                            job.row_id,
-                            &job.thread,
-                            &job.target,
-                            Some(job.backend),
-                            &out.reply,
-                        ),
-                    );
-                    complete_job(ctx, &job, "completed");
-                }
-                Err(error) => history_error(ctx, &job, "deliver backend reply", error),
+            if delivery.is_ok() {
+                info!("[{}] reply sent via {}", job.thread, ctx.channel.id());
             }
+            report_delivery(
+                ctx,
+                &job,
+                delivery,
+                &out.reply,
+                "completed",
+                "deliver backend reply",
+            );
         }
         Err(RunError::Timeout) => {
             warn!("[{}] {} run timed out", job.thread, runner.label());
@@ -1218,40 +1188,19 @@ async fn handle(ctx: &Ctx, job: Job) {
                 ),
             );
             let reply = "That took too long and was stopped. Try again or simplify the request.";
-            let outbound = match ctx.history.lock().unwrap().record_outbound(
-                job.inbound_id,
-                OutboundOrigin::Gateway,
-                Some(job.backend.as_str()),
+            finish_run_with_gateway_reply(
+                ctx,
+                &job,
+                draft_directory.as_deref(),
                 reply,
-            ) {
-                Ok(outbound) => outbound,
-                Err(error) => {
-                    history_error(ctx, &job, "record timeout reply", error);
-                    return;
-                }
-            };
-            if let Some(directory) = &draft_directory {
-                if let Err(error) = present_drafts(ctx, &job, directory).await {
-                    history_error(ctx, &job, "present timed-out run drafts", error);
-                    return;
-                }
-            }
-            match deliver_stored(ctx, &job, &outbound).await {
-                Ok(DeliveryOutcome::Delivered | DeliveryOutcome::AlreadyDelivered) => {
-                    audit(
-                        ctx,
-                        ctx.audit.reply_sent(
-                            job.row_id,
-                            &job.thread,
-                            &job.target,
-                            Some(job.backend),
-                            reply,
-                        ),
-                    );
-                    complete_job(ctx, &job, "timeout");
-                }
-                Err(error) => history_error(ctx, &job, "deliver timeout reply", error),
-            }
+                ReplyLabels {
+                    record: "record timeout reply",
+                    present: "present timed-out run drafts",
+                    deliver: "deliver timeout reply",
+                    completion: "timeout",
+                },
+            )
+            .await;
         }
         Err(RunError::Failed(msg) | RunError::SessionMissing(msg)) => {
             error!("[{}] {} error: {msg}", job.thread, runner.label());
@@ -1266,41 +1215,90 @@ async fn handle(ctx: &Ctx, job: Job) {
                 ),
             );
             let reply = format!("⚠️ {}", short(&msg));
-            let outbound = match ctx.history.lock().unwrap().record_outbound(
-                job.inbound_id,
-                OutboundOrigin::Gateway,
-                Some(job.backend.as_str()),
+            finish_run_with_gateway_reply(
+                ctx,
+                &job,
+                draft_directory.as_deref(),
                 &reply,
-            ) {
-                Ok(outbound) => outbound,
-                Err(error) => {
-                    history_error(ctx, &job, "record failure reply", error);
-                    return;
-                }
-            };
-            if let Some(directory) = &draft_directory {
-                if let Err(error) = present_drafts(ctx, &job, directory).await {
-                    history_error(ctx, &job, "present failed run drafts", error);
-                    return;
-                }
-            }
-            match deliver_stored(ctx, &job, &outbound).await {
-                Ok(DeliveryOutcome::Delivered | DeliveryOutcome::AlreadyDelivered) => {
-                    audit(
-                        ctx,
-                        ctx.audit.reply_sent(
-                            job.row_id,
-                            &job.thread,
-                            &job.target,
-                            Some(job.backend),
-                            &reply,
-                        ),
-                    );
-                    complete_job(ctx, &job, "backend_failed");
-                }
-                Err(error) => history_error(ctx, &job, "deliver failure reply", error),
-            }
+                ReplyLabels {
+                    record: "record failure reply",
+                    present: "present failed run drafts",
+                    deliver: "deliver failure reply",
+                    completion: "backend_failed",
+                },
+            )
+            .await;
         }
+    }
+}
+
+/// Error and completion labels for one gateway-authored reply flow.
+struct ReplyLabels {
+    record: &'static str,
+    present: &'static str,
+    deliver: &'static str,
+    completion: &'static str,
+}
+
+/// Records a gateway-authored reply, presents any pending job drafts, then
+/// delivers the reply and completes the row. Shared by the timeout and
+/// failure arms of `handle`.
+async fn finish_run_with_gateway_reply(
+    ctx: &Ctx,
+    job: &Job,
+    draft_directory: Option<&Path>,
+    reply: &str,
+    labels: ReplyLabels,
+) {
+    let outbound = match ctx.history.lock().unwrap().record_outbound(
+        job.inbound_id,
+        OutboundOrigin::Gateway,
+        Some(job.backend.as_str()),
+        reply,
+    ) {
+        Ok(outbound) => outbound,
+        Err(error) => return history_error(ctx, job, labels.record, error),
+    };
+    if let Some(directory) = draft_directory {
+        if let Err(error) = present_drafts(ctx, job, directory).await {
+            return history_error(ctx, job, labels.present, error);
+        }
+    }
+    report_delivery(
+        ctx,
+        job,
+        deliver_stored(ctx, job, &outbound).await,
+        reply,
+        labels.completion,
+        labels.deliver,
+    );
+}
+
+/// Audits `reply_sent` and completes the row when the reply reached the
+/// channel; reports a canonical-history failure otherwise.
+fn report_delivery(
+    ctx: &Ctx,
+    job: &Job,
+    delivery: Result<DeliveryOutcome>,
+    reply: &str,
+    completion: &str,
+    deliver_action: &str,
+) {
+    match delivery {
+        Ok(DeliveryOutcome::Delivered | DeliveryOutcome::AlreadyDelivered) => {
+            audit(
+                ctx,
+                ctx.audit.reply_sent(
+                    job.row_id,
+                    &job.thread,
+                    &job.target,
+                    Some(job.backend),
+                    reply,
+                ),
+            );
+            complete_job(ctx, job, completion);
+        }
+        Err(error) => history_error(ctx, job, deliver_action, error),
     }
 }
 
@@ -1453,16 +1451,7 @@ async fn complete_setup_failure(ctx: &Ctx, job: &Job, reply: &str) {
         }
     }
     audit(ctx, ctx.audit.completed(job.row_id, "setup_failed"));
-    complete_setup_failure_row(&ctx.store, &ctx.ack, ctx.channel.id(), job.row_id);
-}
-
-fn complete_setup_failure_row(
-    store: &Arc<Mutex<Store>>,
-    ack: &Arc<Mutex<AckState>>,
-    channel: &str,
-    row_id: i64,
-) {
-    complete_row(store, ack, channel, row_id);
+    complete_row(&ctx.store, &ctx.ack, ctx.channel.id(), job.row_id);
 }
 
 fn complete_job(ctx: &Ctx, job: &Job, reason: &str) {
@@ -1637,21 +1626,10 @@ fn complete_row(store: &Arc<Mutex<Store>>, ack: &Arc<Mutex<AckState>>, channel: 
 }
 
 fn runners(cfg: &Config) -> HashMap<AgentBackend, Runner> {
-    let mut runners = HashMap::new();
-    runners.insert(
-        AgentBackend::Claude,
-        Runner::Claude(claude::Runner {
-            bin: cfg.claude_bin.clone(),
-        }),
-    );
-    runners.insert(
-        AgentBackend::Codex,
-        Runner::Codex(codex::Runner {
-            bin: cfg.codex_bin.clone(),
-            model: cfg.codex_model.clone(),
-        }),
-    );
-    runners
+    [AgentBackend::Claude, AgentBackend::Codex]
+        .into_iter()
+        .map(|backend| (backend, Runner::for_backend(backend, cfg)))
+        .collect()
 }
 
 impl AckState {
@@ -1739,13 +1717,6 @@ fn approval_origin(message: &RawMessage, thread: &str) -> AnswerOrigin {
             chat_key: message.chat_identifier.clone(),
         }
     }
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or_default()
 }
 
 /// Turns a thread key into a filesystem-safe directory name.
@@ -1945,7 +1916,7 @@ pub(crate) mod tests {
         let mut runners = HashMap::new();
         runners.insert(
             AgentBackend::Claude,
-            Runner::Claude(claude::Runner {
+            Runner::Claude(crate::claude::Runner {
                 bin: "claude".to_string(),
             }),
         );
@@ -2194,7 +2165,7 @@ pub(crate) mod tests {
             ack.completed.insert(11);
         }
 
-        complete_setup_failure_row(&store, &ack, "imessage", 10);
+        complete_row(&store, &ack, "imessage", 10);
 
         assert_eq!(store.lock().unwrap().last_row(), 11);
         let ack = ack.lock().unwrap();
@@ -3331,7 +3302,7 @@ pub(crate) mod tests {
         std::fs::write(
             jobs_dir.join("disabled.md"),
             format!(
-                "+++\nversion = 1\npermission_profile = \"restricted\"\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"codex\"\n\n[[triggers]]\nid = \"minute\"\nkind = \"cron\"\nschedule = \"* * * * *\"\ntimezone = \"UTC\"\nenabled = true\n+++\n\nRun.\n",
+                "+++\nversion = 1\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"codex\"\n\n[[triggers]]\nid = \"minute\"\nkind = \"cron\"\nschedule = \"* * * * *\"\ntimezone = \"UTC\"\nenabled = true\n+++\n\nRun.\n",
                 workdir.to_string_lossy()
             ),
         )
@@ -3476,7 +3447,7 @@ pub(crate) mod tests {
         let draft_directory =
             crate::drafts::origin_directory(&cfg, &approval_origin(&inbound, &thread)).unwrap();
         let body = format!(
-            "+++\nversion = 1\npermission_profile = \"restricted\"\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"codex\"\n+++\n\nPrepare a note.\n",
+            "+++\nversion = 1\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"codex\"\n+++\n\nPrepare a note.\n",
             workdir.to_string_lossy()
         );
         let hook = Arc::new(move || {
@@ -3748,7 +3719,7 @@ pub(crate) mod tests {
 
     fn draft_runbook(workdir: &Path, instruction: &str) -> String {
         format!(
-            "+++\nversion = 1\npermission_profile = \"restricted\"\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"codex\"\n+++\n\n{instruction}\n",
+            "+++\nversion = 1\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"codex\"\n+++\n\n{instruction}\n",
             workdir.to_string_lossy()
         )
     }
@@ -3786,7 +3757,6 @@ pub(crate) mod tests {
             agent: "codex".to_string(),
             routes: Vec::new(),
             permission_profile: "restricted".to_string(),
-            job_permission_profiles: vec!["restricted".to_string()],
             permission_profiles: HashMap::new(),
             jobs_dir: format!("{state_path}.jobs"),
             drafts_dir: format!("{state_path}.drafts"),

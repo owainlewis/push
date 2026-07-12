@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+
+use crate::util::non_empty_session_id;
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SessionInfo {
     pub uuid: String,
@@ -178,11 +180,6 @@ impl Store {
 
 fn default_backend() -> String {
     "claude".to_string()
-}
-
-fn non_empty_session_id(id: &str) -> Option<&str> {
-    let trimmed = id.trim();
-    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 #[cfg(test)]

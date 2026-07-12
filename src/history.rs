@@ -110,7 +110,8 @@ impl History {
         }
         let conn = Connection::open(&path)
             .with_context(|| format!("open conversation database {}", path.display()))?;
-        restrict_permissions(&path)?;
+        crate::util::restrict_permissions(&path, false)
+            .with_context(|| format!("restrict database permissions {}", path.display()))?;
         conn.busy_timeout(Duration::from_secs(5))
             .context("configure conversation database busy timeout")?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")
@@ -176,7 +177,7 @@ impl History {
             params![inbound_id, origin.as_str(), content, backend],
         )
         .with_context(|| format!("insert outbound message into {database_path}"))?;
-        let message = outbound_for_tx(&tx, inbound_id)?
+        let message = outbound_for_query(&tx, inbound_id)?
             .with_context(|| format!("inbound message {inbound_id} does not exist"))?;
         tx.commit()
             .with_context(|| format!("commit outbound message to {database_path}"))?;
@@ -184,7 +185,7 @@ impl History {
     }
 
     pub fn outbound_for(&self, inbound_id: i64) -> Result<Option<OutboundMessage>> {
-        outbound_for_conn(&self.conn, inbound_id).with_context(|| {
+        outbound_for_query(&self.conn, inbound_id).with_context(|| {
             format!(
                 "read outbound for inbound {inbound_id} from {}",
                 self.path.display()
@@ -367,18 +368,7 @@ impl History {
                 "SELECT question_id, name, path, snapshot_hash, contents, proposed_by, approved_by, status
                  FROM job_draft_proposals WHERE question_id = ?1",
                 [question_id],
-                |row| {
-                    Ok(DraftProposal {
-                        question_id: row.get(0)?,
-                        name: row.get(1)?,
-                        path: row.get(2)?,
-                        snapshot_hash: row.get(3)?,
-                        contents: row.get(4)?,
-                        proposed_by: row.get(5)?,
-                        approved_by: row.get(6)?,
-                        status: row.get(7)?,
-                    })
-                },
+                map_draft_proposal,
             )
             .optional()
             .map_err(Into::into)
@@ -395,18 +385,7 @@ impl History {
                         approved_by, status
                  FROM job_draft_proposals WHERE path = ?1 AND snapshot_hash = ?2",
                 params![path.to_string_lossy(), snapshot_hash],
-                |row| {
-                    Ok(DraftProposal {
-                        question_id: row.get(0)?,
-                        name: row.get(1)?,
-                        path: row.get(2)?,
-                        snapshot_hash: row.get(3)?,
-                        contents: row.get(4)?,
-                        proposed_by: row.get(5)?,
-                        approved_by: row.get(6)?,
-                        status: row.get(7)?,
-                    })
-                },
+                map_draft_proposal,
             )
             .optional()
             .map_err(Into::into)
@@ -922,6 +901,19 @@ fn migrate(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn map_draft_proposal(row: &rusqlite::Row<'_>) -> rusqlite::Result<DraftProposal> {
+    Ok(DraftProposal {
+        question_id: row.get(0)?,
+        name: row.get(1)?,
+        path: row.get(2)?,
+        snapshot_hash: row.get(3)?,
+        contents: row.get(4)?,
+        proposed_by: row.get(5)?,
+        approved_by: row.get(6)?,
+        status: row.get(7)?,
+    })
+}
+
 fn conversation(tx: &Transaction<'_>, channel: &str, thread_key: &str) -> Result<i64> {
     tx.execute(
         "INSERT INTO conversations (channel, thread_key) VALUES (?1, ?2)
@@ -935,14 +927,6 @@ fn conversation(tx: &Transaction<'_>, channel: &str, thread_key: &str) -> Result
         |row| row.get(0),
     )
     .context("read conversation")
-}
-
-fn outbound_for_tx(tx: &Transaction<'_>, inbound_id: i64) -> Result<Option<OutboundMessage>> {
-    outbound_for_query(tx, inbound_id)
-}
-
-fn outbound_for_conn(conn: &Connection, inbound_id: i64) -> Result<Option<OutboundMessage>> {
-    outbound_for_query(conn, inbound_id)
 }
 
 fn outbound_for_query(conn: &Connection, inbound_id: i64) -> Result<Option<OutboundMessage>> {
@@ -964,19 +948,6 @@ fn outbound_for_query(conn: &Connection, inbound_id: i64) -> Result<Option<Outbo
         })
     })
     .transpose()
-}
-
-#[cfg(unix)]
-fn restrict_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("restrict database permissions {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn restrict_permissions(_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]
