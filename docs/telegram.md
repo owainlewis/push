@@ -1,6 +1,6 @@
 # Telegram Setup and Security
 
-push supports Telegram private chats through Bot API long polling. It makes
+Push supports Telegram private chats through Bot API long polling. It makes
 outbound HTTPS requests only. You do not need to expose a webhook or public
 server port. Telegram documents the polling contract in the official
 [Bot API reference](https://core.telegram.org/bots/api#getupdates).
@@ -16,12 +16,12 @@ server port. Telegram documents the polling contract in the official
    `getUpdates` response or a trusted id lookup bot. Do not allowlist a Telegram
    username because usernames can change.
 
-If the bot previously used a webhook, remove it before starting push because
-Telegram does not allow `getUpdates` while a webhook is active. The first push
+If the bot previously used a webhook, remove it before starting Push because
+Telegram does not allow `getUpdates` while a webhook is active. The first Push
 start discards pending updates, so send a new message after the gateway reports
 that it is running.
 
-Export the token in the environment that starts push:
+Export the token in the environment that starts Push:
 
 ```sh
 export TELEGRAM_BOT_TOKEN='replace-with-the-token-from-BotFather'
@@ -45,7 +45,7 @@ The token environment variable defaults to `TELEGRAM_BOT_TOKEN`. Set
 `telegram.bot_token_env` only when you need a different variable name.
 `telegram.bot_token` is supported for constrained deployments, but the
 environment-variable form is safer because it keeps the credential out of the
-config file. push never prints the token. Run:
+config file. Push never prints the token. Run:
 
 ```sh
 push doctor --config /absolute/path/to/config.toml
@@ -83,7 +83,7 @@ state.
 `state.json` stores independent `imessage` and `telegram` cursors. `push.db`
 stores channel-qualified canonical conversations, so Telegram and iMessage
 history cannot collide. On the first
-Telegram start, push asks Telegram for the newest pending update and records its
+Telegram start, Push asks Telegram for the newest pending update and records its
 id without running it. This explicit backlog skip prevents old bot messages
 from unexpectedly starting agent work. Later accepted and ignored updates
 advance only the Telegram cursor. Restarts continue from the next update id.

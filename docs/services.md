@@ -1,4 +1,4 @@
-# Running push as a Service
+# Running Push as a Service
 
 This guide covers running `push` continuously under a process manager.
 
@@ -121,7 +121,7 @@ Create `~/.config/systemd/user/push.service`. You can start from
 
 ```ini
 [Unit]
-Description=push personal assistant gateway
+Description=Push personal assistant gateway
 After=network-online.target
 Wants=network-online.target
 
@@ -182,7 +182,7 @@ allowlisted channel identity. Pending questions survive service restart.
 
 ## Restart Behavior
 
-`push` only advances the selected channel cursor after a message is ignored or
+Push only advances the selected channel cursor after a message is ignored or
 completed. If the process stops during an in-flight backend run, that message
 can be retried after restart. This avoids silently losing accepted messages,
 but it can repeat backend work or send a duplicate reply if the backend

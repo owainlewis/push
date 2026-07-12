@@ -6,7 +6,7 @@
 
 ## Summary
 
-push is a local personal-assistant gateway. It owns channels, identity,
+Push is a local personal-assistant gateway. It owns channels, identity,
 conversation history, routing, permissions, scheduling, and delivery while
 delegating reasoning and tool use to disposable agent runtimes such as Claude
 Code and Codex. The first durable assistant model has two parts: a user-owned
@@ -18,7 +18,7 @@ outside the first implementation.
 ## Goals
 
 - Keep one assistant identity across channels and agent backends.
-- Make push, rather than a backend vendor, the owner of conversation history.
+- Make Push, rather than a backend vendor, the owner of conversation history.
 - Keep identity legible and directly editable in one Markdown file.
 - Preserve existing backend sessions as a fast path without depending on them
   for durable history.
@@ -34,12 +34,12 @@ outside the first implementation.
 - Make agent filesystem isolation part of this change. Agent writes to assistant
   files are forbidden by contract; enforceable isolation follows with
   permission profiles.
-- Build a custom agent loop, tool runner, plugin system, or MCP layer in push.
+- Build a custom agent loop, tool runner, plugin system, or MCP layer in Push.
 - Define scheduled jobs, approval flows, or autonomous memory write-back here.
 
 ## Constraints
 
-- push remains one local Rust process with no inbound server port.
+- Push remains one local Rust process with no inbound server port.
 - Telegram and iMessage conversations must remain channel-qualified.
 - Claude Code and Codex retain different session and instruction mechanisms.
 - A failed history write must not result in an unrecorded request being sent to
@@ -78,7 +78,7 @@ of assistant identity. The default assistant directory becomes `~/.push`. The
 file contains personality, communication style, principles, and stable
 behavioural boundaries. Identity does not live in TOML fields.
 
-At runtime, push composes the file with a gateway-owned footer rather than
+At runtime, Push composes the file with a gateway-owned footer rather than
 modifying it on disk:
 
 ```text
@@ -94,7 +94,7 @@ the composed text as appended system instructions. Codex receives it as
 developer instructions. This is the only intended backend-specific handling
 for identity injection.
 
-push owns the footer so customising `SOUL.md` cannot accidentally disconnect
+Push owns the footer so customising `SOUL.md` cannot accidentally disconnect
 the assistant from durable memory. The footer tells backends not to modify
 assistant files, but this is guidance rather than a filesystem security
 boundary under the current permission modes. Enforceable read-only access
@@ -132,14 +132,14 @@ The exact schema is an implementation decision, but these invariants are not:
 - Backend replies, local command replies, and user-visible error replies are
   stored with their origin.
 - An assistant response is stored after the backend returns a valid reply and
-  before push attempts delivery.
+  before Push attempts delivery.
 - Delivery status is recorded separately from response generation so a retry
   does not invent a second assistant turn.
 - Existing `state.json` cursor and backend-session behaviour remains unchanged
   in this phase. Moving gateway state into SQLite is a separate decision.
 
-On a normal turn, push resumes the existing backend session and sends only the
-new request. When a backend session is missing, cleared, or replaced, push may
+On a normal turn, Push resumes the existing backend session and sends only the
+new request. When a backend session is missing, cleared, or replaced, Push may
 rehydrate a new session from recent canonical history. Rehydration policy is a
 performance decision and is not required for the initial history store.
 
@@ -180,7 +180,7 @@ execution loops remain backend-owned.
 ### `User.md` plus `Memory.md` injected on every turn
 
 This is legible but mixes user facts, assistant identity, and memory policy. It
-also leaves push without a complete history from which memory can be audited or
+also leaves Push without a complete history from which memory can be audited or
 rebuilt. A single `SOUL.md` gives identity one clear owner.
 
 ### Append every exchange to `JOURNAL.md`
