@@ -1,7 +1,7 @@
 # push Architecture
 
 push is one local Rust process. It polls iMessage or Telegram, filters messages,
-loads the assistant context, runs a configured agent backend, and sends the
+loads the assistant identity, runs a configured agent backend, and sends the
 final reply.
 
 The important boundary is not iMessage or Claude. The important boundary is:
@@ -22,8 +22,7 @@ own the durable pieces:
 - channels
 - allowlists
 - routing
-- assistant config
-- memory loading
+- assistant identity
 - conversation state
 - delivery
 
@@ -63,7 +62,7 @@ flowchart LR
         poller[Channel poller] --> gateway[Gateway loop]
         gateway --> worker[Per-thread worker]
         store[(state.json)] <--> gateway
-        memory[/User.md + Memory.md/] --> worker
+        soul[/SOUL.md/] --> worker
         worker --> adapter[Agent adapter]
     end
     adapter -->|claude -p| claude[Claude Code]
@@ -97,7 +96,7 @@ sequenceDiagram
         G->>S: handle command locally
     else assistant turn
         G->>W: enqueue job by thread
-        W->>W: load assistant memory
+        W->>W: load SOUL.md identity
         W->>W: resolve routed backend session
         W->>A: run prompt with context
         A-->>W: reply and optional backend session id
@@ -117,7 +116,7 @@ Request {
     session_id,
     is_new,
     work_dir,
-    system_append,
+    instructions,
     prompt,
 }
 
@@ -135,7 +134,7 @@ Claude Code lets push choose the session id.
 
 - New conversation: `claude -p --session-id <uuid>`
 - Existing conversation: `claude -p --resume <uuid>`
-- Memory: `--append-system-prompt <User.md + Memory.md>`
+- Identity: `--append-system-prompt <SOUL.md + gateway invariants>`
 - Work dir: per-thread sandbox dir
 
 ### Codex Adapter
@@ -144,7 +143,7 @@ Codex creates its own thread id.
 
 - New conversation: `codex exec --json ...`
 - Existing conversation: `codex exec resume <thread_id> ...`
-- Memory: included in the prompt wrapper
+- Identity: `-c developer_instructions=<SOUL.md + gateway invariants>`
 - Work dir: per-thread sandbox dir on the first run
 
 The adapter reads Codex JSONL events to capture `thread.started.thread_id` and
@@ -183,17 +182,13 @@ Audit events record message metadata, routing decisions, backend run starts and
 failures, reply delivery metadata, and row completion. Message and reply text
 are redacted by default; `audit_log_content` opts into content logging.
 
-## Assistant Context
+## Assistant Identity
 
-push loads:
-
-- structured `assistant` config fields
-- `assistant/User.md`
-- `assistant/Memory.md`
-
-This context is human-owned markdown. The gateway injects it into the selected
-backend, but the backend still owns how tools, skills, MCP, repo context, and
-permissions work.
+push loads only `SOUL.md` from `assistant_dir`, which defaults to `~/.push`.
+The gateway appends invariants in memory without changing the file, then injects
+the result at instruction priority. Missing `SOUL.md` means no custom identity;
+backend runs continue with the gateway invariants. The backend still owns how
+tools, skills, MCP, repo context, and permissions work.
 
 ## Concurrency
 

@@ -39,6 +39,10 @@ impl Runner {
             .arg(&self.approval_policy)
             .arg("--sandbox")
             .arg(&self.sandbox);
+        if !req.instructions.trim().is_empty() {
+            cmd.arg("-c")
+                .arg(developer_instructions(req.instructions.trim()));
+        }
         if req.is_new {
             cmd.arg("exec")
                 .arg("--json")
@@ -52,7 +56,7 @@ impl Runner {
             if let Some(model) = self.model.as_deref() {
                 cmd.arg("-m").arg(model);
             }
-            cmd.arg(prompt(&req));
+            cmd.arg(req.prompt);
         } else {
             cmd.arg("exec")
                 .arg("resume")
@@ -63,7 +67,7 @@ impl Runner {
             if let Some(model) = self.model.as_deref() {
                 cmd.arg("-m").arg(model);
             }
-            cmd.arg(req.session_id).arg(prompt(&req));
+            cmd.arg(req.session_id).arg(req.prompt);
         }
         cmd.current_dir(req.work_dir);
         cmd.kill_on_drop(true);
@@ -144,14 +148,10 @@ async fn output_with_retry_inner(
     }
 }
 
-fn prompt(req: &Request<'_>) -> String {
-    if req.system_append.trim().is_empty() {
-        return req.prompt.to_string();
-    }
+fn developer_instructions(instructions: &str) -> String {
     format!(
-        "You are running as a personal assistant through the push gateway.\n\nAssistant context:\n{}\n\nUser message:\n{}",
-        req.system_append.trim(),
-        req.prompt
+        "developer_instructions={}",
+        toml::Value::String(instructions.to_string())
     )
 }
 
@@ -324,7 +324,7 @@ mod tests {
                     session_id: "",
                     is_new: true,
                     work_dir: work_dir.to_str().unwrap(),
-                    system_append: "assistant context",
+                    instructions: "assistant identity",
                     prompt: "hello",
                 },
                 Duration::from_secs(5),
@@ -341,9 +341,8 @@ mod tests {
         assert_arg_present(&args, "--json");
         assert_arg_pair(&args, "-C", work_dir.to_str().unwrap());
         assert_arg_pair(&args, "--add-dir", work_dir.to_str().unwrap());
-        let raw_args = std::fs::read_to_string(&args_path).unwrap();
-        assert!(raw_args.contains("Assistant context:"));
-        assert!(raw_args.contains("User message:\nhello"));
+        assert_arg_pair(&args, "-c", &developer_instructions("assistant identity"));
+        assert_eq!(args.last().unwrap(), "hello");
     }
 
     #[tokio::test]
@@ -360,7 +359,7 @@ mod tests {
                     session_id: "existing-thread",
                     is_new: false,
                     work_dir: work_dir.to_str().unwrap(),
-                    system_append: "",
+                    instructions: "assistant identity",
                     prompt: "continue",
                 },
                 Duration::from_secs(5),
@@ -373,6 +372,8 @@ mod tests {
         let args = read_args(&args_path);
         assert_arg_sequence(&args, &["exec", "resume"]);
         assert_arg_present(&args, "existing-thread");
+        assert_arg_pair(&args, "-c", &developer_instructions("assistant identity"));
+        assert_eq!(args.last().unwrap(), "continue");
         assert!(!args.contains(&"-C".to_string()));
     }
 
@@ -430,7 +431,7 @@ mod tests {
             session_id: "",
             is_new: true,
             work_dir,
-            system_append: "",
+            instructions: "",
             prompt: "hello",
         }
     }
@@ -573,7 +574,7 @@ mod tests {
             },
             is_new,
             work_dir,
-            system_append: String::new(),
+            instructions: String::new(),
             prompt: "hello".to_string(),
         }
     }

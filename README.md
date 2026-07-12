@@ -3,8 +3,8 @@
 push is a tiny personal assistant gateway. You text it, it sends the message to
 a configured coding-agent runtime, then it sends the answer back.
 
-The product is the gateway: messaging, allowlists, routing, assistant profile,
-memory, and conversation state. The agent runtime is deliberately disposable.
+The product is the gateway: messaging, allowlists, routing, assistant identity,
+and conversation state. The agent runtime is deliberately disposable.
 Claude Code and Codex are the first two backends.
 
 ## How it works
@@ -16,13 +16,12 @@ iMessage or Telegram -> push gateway -> Claude Code or Codex -> same-channel rep
 1. Poll `~/Library/Messages/chat.db` or the Telegram Bot API for new messages.
 2. Keep only messages from yourself or configured allowed senders.
 3. Map each conversation to the active backend session.
-4. Load your assistant context from `assistant/User.md` and
-   `assistant/Memory.md`.
+4. Load your assistant identity from `~/.push/SOUL.md`.
 5. Run the configured backend headlessly.
 6. Send the final answer back to the originating channel and conversation.
 
-Memory is plain markdown you own. The gateway injects it into each run, so you
-can read it, edit it, and version it without learning a custom memory database.
+Identity is plain Markdown you own. The gateway injects it into each run, so
+you can read it, edit it, and version it without learning a custom format.
 
 ## The Bet
 
@@ -38,8 +37,7 @@ push owns the personal assistant layer:
 
 - Message ingress and egress.
 - Sender allowlists and reply loop prevention.
-- User-owned assistant config.
-- Durable memory files.
+- User-owned assistant identity.
 - Conversation to backend-session mapping.
 - Routing between channels and runtimes.
 
@@ -54,7 +52,7 @@ See [docs/strategy.md](docs/strategy.md) for the full direction.
 ### Claude Code
 
 Claude Code uses `claude -p` with `--session-id` for new conversations and
-`--resume` for existing conversations. Assistant context is passed with
+`--resume` for existing conversations. `SOUL.md` is passed with
 `--append-system-prompt`, so Claude Code keeps its normal tools, MCP servers,
 permissions, login, and `CLAUDE.md` behavior.
 
@@ -62,15 +60,15 @@ permissions, login, and `CLAUDE.md` behavior.
 
 Codex uses `codex exec` in non-interactive mode. The first run captures the
 Codex thread id from JSONL output; later turns resume that session with
-`codex exec resume`. Assistant context is included in the prompt because Codex
-does not expose the same `--append-system-prompt` flag as Claude Code.
+`codex exec resume`. `SOUL.md` is passed as Codex developer instructions, kept
+separate from the user's message on new and resumed sessions.
 
 ## v1 Scope
 
 - iMessage and Telegram private-chat channels.
 - Claude Code backend.
 - Codex backend.
-- Read-only memory files.
+- Read-only assistant identity.
 - One configured backend at a time.
 
 ## Requirements
@@ -98,6 +96,8 @@ git clone https://github.com/owainlewis/push.git
 cd push
 cp config.toml.example config.toml
 # edit config.toml: replace the Telegram user ID
+mkdir -p ~/.push
+cp assistant/SOUL.example.md ~/.push/SOUL.md
 export TELEGRAM_BOT_TOKEN='your-bot-token'
 cargo build --release
 ./target/release/push doctor --config config.toml
@@ -204,6 +204,7 @@ codex_sandbox = "workspace-write"
 codex_approval_policy = "never"
 audit_log_path = "~/.push/audit.jsonl"
 audit_log_content = false
+assistant_dir = "~/.push"
 
 [imessage]
 self_handles = ["you@icloud.com"]
@@ -217,13 +218,6 @@ allow_chat_ids = []
 [[routes]]
 thread = "imessage:self:you@icloud.com"
 agent = "codex"
-
-[assistant]
-name = "push"
-tone = "short, direct, and useful"
-business = "Describe your business or work context here."
-projects = ["push"]
-preferences = ["Prefer concise replies."]
 ```
 
 `channel` can be `imessage` or `telegram`. `agent` can be `claude` or `codex`.
@@ -252,6 +246,19 @@ remain accepted.
 push reads TOML only. Convert any earlier `config.json` file to `config.toml`
 before upgrading. The old JSON filename remains gitignored to reduce the risk
 of committing a config that contains credentials.
+
+## Assistant Identity and Migration
+
+`SOUL.md` is the only assistant identity source. By default push reads
+`~/.push/SOUL.md`; set `assistant_dir` to keep the file elsewhere. Push reads
+the file for every run, appends its own invariant instructions in memory, and
+never creates or rewrites `SOUL.md`.
+
+If `SOUL.md` is missing, backend runs continue with only push's invariants and
+no custom identity. Copy any identity, preferences, or stable context that you
+want to preserve from the old `[assistant]`, `User.md`, and `Memory.md` inputs
+into `SOUL.md`. Old context files are not loaded, and a remaining `[assistant]`
+table produces an actionable configuration error.
 
 ## Safety
 

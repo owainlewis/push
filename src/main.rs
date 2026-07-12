@@ -10,7 +10,7 @@ mod codex;
 mod config;
 mod gateway;
 mod imessage;
-mod memory;
+mod soul;
 mod store;
 mod telegram;
 #[cfg(test)]
@@ -380,7 +380,7 @@ fn which(bin: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AssistantProfile, Config};
+    use crate::config::Config;
     use crate::test_support::{temp_dir, temp_path};
 
     #[test]
@@ -423,6 +423,48 @@ mod tests {
         assert_eq!(cfg.telegram_bot_token_env, "TELEGRAM_BOT_TOKEN");
         assert_eq!(cfg.telegram_allow_user_ids, [123456789]);
         assert!(cfg.telegram_allow_chat_ids.is_empty());
+        assert_eq!(
+            cfg.assistant_dir,
+            Path::new(&std::env::var("HOME").unwrap())
+                .join(".push")
+                .to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn explicit_assistant_dir_override_is_preserved() {
+        let path = temp_path("assistant-dir-config");
+        std::fs::write(
+            &path,
+            r#"self_handles = ["me@icloud.com"]
+assistant_dir = "/srv/push-assistant"
+"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(cfg.assistant_dir, "/srv/push-assistant");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn structured_assistant_profile_reports_migration() {
+        let path = temp_path("structured-assistant-config");
+        std::fs::write(
+            &path,
+            r#"self_handles = ["me@icloud.com"]
+
+[assistant]
+name = "push"
+"#,
+        )
+        .unwrap();
+
+        let error = Config::load(path.to_str().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("assistant_dir/SOUL.md"));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -792,7 +834,6 @@ tools = ["Read", "Grep"]
             telegram_allow_chat_ids: Vec::new(),
             agent: "codex".to_string(),
             routes: Vec::new(),
-            assistant: AssistantProfile::default(),
             claude_bin: "/fake/claude".to_string(),
             claude_permission_mode: "bypassPermissions".to_string(),
             claude_tools: None,
