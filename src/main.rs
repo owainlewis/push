@@ -9,6 +9,7 @@ mod claude;
 mod codex;
 mod config;
 mod gateway;
+mod history;
 mod imessage;
 mod soul;
 mod store;
@@ -119,6 +120,7 @@ fn run_checks(cfg: &config::Config) -> CheckReport {
     check_state_dir(cfg, &mut checks);
     check_sessions_dir(cfg, &mut checks);
     check_audit_log_dir(cfg, &mut checks);
+    check_history_database(cfg, &mut checks);
     match cfg.channel_kind() {
         Ok(config::ChannelKind::IMessage) => check_imessage_db(cfg, &mut checks),
         Ok(config::ChannelKind::Telegram) => check_telegram_config(cfg, &mut checks),
@@ -177,6 +179,22 @@ fn check_sessions_dir(cfg: &config::Config, checks: &mut Vec<Check>) {
             format!(
                 "cannot create {}: {e}. Create it or choose a writable sessions_dir.",
                 cfg.sessions_dir
+            ),
+        )),
+    }
+}
+
+fn check_history_database(cfg: &config::Config, checks: &mut Vec<Check>) {
+    match history::History::open(&cfg.database_path) {
+        Ok(_) => checks.push(Check::pass(
+            "conversation database",
+            format!("{} is ready", cfg.database_path),
+        )),
+        Err(error) => checks.push(Check::fail(
+            "conversation database",
+            format!(
+                "cannot open {}: {error}. Choose a writable database_path and repair or remove an invalid database.",
+                cfg.database_path
             ),
         )),
     }
@@ -423,6 +441,12 @@ mod tests {
         assert_eq!(cfg.telegram_bot_token_env, "TELEGRAM_BOT_TOKEN");
         assert_eq!(cfg.telegram_allow_user_ids, [123456789]);
         assert!(cfg.telegram_allow_chat_ids.is_empty());
+        assert_eq!(
+            cfg.database_path,
+            Path::new(&std::env::var("HOME").unwrap())
+                .join(".push/push.db")
+                .to_string_lossy()
+        );
         assert_eq!(
             cfg.assistant_dir,
             Path::new(&std::env::var("HOME").unwrap())
@@ -783,6 +807,10 @@ tools = ["Read", "Grep"]
             .with_extension("audit.jsonl")
             .to_string_lossy()
             .to_string();
+        cfg.database_path = state_path
+            .with_extension("push.db")
+            .to_string_lossy()
+            .to_string();
         cfg.sessions_dir = sessions_dir.to_string_lossy().to_string();
 
         let report = run_checks(&cfg);
@@ -801,12 +829,16 @@ tools = ["Read", "Grep"]
             check.name == "audit log directory" && matches!(check.status, CheckStatus::Pass)
         }));
         assert!(report.checks.iter().any(|check| {
+            check.name == "conversation database" && matches!(check.status, CheckStatus::Pass)
+        }));
+        assert!(report.checks.iter().any(|check| {
             check.name == "iMessage database" && matches!(check.status, CheckStatus::Pass)
         }));
 
         let _ = std::fs::remove_file(db_path);
         let _ = std::fs::remove_file(state_path);
         let _ = std::fs::remove_file(cfg.audit_log_path);
+        let _ = std::fs::remove_file(cfg.database_path);
         let _ = std::fs::remove_dir_all(sessions_dir);
     }
 
@@ -846,6 +878,7 @@ tools = ["Read", "Grep"]
             sessions_dir: "/fake/sessions".to_string(),
             state_path: "/fake/state.json".to_string(),
             audit_log_path: "/fake/audit.jsonl".to_string(),
+            database_path: "/fake/push.db".to_string(),
             audit_log_content: false,
             assistant_dir: "/fake/assistant".to_string(),
             reply_marker: "\n\n-- sent by push".to_string(),

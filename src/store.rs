@@ -169,6 +169,11 @@ impl Store {
         std::fs::rename(&tmp, &self.path).context("rename state")?;
         Ok(())
     }
+
+    #[cfg(test)]
+    pub fn set_path_for_test(&mut self, path: PathBuf) {
+        self.path = path;
+    }
 }
 
 fn default_backend() -> String {

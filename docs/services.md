@@ -21,6 +21,7 @@ Use absolute paths in service files. The service user needs:
 - access to the configured `config.toml`
 - write access to `state_path`
 - write access to `audit_log_path`
+- write access to `database_path`
 - write access to `sessions_dir`
 - read access to `assistant_dir/SOUL.md` when custom identity is configured
 - access to `claude` or `codex` on `PATH`
@@ -31,7 +32,8 @@ Use absolute paths in service files. The service user needs:
 
 `state_path` stores independent cursors for each channel. `sessions_dir` stores
 per-thread backend work directories, and `state.json` stores backend session
-ids. Keep both paths on durable storage. Restarting the service resumes after
+ids. `database_path` stores the canonical conversation journal. Keep these
+paths on durable storage. Restarting the service resumes after
 the last completed row and reuses existing backend sessions when the backend for
 that thread has not changed.
 

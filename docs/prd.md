@@ -82,6 +82,7 @@ push takes a narrower bet:
 - `src/imessage/poller.rs`: reads Messages rows.
 - `src/imessage/sender.rs`: sends replies through AppleScript.
 - `src/gateway.rs`: poll loop, filtering, commands, queues, worker dispatch.
+- `src/history.rs`: canonical SQLite conversations and messages.
 - `src/agent.rs`: backend boundary.
 - `src/claude.rs`: Claude Code adapter.
 - `src/codex.rs`: Codex adapter.
@@ -151,6 +152,7 @@ user prompt.
 | `state_path` | JSON state path. |
 | `audit_log_path` | Local JSONL audit log path. |
 | `audit_log_content` | Whether audit events include message and reply text. |
+| `database_path` | Canonical SQLite history path; defaults to `~/.push/push.db`. |
 | `assistant_dir` | Directory with `SOUL.md`; defaults to `~/.push`. |
 | `reply_marker` | Footer used to skip push's own replies. |
 
