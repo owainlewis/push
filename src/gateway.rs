@@ -23,6 +23,7 @@ use crate::channel::{Channel, RawMessage};
 use crate::claude;
 use crate::codex;
 use crate::config::{AgentBackend, Config};
+use crate::history::{DeliveryStatus, History, OutboundMessage, OutboundOrigin};
 use crate::soul;
 use crate::store::Store;
 
@@ -31,13 +32,16 @@ const QUEUE_DEPTH: usize = 32;
 const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 const TYPING_REFRESH: Duration = Duration::from_secs(4);
+const DELIVERY_ATTEMPTS: usize = 3;
 const SESSION_SETUP_FAILURE: &str =
     "Push could not prepare this conversation. Check the local logs, then resend.";
 const SANDBOX_SETUP_FAILURE: &str =
     "Push could not create its session workspace. Check the local logs, then resend.";
 
+#[derive(Clone)]
 struct Job {
     row_id: i64,
+    inbound_id: i64,
     thread: String,
     target: String,
     backend: AgentBackend,
@@ -48,6 +52,7 @@ struct Job {
 #[derive(Clone)]
 struct Ctx {
     store: Arc<Mutex<Store>>,
+    history: Arc<Mutex<History>>,
     ack: Arc<Mutex<AckState>>,
     runners: Arc<HashMap<AgentBackend, Runner>>,
     channel: Channel,
@@ -60,6 +65,8 @@ struct Ctx {
     setup_failure_replies: Arc<Mutex<Vec<String>>>,
     #[cfg(test)]
     sent_replies: Arc<Mutex<Vec<(String, String)>>>,
+    #[cfg(test)]
+    send_failures_remaining: Arc<Mutex<usize>>,
 }
 
 pub struct Gateway {
@@ -81,6 +88,9 @@ struct AckState {
 impl Gateway {
     pub fn new(cfg: Config) -> Result<Self> {
         let store = Arc::new(Mutex::new(Store::open(&cfg.state_path)?));
+        let history = Arc::new(Mutex::new(History::open(&cfg.database_path).with_context(
+            || format!("open canonical history database {}", cfg.database_path),
+        )?));
         let ack = Arc::new(Mutex::new(AckState::default()));
         let runners = Arc::new(runners(&cfg));
         let channel = Channel::new(&cfg)?;
@@ -91,6 +101,7 @@ impl Gateway {
         ));
         let ctx = Ctx {
             store: store.clone(),
+            history,
             ack: ack.clone(),
             runners,
             channel: channel.clone(),
@@ -103,6 +114,8 @@ impl Gateway {
             setup_failure_replies: Arc::new(Mutex::new(Vec::new())),
             #[cfg(test)]
             sent_replies: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(test)]
+            send_failures_remaining: Arc::new(Mutex::new(0)),
         };
         let poll_interval = cfg.poll_interval_dur()?;
         Ok(Self {
@@ -208,6 +221,29 @@ impl Gateway {
                 continue;
             }
             if let Some((thread, target)) = self.channel.accept(m) {
+                let inbound_id = match self.ctx.history.lock().unwrap().record_inbound(
+                    m.channel,
+                    &thread,
+                    &m.event_id(),
+                    m.text.trim(),
+                ) {
+                    Ok(id) => id,
+                    Err(error) => {
+                        error!(
+                            "[{}] canonical history write failed for event {}: {error}; message will be retried",
+                            thread,
+                            m.event_id()
+                        );
+                        self.audit(self.ctx.audit.failed(
+                            "message_history_failed",
+                            m.row_id,
+                            &thread,
+                            None,
+                            error.to_string(),
+                        ));
+                        return;
+                    }
+                };
                 let backend = match self.cfg.agent_for_message(m.channel, &thread) {
                     Ok(v) => v,
                     Err(e) => {
@@ -228,15 +264,17 @@ impl Gateway {
                     "[{thread}] new message accepted; routing to {}",
                     backend.as_str()
                 );
-                self.route(
-                    m.row_id,
+                let job = Job {
+                    row_id: m.row_id,
+                    inbound_id,
                     thread,
                     target,
                     backend,
-                    m.text.trim().to_string(),
-                    handles,
-                )
-                .await;
+                    text: m.text.trim().to_string(),
+                };
+                if !self.route(job, handles).await {
+                    return;
+                }
             } else {
                 self.audit(self.ctx.audit.ignored(m, self.channel.reject_reason(m)));
                 self.complete_row(m.row_id, "ignored");
@@ -247,15 +285,11 @@ impl Gateway {
         }
     }
 
-    async fn route(
-        &mut self,
-        row_id: i64,
-        thread: String,
-        target: String,
-        backend: AgentBackend,
-        text: String,
-        handles: &mut Vec<JoinHandle<()>>,
-    ) {
+    async fn route(&mut self, job: Job, handles: &mut Vec<JoinHandle<()>>) -> bool {
+        let row_id = job.row_id;
+        let thread = job.thread.clone();
+        let target = job.target.clone();
+        let backend = job.backend;
         if !self.queues.contains_key(&thread) {
             let (tx, rx) = mpsc::channel::<Job>(QUEUE_DEPTH);
             let ctx = self.ctx.clone();
@@ -263,18 +297,12 @@ impl Gateway {
             self.queues.insert(thread.clone(), tx);
         }
 
-        let job = Job {
-            row_id,
-            thread: thread.clone(),
-            target: target.clone(),
-            backend,
-            text,
-        };
         let full = matches!(
-            self.queues.get(&thread).unwrap().try_send(job),
+            self.queues.get(&thread).unwrap().try_send(job.clone()),
             Err(mpsc::error::TrySendError::Full(_))
         );
         if full {
+            self.ack.lock().unwrap().in_flight.insert(row_id);
             warn!("[{thread}] queue full, asking sender to resend");
             self.audit(self.ctx.audit.failed(
                 "message_queue_failed",
@@ -283,34 +311,35 @@ impl Gateway {
                 Some(backend),
                 "queue full",
             ));
-            if reply_to(
-                &self.ctx,
-                &target,
-                "I'm a bit behind on this thread - resend that in a moment.",
-            )
-            .await
-            {
-                self.audit(self.ctx.audit.reply_sent(
-                    row_id,
-                    &thread,
-                    &target,
-                    Some(backend),
-                    "I'm a bit behind on this thread - resend that in a moment.",
-                ));
-                self.complete_row(row_id, "queue_full");
-            } else {
-                self.audit(self.ctx.audit.reply_failed(
-                    row_id,
-                    &thread,
-                    &target,
-                    Some(backend),
-                    "queue full reply failed",
-                ));
-                self.complete_row(row_id, "queue_full_reply_failed");
+            let reply = "I'm a bit behind on this thread - resend that in a moment.";
+            match record_and_deliver(&self.ctx, &job, OutboundOrigin::Gateway, reply).await {
+                Ok(DeliveryOutcome::Delivered | DeliveryOutcome::AlreadyDelivered) => {
+                    self.audit(self.ctx.audit.reply_sent(
+                        row_id,
+                        &thread,
+                        &target,
+                        Some(backend),
+                        reply,
+                    ));
+                    self.complete_row(row_id, "queue_full");
+                }
+                Err(error) => {
+                    error!("[{thread}] canonical history write failed: {error}");
+                    self.audit(self.ctx.audit.failed(
+                        "message_history_failed",
+                        row_id,
+                        &thread,
+                        Some(backend),
+                        error.to_string(),
+                    ));
+                    self.ack.lock().unwrap().in_flight.remove(&row_id);
+                    return false;
+                }
             }
         } else {
             self.ack.lock().unwrap().in_flight.insert(row_id);
         }
+        true
     }
 
     fn complete_row(&self, row_id: i64, reason: &str) {
@@ -331,35 +360,55 @@ async fn worker(ctx: Ctx, mut rx: mpsc::Receiver<Job>) {
 }
 
 async fn handle(ctx: &Ctx, job: Job) {
+    let existing_outbound = { ctx.history.lock().unwrap().outbound_for(job.inbound_id) };
+    match existing_outbound {
+        Ok(Some(outbound)) => {
+            match deliver_stored(ctx, &job, &outbound).await {
+                Ok(DeliveryOutcome::Delivered | DeliveryOutcome::AlreadyDelivered) => {
+                    audit(
+                        ctx,
+                        ctx.audit.reply_sent(
+                            job.row_id,
+                            &job.thread,
+                            &job.target,
+                            Some(job.backend),
+                            &outbound.content,
+                        ),
+                    );
+                    complete_job(ctx, &job, "recovered_outbound");
+                }
+                Err(error) => history_error(ctx, &job, "recover outbound", error),
+            }
+            return;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            history_error(ctx, &job, "read outbound", error);
+            return;
+        }
+    }
+
     if let Some(reply) = command(ctx, &job) {
-        if reply_to(ctx, &job.target, &reply).await {
-            info!(
-                "[{}] command reply sent via {}",
-                job.thread,
-                ctx.channel.id()
-            );
-            audit(
-                ctx,
-                ctx.audit.reply_sent(
-                    job.row_id,
-                    &job.thread,
-                    &job.target,
-                    Some(job.backend),
-                    &reply,
-                ),
-            );
-            complete_job(ctx, &job, "command");
-        } else {
-            audit(
-                ctx,
-                ctx.audit.reply_failed(
-                    job.row_id,
-                    &job.thread,
-                    &job.target,
-                    Some(job.backend),
-                    "command reply failed",
-                ),
-            );
+        match record_and_deliver(ctx, &job, OutboundOrigin::Gateway, &reply).await {
+            Ok(DeliveryOutcome::Delivered | DeliveryOutcome::AlreadyDelivered) => {
+                info!(
+                    "[{}] command reply sent via {}",
+                    job.thread,
+                    ctx.channel.id()
+                );
+                audit(
+                    ctx,
+                    ctx.audit.reply_sent(
+                        job.row_id,
+                        &job.thread,
+                        &job.target,
+                        Some(job.backend),
+                        &reply,
+                    ),
+                );
+                complete_job(ctx, &job, "command");
+            }
+            Err(error) => history_error(ctx, &job, "record command reply", error),
         }
         return;
     }
@@ -517,6 +566,18 @@ async fn handle(ctx: &Ctx, job: Job) {
                 ctx.audit
                     .backend_completed(job.row_id, &job.thread, job.backend, &out.reply),
             );
+            let outbound = match ctx.history.lock().unwrap().record_outbound(
+                job.inbound_id,
+                OutboundOrigin::Backend,
+                Some(job.backend.as_str()),
+                &out.reply,
+            ) {
+                Ok(outbound) => outbound,
+                Err(error) => {
+                    history_error(ctx, &job, "record backend reply", error);
+                    return;
+                }
+            };
             if let Err(e) = ctx
                 .store
                 .lock()
@@ -536,30 +597,22 @@ async fn handle(ctx: &Ctx, job: Job) {
                 );
                 return;
             }
-            if reply_to(ctx, &job.target, &out.reply).await {
-                info!("[{}] reply sent via {}", job.thread, ctx.channel.id());
-                audit(
-                    ctx,
-                    ctx.audit.reply_sent(
-                        job.row_id,
-                        &job.thread,
-                        &job.target,
-                        Some(job.backend),
-                        &out.reply,
-                    ),
-                );
-                complete_job(ctx, &job, "completed");
-            } else {
-                audit(
-                    ctx,
-                    ctx.audit.reply_failed(
-                        job.row_id,
-                        &job.thread,
-                        &job.target,
-                        Some(job.backend),
-                        "backend reply failed",
-                    ),
-                );
+            match deliver_stored(ctx, &job, &outbound).await {
+                Ok(DeliveryOutcome::Delivered | DeliveryOutcome::AlreadyDelivered) => {
+                    info!("[{}] reply sent via {}", job.thread, ctx.channel.id());
+                    audit(
+                        ctx,
+                        ctx.audit.reply_sent(
+                            job.row_id,
+                            &job.thread,
+                            &job.target,
+                            Some(job.backend),
+                            &out.reply,
+                        ),
+                    );
+                    complete_job(ctx, &job, "completed");
+                }
+                Err(error) => history_error(ctx, &job, "deliver backend reply", error),
             }
         }
         Err(RunError::Timeout) => {
@@ -574,35 +627,22 @@ async fn handle(ctx: &Ctx, job: Job) {
                     format!("{} run timed out", runner.label()),
                 ),
             );
-            if reply_to(
-                ctx,
-                &job.target,
-                "That took too long and was stopped. Try again or simplify the request.",
-            )
-            .await
-            {
-                audit(
-                    ctx,
-                    ctx.audit.reply_sent(
-                        job.row_id,
-                        &job.thread,
-                        &job.target,
-                        Some(job.backend),
-                        "That took too long and was stopped. Try again or simplify the request.",
-                    ),
-                );
-                complete_job(ctx, &job, "timeout");
-            } else {
-                audit(
-                    ctx,
-                    ctx.audit.reply_failed(
-                        job.row_id,
-                        &job.thread,
-                        &job.target,
-                        Some(job.backend),
-                        "timeout reply failed",
-                    ),
-                );
+            let reply = "That took too long and was stopped. Try again or simplify the request.";
+            match record_and_deliver(ctx, &job, OutboundOrigin::Gateway, reply).await {
+                Ok(DeliveryOutcome::Delivered | DeliveryOutcome::AlreadyDelivered) => {
+                    audit(
+                        ctx,
+                        ctx.audit.reply_sent(
+                            job.row_id,
+                            &job.thread,
+                            &job.target,
+                            Some(job.backend),
+                            reply,
+                        ),
+                    );
+                    complete_job(ctx, &job, "timeout");
+                }
+                Err(error) => history_error(ctx, &job, "record timeout reply", error),
             }
         }
         Err(RunError::Failed(msg)) => {
@@ -617,29 +657,22 @@ async fn handle(ctx: &Ctx, job: Job) {
                     msg.clone(),
                 ),
             );
-            if reply_to(ctx, &job.target, &format!("⚠️ {}", short(&msg))).await {
-                audit(
-                    ctx,
-                    ctx.audit.reply_sent(
-                        job.row_id,
-                        &job.thread,
-                        &job.target,
-                        Some(job.backend),
-                        &format!("⚠️ {}", short(&msg)),
-                    ),
-                );
-                complete_job(ctx, &job, "backend_failed");
-            } else {
-                audit(
-                    ctx,
-                    ctx.audit.reply_failed(
-                        job.row_id,
-                        &job.thread,
-                        &job.target,
-                        Some(job.backend),
-                        "failure reply failed",
-                    ),
-                );
+            let reply = format!("⚠️ {}", short(&msg));
+            match record_and_deliver(ctx, &job, OutboundOrigin::Gateway, &reply).await {
+                Ok(DeliveryOutcome::Delivered | DeliveryOutcome::AlreadyDelivered) => {
+                    audit(
+                        ctx,
+                        ctx.audit.reply_sent(
+                            job.row_id,
+                            &job.thread,
+                            &job.target,
+                            Some(job.backend),
+                            &reply,
+                        ),
+                    );
+                    complete_job(ctx, &job, "backend_failed");
+                }
+                Err(error) => history_error(ctx, &job, "record failure reply", error),
             }
         }
     }
@@ -675,8 +708,8 @@ where
 
 /// Setup failures are terminal for the current row. Try to tell the user what
 /// happened, then complete the row so one bad setup step cannot wedge ack state.
-/// If notification delivery also fails, the row is still completed and the
-/// failed notification is logged.
+/// The persisted notification is retried in bounded batches until delivery or
+/// shutdown.
 async fn complete_setup_failure(ctx: &Ctx, job: &Job, reply: &str) {
     #[cfg(test)]
     ctx.setup_failure_replies
@@ -684,9 +717,8 @@ async fn complete_setup_failure(ctx: &Ctx, job: &Job, reply: &str) {
         .unwrap()
         .push(reply.to_string());
 
-    #[cfg(not(test))]
-    {
-        if reply_to(ctx, &job.target, reply).await {
+    match record_and_deliver(ctx, job, OutboundOrigin::Gateway, reply).await {
+        Ok(DeliveryOutcome::Delivered | DeliveryOutcome::AlreadyDelivered) => {
             audit(
                 ctx,
                 ctx.audit.reply_sent(
@@ -697,21 +729,10 @@ async fn complete_setup_failure(ctx: &Ctx, job: &Job, reply: &str) {
                     reply,
                 ),
             );
-        } else {
-            audit(
-                ctx,
-                ctx.audit.reply_failed(
-                    job.row_id,
-                    &job.thread,
-                    &job.target,
-                    Some(job.backend),
-                    "setup failure reply failed",
-                ),
-            );
-            warn!(
-                "[{}] setup failure reply was not sent; completing row {}",
-                job.thread, job.row_id
-            );
+        }
+        Err(error) => {
+            history_error(ctx, job, "record setup failure reply", error);
+            return;
         }
     }
     audit(ctx, ctx.audit.completed(job.row_id, "setup_failed"));
@@ -759,10 +780,105 @@ fn command(ctx: &Ctx, job: &Job) -> Option<String> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeliveryOutcome {
+    Delivered,
+    AlreadyDelivered,
+}
+
+async fn record_and_deliver(
+    ctx: &Ctx,
+    job: &Job,
+    origin: OutboundOrigin,
+    text: &str,
+) -> Result<DeliveryOutcome> {
+    let outbound = ctx.history.lock().unwrap().record_outbound(
+        job.inbound_id,
+        origin,
+        Some(job.backend.as_str()),
+        text,
+    )?;
+    deliver_stored(ctx, job, &outbound).await
+}
+
+async fn deliver_stored(
+    ctx: &Ctx,
+    job: &Job,
+    outbound: &OutboundMessage,
+) -> Result<DeliveryOutcome> {
+    if outbound.status == DeliveryStatus::Delivered {
+        return Ok(DeliveryOutcome::AlreadyDelivered);
+    }
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let delivered = reply_to(ctx, &job.target, &outbound.content).await;
+        let status = if delivered {
+            DeliveryStatus::Delivered
+        } else {
+            DeliveryStatus::Failed
+        };
+        ctx.history
+            .lock()
+            .unwrap()
+            .mark_delivery(outbound.id, status)?;
+        if delivered {
+            return Ok(DeliveryOutcome::Delivered);
+        }
+        audit(
+            ctx,
+            ctx.audit.reply_failed(
+                job.row_id,
+                &job.thread,
+                &job.target,
+                Some(job.backend),
+                "stored outbound delivery attempt failed",
+            ),
+        );
+        if attempt < DELIVERY_ATTEMPTS {
+            warn!(
+                "delivery attempt {attempt}/{DELIVERY_ATTEMPTS} failed; retrying stored outbound"
+            );
+            #[cfg(not(test))]
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        } else {
+            warn!("delivery attempts exhausted; stored outbound remains failed and will retry");
+            attempt = 0;
+            #[cfg(not(test))]
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+        #[cfg(test)]
+        tokio::task::yield_now().await;
+    }
+}
+
+fn history_error(ctx: &Ctx, job: &Job, action: &str, error: anyhow::Error) {
+    error!(
+        "[{}] canonical history {action} failed: {error}; refusing unrecorded delivery",
+        job.thread
+    );
+    audit(
+        ctx,
+        ctx.audit.failed(
+            "message_history_failed",
+            job.row_id,
+            &job.thread,
+            Some(job.backend),
+            format!("{action}: {error}"),
+        ),
+    );
+}
+
 async fn reply_to(ctx: &Ctx, target: &str, text: &str) -> bool {
     let chunks = ctx.channel.outbound_chunks(text, &ctx.reply_marker);
     #[cfg(test)]
     {
+        let mut failures = ctx.send_failures_remaining.lock().unwrap();
+        if *failures > 0 {
+            *failures -= 1;
+            return false;
+        }
+        drop(failures);
         ctx.sent_replies.lock().unwrap().extend(
             chunks
                 .into_iter()
@@ -1057,8 +1173,15 @@ mod tests {
                 disallowed_tools: Vec::new(),
             }),
         );
+        let history_path = temp_path("setup-failure-history");
+        let mut history = History::open(history_path.to_str().unwrap()).unwrap();
+        let inbound_id = history
+            .record_inbound("imessage", "imessage:self:me", "imessage:10", "hello")
+            .unwrap();
+        assert_eq!(inbound_id, 1);
         Ctx {
             store,
+            history: Arc::new(Mutex::new(history)),
             ack,
             runners: Arc::new(runners),
             channel: filter(),
@@ -1075,12 +1198,14 @@ mod tests {
             )),
             setup_failure_replies: Arc::new(Mutex::new(Vec::new())),
             sent_replies: Arc::new(Mutex::new(Vec::new())),
+            send_failures_remaining: Arc::new(Mutex::new(0)),
         }
     }
 
     fn setup_failure_job(row_id: i64) -> Job {
         Job {
             row_id,
+            inbound_id: 1,
             thread: "imessage:self:me".to_string(),
             target: "me@icloud.com".to_string(),
             backend: AgentBackend::Claude,
@@ -1500,6 +1625,289 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn canonical_history_failure_prevents_backend_dispatch_and_cursor_advance() {
+        let state_path = temp_state_path();
+        let sessions_dir = temp_path("history-failure-sessions");
+        let assistant_dir = temp_path("history-failure-assistant");
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut gateway = Gateway::new(test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        ))
+        .unwrap();
+        gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+        gateway
+            .ctx
+            .history
+            .lock()
+            .unwrap()
+            .execute_batch_for_test("DROP TABLE messages");
+        let mut handles = Vec::new();
+
+        gateway
+            .tick_fake(
+                vec![message(1, "me@icloud.com", "", true, "hello")],
+                &mut handles,
+            )
+            .await;
+
+        assert!(handles.is_empty());
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(gateway.ctx.sent_replies.lock().unwrap().is_empty());
+        assert_eq!(gateway.store.lock().unwrap().cursor("imessage"), 0);
+
+        let _ = std::fs::remove_file(&state_path);
+        let _ = std::fs::remove_file(format!("{state_path}.db"));
+        let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+        let _ = std::fs::remove_dir_all(sessions_dir);
+        let _ = std::fs::remove_dir_all(assistant_dir);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pending_outbound_is_delivered_after_restart_without_backend_rerun() {
+        let state_path = temp_state_path();
+        let sessions_dir = temp_path("history-recovery-sessions");
+        let assistant_dir = temp_path("history-recovery-assistant");
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let config = test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        );
+        let mut history = History::open(&config.database_path).unwrap();
+        let inbound_id = history
+            .record_inbound(
+                "imessage",
+                "imessage:self:me@icloud.com",
+                "imessage:1",
+                "hello",
+            )
+            .unwrap();
+        history
+            .record_outbound(
+                inbound_id,
+                OutboundOrigin::Backend,
+                Some("codex"),
+                "stored reply",
+            )
+            .unwrap();
+        drop(history);
+        let mut gateway = Gateway::new(config).unwrap();
+        gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+        let mut handles = Vec::new();
+
+        gateway
+            .tick_fake(
+                vec![message(1, "me@icloud.com", "", true, "hello")],
+                &mut handles,
+            )
+            .await;
+        gateway.queues.clear();
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        assert!(calls.lock().unwrap().is_empty());
+        assert_eq!(
+            gateway.ctx.sent_replies.lock().unwrap().as_slice(),
+            [(
+                "me@icloud.com".to_string(),
+                "stored reply\n\n-- sent by push".to_string()
+            )]
+        );
+        assert_eq!(
+            gateway
+                .ctx
+                .history
+                .lock()
+                .unwrap()
+                .outbound_for(inbound_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            DeliveryStatus::Delivered
+        );
+        assert_eq!(gateway.store.lock().unwrap().cursor("imessage"), 1);
+
+        let _ = std::fs::remove_file(&state_path);
+        let _ = std::fs::remove_file(format!("{state_path}.db"));
+        let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+        let _ = std::fs::remove_dir_all(sessions_dir);
+        let _ = std::fs::remove_dir_all(assistant_dir);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_state_save_failure_keeps_reply_for_restart_without_backend_rerun() {
+        let state_path = temp_state_path();
+        let sessions_dir = temp_path("session-save-failure-sessions");
+        let assistant_dir = temp_path("session-save-failure-assistant");
+        let state_blocker = temp_path("session-save-failure-blocker");
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        std::fs::write(&state_blocker, "not a directory").unwrap();
+        let first_calls = Arc::new(Mutex::new(Vec::new()));
+        let mut gateway = Gateway::new(test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        ))
+        .unwrap();
+        let store = gateway.store.clone();
+        let broken_state_path = state_blocker.join("state.json");
+        gateway.ctx.runners = Arc::new(fake_runners_with_hook(
+            first_calls.clone(),
+            Some(Arc::new(move || {
+                store
+                    .lock()
+                    .unwrap()
+                    .set_path_for_test(broken_state_path.clone());
+            })),
+        ));
+        let mut handles = Vec::new();
+
+        gateway
+            .tick_fake(
+                vec![message(1, "me@icloud.com", "", true, "hello")],
+                &mut handles,
+            )
+            .await;
+        gateway.queues.clear();
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        assert_eq!(first_calls.lock().unwrap().len(), 1);
+        assert!(gateway.ctx.sent_replies.lock().unwrap().is_empty());
+        let inbound_id = gateway
+            .ctx
+            .history
+            .lock()
+            .unwrap()
+            .record_inbound(
+                "imessage",
+                "imessage:self:me@icloud.com",
+                "imessage:1",
+                "hello",
+            )
+            .unwrap();
+        assert_eq!(
+            gateway
+                .ctx
+                .history
+                .lock()
+                .unwrap()
+                .outbound_for(inbound_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            DeliveryStatus::Pending
+        );
+        drop(gateway);
+
+        let second_calls = Arc::new(Mutex::new(Vec::new()));
+        let mut restarted = Gateway::new(test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        ))
+        .unwrap();
+        restarted.ctx.runners = Arc::new(fake_runners(second_calls.clone()));
+        let mut handles = Vec::new();
+        restarted
+            .tick_fake(
+                vec![message(1, "me@icloud.com", "", true, "hello")],
+                &mut handles,
+            )
+            .await;
+        restarted.queues.clear();
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        assert!(second_calls.lock().unwrap().is_empty());
+        assert_eq!(
+            restarted.ctx.sent_replies.lock().unwrap().as_slice(),
+            [(
+                "me@icloud.com".to_string(),
+                "fake reply: hello\n\n-- sent by push".to_string()
+            )]
+        );
+        assert_eq!(restarted.store.lock().unwrap().cursor("imessage"), 1);
+
+        let _ = std::fs::remove_file(&state_path);
+        let _ = std::fs::remove_file(format!("{state_path}.db"));
+        let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+        let _ = std::fs::remove_file(state_blocker);
+        let _ = std::fs::remove_dir_all(sessions_dir);
+        let _ = std::fs::remove_dir_all(assistant_dir);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exhausted_delivery_batch_retries_without_blocking_cursor() {
+        let state_path = temp_state_path();
+        let sessions_dir = temp_path("delivery-retry-sessions");
+        let assistant_dir = temp_path("delivery-retry-assistant");
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut gateway = Gateway::new(test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        ))
+        .unwrap();
+        gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+        *gateway.ctx.send_failures_remaining.lock().unwrap() = DELIVERY_ATTEMPTS;
+        let mut handles = Vec::new();
+
+        gateway
+            .tick_fake(
+                vec![message(1, "me@icloud.com", "", true, "hello")],
+                &mut handles,
+            )
+            .await;
+        gateway.queues.clear();
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        assert_eq!(gateway.ctx.sent_replies.lock().unwrap().len(), 1);
+        assert_eq!(gateway.store.lock().unwrap().cursor("imessage"), 1);
+        let inbound_id = gateway
+            .ctx
+            .history
+            .lock()
+            .unwrap()
+            .record_inbound(
+                "imessage",
+                "imessage:self:me@icloud.com",
+                "imessage:1",
+                "hello",
+            )
+            .unwrap();
+        assert_eq!(
+            gateway
+                .ctx
+                .history
+                .lock()
+                .unwrap()
+                .outbound_for(inbound_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            DeliveryStatus::Delivered
+        );
+
+        let _ = std::fs::remove_file(&state_path);
+        let _ = std::fs::remove_file(format!("{state_path}.db"));
+        let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+        let _ = std::fs::remove_dir_all(sessions_dir);
+        let _ = std::fs::remove_dir_all(assistant_dir);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn telegram_filters_before_agent_and_replies_to_originating_chat() {
         let state_path = temp_state_path();
         let sessions_dir = temp_path("telegram-sessions");
@@ -1628,6 +2036,7 @@ mod tests {
             sessions_dir: sessions_dir.to_string(),
             state_path: state_path.to_string(),
             audit_log_path: format!("{state_path}.audit.jsonl"),
+            database_path: format!("{state_path}.db"),
             audit_log_content: false,
             assistant_dir: assistant_dir.to_string(),
             reply_marker: "\n\n-- sent by push".to_string(),
@@ -1643,6 +2052,13 @@ mod tests {
     }
 
     fn fake_runners(calls: Arc<Mutex<Vec<FakeRunCall>>>) -> HashMap<AgentBackend, Runner> {
+        fake_runners_with_hook(calls, None)
+    }
+
+    fn fake_runners_with_hook(
+        calls: Arc<Mutex<Vec<FakeRunCall>>>,
+        before_return: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> HashMap<AgentBackend, Runner> {
         let mut runners = HashMap::new();
         runners.insert(
             AgentBackend::Codex,
@@ -1650,6 +2066,7 @@ mod tests {
                 backend: AgentBackend::Codex,
                 session_id: "fake-session".to_string(),
                 calls,
+                before_return,
             }),
         );
         runners

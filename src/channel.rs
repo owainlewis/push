@@ -22,6 +22,12 @@ pub struct RawMessage {
     pub thread_id: Option<i64>,
 }
 
+impl RawMessage {
+    pub fn event_id(&self) -> String {
+        format!("{}:{}", self.channel, self.row_id)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundChunk {
     pub text: String,

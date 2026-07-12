@@ -23,7 +23,8 @@ own the durable pieces:
 - allowlists
 - routing
 - assistant identity
-- conversation state
+- canonical conversation history
+- cursor and backend-session state
 - delivery
 
 ### 2. Runtime Disposable
@@ -62,6 +63,7 @@ flowchart LR
         poller[Channel poller] --> gateway[Gateway loop]
         gateway --> worker[Per-thread worker]
         store[(state.json)] <--> gateway
+        history[(push.db)] <--> gateway
         soul[/SOUL.md/] --> worker
         worker --> adapter[Agent adapter]
     end
@@ -92,6 +94,7 @@ sequenceDiagram
     DB-->>P: messages
     P->>G: Message values
     G->>G: filter sender and reply marker
+    G->>G: persist accepted inbound message
     alt slash command
         G->>S: handle command locally
     else assistant turn
@@ -100,6 +103,7 @@ sequenceDiagram
         W->>W: resolve routed backend session
         W->>A: run prompt with context
         A-->>W: reply and optional backend session id
+        W->>W: persist generated outbound message
         W->>S: send reply
         W->>G: ack completed row
     end
@@ -176,6 +180,15 @@ now means "backend session id".
 
 If the configured backend changes for a thread, push starts a fresh backend
 session instead of trying to resume the old runtime's session.
+
+`push.db` stores channel-qualified conversations and their inbound and outbound
+messages. Accepted inbound messages are inserted before gateway commands or
+backend dispatch. Generated backend, command, and error replies are inserted
+before delivery, with generation and delivery state tracked separately. A
+unique channel event ID makes inbound retries idempotent, and a unique link from
+each inbound message to its outbound response preserves the generation/delivery
+crash boundary. SQLite history does not replace `state.json` cursors or backend
+session IDs in this phase.
 
 `audit_log_path` stores a local JSONL event stream for production debugging.
 Audit events record message metadata, routing decisions, backend run starts and
