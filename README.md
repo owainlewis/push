@@ -365,8 +365,9 @@ remain accepted.
 
 Every route selects a named Push permission profile. The default is the built-in
 `restricted` profile. Built-ins are `restricted` (`read-only` capability),
-`workspace`, and the deliberately explicit `full-access`. Custom profiles can
-only select one of those capabilities; they cannot inject raw backend flags.
+`workspace`, `inherit`, and the deliberately explicit `full-access`. Custom
+profiles can only select one of those capabilities; they cannot inject raw
+backend flags.
 
 Backend translation is intentionally conservative:
 
@@ -375,16 +376,19 @@ Backend translation is intentionally conservative:
 - `workspace`: Claude gets read and file-edit tools but no Bash because Claude
   Code has no equivalent to Codex filesystem sandboxing; Codex uses
   `workspace-write` with approvals disabled.
+- `inherit`: Push enforces nothing and defers to the backend's own permission
+  configuration. Claude Code runs headless with the operator's settings
+  (permission mode, allow and deny rules), so tools such as Bash work only when
+  those settings pre-approve them, because a headless run cannot prompt. Codex
+  runs without a `--sandbox` flag, so its configured default sandbox applies.
+  Set `permission_profile = "inherit"` to make this the default for chat.
 - `full-access`: maps to backend bypass modes, but Push rejects it for
-  unattended routes because it cannot protect installed jobs, configuration,
-  or state from direct writes.
+  unattended routes because it overrides even the operator's own backend
+  settings and cannot protect installed jobs, configuration, or state.
 
-Jobs do not select a profile. A job runs with the backend's own permission
-configuration: Claude Code uses the operator's settings (permission mode, allow
-and deny rules), and Codex uses its configured default sandbox. Push passes no
-tool restrictions to job runs, so what a job may do is decided entirely by the
-backend configuration the operator already maintains. Because jobs may
-therefore write, every job work directory must stay clear of Push-owned paths.
+Jobs do not select a profile. A job always runs with the `inherit` behavior
+described above. Because `inherit` may write, every job work directory must
+stay clear of Push-owned paths, including the loaded config file.
 Unknown route profiles fail startup.
 
 Legacy raw settings such as `claude_permission_mode`, `claude_tools`,
@@ -457,11 +461,11 @@ result, including after restart, and never reruns the backend.
 
 ## Agent-Drafted Jobs
 
-A route using the `workspace` profile can propose a job by writing one complete
-runbook to the identity-specific inbox Push provides beneath `drafts_dir`, which
-defaults to `~/.push/drafts`. Push gives the backend only that opaque inbox as
-its extra writable root, so concurrent senders and topics cannot claim each
-other's files. `restricted` routes
+A route using the `workspace` or `inherit` profile can propose a job by writing
+one complete runbook to the identity-specific inbox Push provides beneath
+`drafts_dir`, which defaults to `~/.push/drafts`. Push gives the backend that
+opaque inbox as its extra writable root, so concurrent senders and topics
+cannot claim each other's files. `restricted` routes
 remain read-only, and `full-access` routes are rejected because their
 backend bypass modes cannot enforce this boundary.
 
@@ -512,7 +516,9 @@ as able to instruct the agent.
 
 The default `restricted` profile does not grant write or shell tools. Broader
 profiles should still be treated as powerful automation because backend
-enforcement differs and an allowed sender controls the request.
+enforcement differs and an allowed sender controls the request. With `inherit`,
+everything the backend's own configuration allows, including shell access, is
+one text message away, so pair it with a tight sender allowlist.
 
 ## Audit Log
 

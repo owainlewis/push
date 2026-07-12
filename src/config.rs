@@ -279,6 +279,7 @@ impl Config {
         let capability = match name {
             "restricted" => PermissionCapability::ReadOnly,
             "workspace" => PermissionCapability::Workspace,
+            "inherit" => PermissionCapability::Inherit,
             "full-access" => PermissionCapability::FullAccess,
             custom => self
                 .permission_profiles
@@ -365,7 +366,10 @@ impl Config {
             if name.trim().is_empty() {
                 bail!("permission profile names cannot be empty");
             }
-            if matches!(name.as_str(), "restricted" | "workspace" | "full-access") {
+            if matches!(
+                name.as_str(),
+                "restricted" | "workspace" | "inherit" | "full-access"
+            ) {
                 bail!("built-in permission profile {name:?} cannot be redefined");
             }
             profile
@@ -577,8 +581,8 @@ pub enum PermissionCapability {
     ReadOnly,
     Workspace,
     /// Defer to the backend's own permission configuration. Push passes no
-    /// tool allow or deny lists; the operator's backend settings decide.
-    /// Not selectable from config (`parse` rejects it); only jobs use it.
+    /// permission mode, tool lists, or sandbox flags; the operator's backend
+    /// settings decide what the agent may do. Jobs always run with this.
     Inherit,
     FullAccess,
 }
@@ -588,9 +592,10 @@ impl PermissionCapability {
         match value {
             "read-only" => Ok(Self::ReadOnly),
             "workspace" => Ok(Self::Workspace),
+            "inherit" => Ok(Self::Inherit),
             "full-access" => Ok(Self::FullAccess),
             other => bail!(
-                "invalid permission capability {other:?}; expected read-only, workspace, or full-access"
+                "invalid permission capability {other:?}; expected read-only, workspace, inherit, or full-access"
             ),
         }
     }
