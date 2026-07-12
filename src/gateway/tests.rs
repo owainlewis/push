@@ -2006,6 +2006,7 @@ fn test_config(state_path: &str, sessions_dir: &str, assistant_dir: &str) -> Con
         audit_log_path: format!("{state_path}.audit.jsonl"),
         database_path: format!("{state_path}.db"),
         audit_log_content: false,
+        config_path: String::new(),
         assistant_dir: assistant_dir.to_string(),
         reply_marker: "\n\n-- sent by push".to_string(),
     }

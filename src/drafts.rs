@@ -452,6 +452,7 @@ mod tests {
                 audit_log_path: root.join("audit.jsonl").to_string_lossy().to_string(),
                 database_path: root.join("push.db").to_string_lossy().to_string(),
                 audit_log_content: false,
+                config_path: String::new(),
                 assistant_dir: root.to_string_lossy().to_string(),
                 reply_marker: String::new(),
             },
