@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
             let cfg = config::Config::load(&args.config_path).context("config")?;
             preflight(&cfg).context("preflight")?;
             report_invalid_jobs(&cfg)?;
-            gateway::Gateway::new(cfg).context("init")?.run().await
+            gateway::GatewayGroup::new(cfg).context("init")?.run().await
         }
     }
 }
@@ -236,10 +236,16 @@ fn run_checks(cfg: &config::Config) -> CheckReport {
     check_sessions_dir(cfg, &mut checks);
     check_audit_log_dir(cfg, &mut checks);
     check_history_database(cfg, &mut checks);
-    match cfg.channel_kind() {
-        Ok(config::ChannelKind::IMessage) => check_imessage_db(cfg, &mut checks),
-        Ok(config::ChannelKind::Telegram) => check_telegram_config(cfg, &mut checks),
-        Err(e) => checks.push(Check::fail("channel", e.to_string())),
+    match cfg.enabled_channel_kinds() {
+        Ok(channels) => {
+            for channel in channels {
+                match channel {
+                    config::ChannelKind::IMessage => check_imessage_db(cfg, &mut checks),
+                    config::ChannelKind::Telegram => check_telegram_config(cfg, &mut checks),
+                }
+            }
+        }
+        Err(e) => checks.push(Check::fail("channels", e.to_string())),
     }
     check_bins(cfg, &mut checks);
     CheckReport { checks }
@@ -249,8 +255,10 @@ fn check_config(cfg: &config::Config, checks: &mut Vec<Check>) {
     checks.push(Check::pass(
         "config",
         format!(
-            "channel={}, agent={}, permission_profile={}, imessage.self_handles={}, imessage.allow_from={}, telegram.allow_user_ids={}, telegram.allow_chat_ids={}",
-            cfg.channel,
+            "channels={}, agent={}, permission_profile={}, imessage.self_handles={}, imessage.allow_from={}, telegram.allow_user_ids={}, telegram.allow_chat_ids={}",
+            cfg.enabled_channel_kinds()
+                .map(|channels| channels.into_iter().map(|kind| kind.as_str()).collect::<Vec<_>>().join(","))
+                .unwrap_or_else(|_| cfg.channel.clone()),
             cfg.agent,
             cfg.permission_profile,
             cfg.self_handles.len(),
@@ -410,7 +418,10 @@ fn check_bins_with(
             return;
         }
     };
-    if matches!(cfg.channel_kind(), Ok(config::ChannelKind::IMessage)) {
+    if cfg
+        .enabled_channel_kinds()
+        .is_ok_and(|channels| channels.contains(&config::ChannelKind::IMessage))
+    {
         bins.push("osascript");
     }
     bins.sort_unstable();
@@ -618,6 +629,8 @@ mod tests {
         let cfg = Config::load(path.to_str().unwrap()).unwrap();
 
         assert_eq!(cfg.channel, "telegram");
+        assert!(cfg.channels.is_empty());
+        assert!(cfg.primary_delivery.is_none());
         assert_eq!(cfg.agent, "codex");
         assert_eq!(cfg.telegram_bot_token_env, "TELEGRAM_BOT_TOKEN");
         assert_eq!(cfg.telegram_allow_user_ids, [123456789]);
@@ -931,6 +944,84 @@ tools = ["Read", "Grep"]
     }
 
     #[test]
+    fn full_preflight_checks_only_enabled_reply_channels() {
+        let mut cfg = test_config();
+        cfg.channels = vec!["telegram".to_string()];
+        cfg.self_handles.clear();
+        cfg.db_path = "/definitely/missing/chat.db".to_string();
+        cfg.telegram_bot_token = Some("secret".to_string());
+        cfg.telegram_allow_user_ids = vec![7];
+
+        let report = run_checks(&cfg);
+
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.name == "Telegram bot token"));
+        assert!(!report
+            .checks
+            .iter()
+            .any(|check| check.name == "iMessage database"));
+    }
+
+    #[test]
+    fn multi_channel_config_is_opt_in_and_defers_primary_resolution() {
+        let path = temp_path("multi-channel-config");
+        std::fs::write(
+            &path,
+            r#"channels = ["imessage", "telegram"]
+agent = "codex"
+
+[imessage]
+self_handles = ["me@icloud.com"]
+
+[telegram]
+bot_token = "secret"
+allow_user_ids = [7]
+
+[primary_delivery]
+channel = "telegram"
+target = "not-an-allowed-target"
+"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(
+            cfg.enabled_channel_kinds().unwrap(),
+            vec![config::ChannelKind::IMessage, config::ChannelKind::Telegram]
+        );
+        assert_eq!(
+            cfg.primary_delivery,
+            Some(config::PrimaryDeliveryConfig {
+                channel: "telegram".to_string(),
+                target: "not-an-allowed-target".to_string(),
+            })
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn duplicate_enabled_channels_are_rejected() {
+        let path = temp_path("duplicate-channel-config");
+        std::fs::write(
+            &path,
+            r#"channels = ["telegram", "telegram"]
+[telegram]
+bot_token = "secret"
+allow_user_ids = [7]
+"#,
+        )
+        .unwrap();
+
+        let error = Config::load(path.to_str().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("duplicate enabled channel"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn routes_support_channel_override_exact_thread_and_legacy_imessage_key() {
         let mut cfg = test_config();
         cfg.agent = "claude".to_string();
@@ -1123,6 +1214,8 @@ capability = "workspace"
     fn test_config() -> Config {
         Config {
             channel: "imessage".to_string(),
+            channels: Vec::new(),
+            primary_delivery: None,
             db_path: "/fake/chat.db".to_string(),
             poll_interval: "1s".to_string(),
             run_timeout: "1s".to_string(),

@@ -134,6 +134,8 @@ user prompt.
 | `agent` | `claude` or `codex`. |
 | `routes` | Exact thread to backend overrides. |
 | `permission_profile` | Default named profile; defaults to `restricted`. |
+| `channels` | Optional advanced list of reply channels to poll concurrently; otherwise `channel` is used unchanged. |
+| `primary_delivery` | Optional enabled channel and allowlisted target for proactive output. |
 | `permission_profiles` | Custom names mapped to a common capability. |
 | `job_permission_profiles` | Explicit profile names future jobs may request; defaults to `restricted`. |
 | `jobs_dir` | Installed Markdown runbooks; defaults to `~/.push/jobs`. |

@@ -260,6 +260,39 @@ permission_profile = "workspace"
 Channel settings belong under `[imessage]` and `[telegram]`. Existing flat
 channel keys remain accepted for compatibility, but do not set the same option
 in both places.
+
+The single `channel` setting remains the default quick start. To poll both
+configured providers concurrently, replace it with the advanced `channels`
+list:
+
+```toml
+channels = ["imessage", "telegram"]
+
+[imessage]
+self_handles = ["you@icloud.com"]
+allow_from = ["+15551234567"]
+
+[telegram]
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+allow_user_ids = [123456789]
+
+[primary_delivery]
+channel = "telegram"
+target = "123456789"
+```
+
+Each enabled channel polls independently, keeps its own cursor and ordered
+thread queues, and replies through the provider and exact topic that originated
+the message. A poll failure on one provider is logged without stopping the
+other. Startup preflight checks only enabled providers.
+
+`primary_delivery` is optional and is reserved for proactive job results,
+failures, and future approvals. Its channel must be enabled and its target must
+already appear in that provider's allowlist. Telegram topics use
+`"<chat_id>:<topic_id>"`; iMessage uses an allowed handle. Missing or invalid
+primary delivery produces a scoped error only when proactive delivery is
+requested and never disables ordinary replies.
+
 Routes can override the backend by channel or exact channel-qualified thread:
 
 ```toml

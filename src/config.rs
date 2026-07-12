@@ -6,10 +6,14 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     #[serde(default = "default_channel")]
     pub channel: String,
+    #[serde(default)]
+    pub channels: Vec<String>,
+    #[serde(default)]
+    pub primary_delivery: Option<PrimaryDeliveryConfig>,
     #[serde(default = "default_db_path")]
     pub db_path: String,
     #[serde(default = "default_poll_interval")]
@@ -149,6 +153,22 @@ impl Config {
         ChannelKind::parse(&self.channel)
     }
 
+    pub fn enabled_channel_kinds(&self) -> Result<Vec<ChannelKind>> {
+        if self.channels.is_empty() {
+            return Ok(vec![self.channel_kind()?]);
+        }
+        let mut seen = HashSet::new();
+        let mut enabled = Vec::with_capacity(self.channels.len());
+        for name in &self.channels {
+            let kind = ChannelKind::parse(name)?;
+            if !seen.insert(kind) {
+                bail!("duplicate enabled channel {:?}", kind.as_str());
+            }
+            enabled.push(kind);
+        }
+        Ok(enabled)
+    }
+
     pub fn telegram_token(&self) -> Option<String> {
         self.telegram_bot_token
             .as_deref()
@@ -245,11 +265,12 @@ impl Config {
     pub fn required_agent_bins(&self) -> Result<Vec<&str>> {
         let mut backends = HashSet::new();
         backends.insert(self.agent_backend()?);
-        for route in self
-            .routes
-            .iter()
-            .filter(|route| route.can_match_channel(&self.channel))
-        {
+        let enabled = self.enabled_channel_kinds()?;
+        for route in self.routes.iter().filter(|route| {
+            enabled
+                .iter()
+                .any(|kind| route.can_match_channel(kind.as_str()))
+        }) {
             backends.insert(AgentBackend::parse(&route.agent)?);
         }
 
@@ -264,27 +285,31 @@ impl Config {
     }
 
     fn validate(&self) -> Result<()> {
-        match self.channel_kind()? {
-            ChannelKind::IMessage => {
-                if self.self_handles.is_empty() && self.allow_from.is_empty() {
-                    bail!("set imessage.self_handles or imessage.allow_from for iMessage");
+        for channel in self.enabled_channel_kinds()? {
+            match channel {
+                ChannelKind::IMessage => {
+                    if self.self_handles.is_empty() && self.allow_from.is_empty() {
+                        bail!("set imessage.self_handles or imessage.allow_from for iMessage");
+                    }
                 }
-            }
-            ChannelKind::Telegram => {
-                if self.telegram_allow_user_ids.is_empty()
-                    && self.telegram_allow_chat_ids.is_empty()
-                {
-                    bail!("set telegram.allow_user_ids or telegram.allow_chat_ids for Telegram");
-                }
-                if self
-                    .telegram_bot_token
-                    .as_deref()
-                    .is_some_and(|v| v.trim().is_empty())
-                {
-                    bail!("telegram.bot_token cannot be empty");
-                }
-                if self.telegram_bot_token_env.trim().is_empty() {
-                    bail!("telegram.bot_token_env cannot be empty");
+                ChannelKind::Telegram => {
+                    if self.telegram_allow_user_ids.is_empty()
+                        && self.telegram_allow_chat_ids.is_empty()
+                    {
+                        bail!(
+                            "set telegram.allow_user_ids or telegram.allow_chat_ids for Telegram"
+                        );
+                    }
+                    if self
+                        .telegram_bot_token
+                        .as_deref()
+                        .is_some_and(|v| v.trim().is_empty())
+                    {
+                        bail!("telegram.bot_token cannot be empty");
+                    }
+                    if self.telegram_bot_token_env.trim().is_empty() {
+                        bail!("telegram.bot_token_env cannot be empty");
+                    }
                 }
             }
         }
@@ -378,6 +403,12 @@ pub struct RouteRule {
     pub permission_profile: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+pub struct PrimaryDeliveryConfig {
+    pub channel: String,
+    pub target: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteSelection {
     pub backend: AgentBackend,
@@ -455,7 +486,7 @@ fn telegram_parent_thread<'a>(channel: &str, thread: &'a str) -> Option<&'a str>
         .flatten()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChannelKind {
     IMessage,
     Telegram,
@@ -467,6 +498,13 @@ impl ChannelKind {
             "imessage" => Ok(Self::IMessage),
             "telegram" => Ok(Self::Telegram),
             other => bail!("invalid channel {other:?}; expected \"imessage\" or \"telegram\""),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::IMessage => "imessage",
+            Self::Telegram => "telegram",
         }
     }
 }
