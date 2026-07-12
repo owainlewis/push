@@ -75,6 +75,9 @@ pub struct Config {
     pub assistant_dir: String,
     #[serde(default = "default_reply_marker")]
     pub reply_marker: String,
+    /// Canonical path of the loaded config file. Set by `load`, never parsed.
+    #[serde(skip)]
+    pub config_path: String,
 }
 
 impl Config {
@@ -108,6 +111,11 @@ impl Config {
                 );
             }
         }
+        if root.contains_key("job_permission_profiles") {
+            bail!(
+                "job_permission_profiles is no longer supported; jobs run with the backend's own permission configuration, so remove this key"
+            );
+        }
         flatten_provider_section(
             root,
             "imessage",
@@ -138,7 +146,7 @@ impl Config {
         c.drafts_dir = expand_home(&c.drafts_dir);
         c.jobs_run_dir = expand_home(&c.jobs_run_dir);
         c.validate()?;
-        validate_config_path(path, &c)?;
+        c.config_path = validate_config_path(path, &c)?;
         Ok(c)
     }
 
@@ -225,10 +233,11 @@ impl Config {
     }
 
     // Jobs run with the backend's own permission configuration, which may
-    // allow writes, so every job workdir must stay clear of Push-owned paths.
+    // allow writes, so every job workdir must stay clear of Push-owned paths,
+    // including the loaded config file itself.
     pub fn validate_job_workdir(&self, workdir: &Path) -> Result<()> {
         let workdir = resolved_absolute("job workdir", workdir)?;
-        for (label, protected) in [
+        let protected_paths = [
             ("assistant_dir", self.assistant_dir.as_str()),
             ("sessions_dir", self.sessions_dir.as_str()),
             ("jobs_dir", self.jobs_dir.as_str()),
@@ -237,7 +246,12 @@ impl Config {
             ("state_path", self.state_path.as_str()),
             ("database_path", self.database_path.as_str()),
             ("audit_log_path", self.audit_log_path.as_str()),
-        ] {
+            ("config file", self.config_path.as_str()),
+        ];
+        for (label, protected) in protected_paths
+            .into_iter()
+            .filter(|(_, protected)| !protected.is_empty())
+        {
             let protected = resolved_absolute(label, Path::new(protected))?;
             if paths_overlap(&workdir, &protected) {
                 bail!(
@@ -436,7 +450,7 @@ fn validate_protected_paths(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-fn validate_config_path(path: &str, cfg: &Config) -> Result<()> {
+fn validate_config_path(path: &str, cfg: &Config) -> Result<String> {
     let config = std::fs::canonicalize(path).with_context(|| format!("resolve config {path}"))?;
     let sessions = resolved_absolute("sessions_dir", Path::new(&cfg.sessions_dir))?;
     let drafts = resolved_absolute("drafts_dir", Path::new(&cfg.drafts_dir))?;
@@ -446,7 +460,7 @@ fn validate_config_path(path: &str, cfg: &Config) -> Result<()> {
     if config.starts_with(&drafts) {
         bail!("config file must not be inside drafts_dir");
     }
-    Ok(())
+    Ok(config.to_string_lossy().to_string())
 }
 
 fn normalized_absolute(label: &str, path: &Path) -> Result<PathBuf> {
@@ -762,6 +776,7 @@ mod tests {
             audit_log_path: root.join("audit.jsonl").to_string_lossy().to_string(),
             database_path: root.join("push.db").to_string_lossy().to_string(),
             audit_log_content: false,
+            config_path: String::new(),
             assistant_dir: root.to_string_lossy().to_string(),
             reply_marker: String::new(),
         }
