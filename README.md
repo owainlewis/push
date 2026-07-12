@@ -1,6 +1,6 @@
-# push
+# Push
 
-push is a tiny personal assistant gateway. You text it, it sends the message to
+Push is a tiny personal assistant gateway. You text it, it sends the message to
 a configured coding-agent runtime, then it sends the answer back.
 
 The product is the gateway: messaging, allowlists, routing, assistant identity,
@@ -10,7 +10,7 @@ Claude Code and Codex are the first two backends.
 ## How it works
 
 ```text
-iMessage or Telegram -> push gateway -> Claude Code or Codex -> same-channel reply
+iMessage or Telegram -> Push gateway -> Claude Code or Codex -> same-channel reply
 ```
 
 1. Poll `~/Library/Messages/chat.db` or the Telegram Bot API for new messages.
@@ -30,11 +30,11 @@ Coding agents are becoming commodity runtimes. Claude Code, Codex, Cursor, AMP,
 Pi-style agents, and independent agents all compete on the same layer: tool use,
 repo edits, command execution, MCP, plugins, model choice, and coding workflow.
 
-push does not try to win that layer. It treats those agents as workers behind a
+Push does not try to win that layer. It treats those agents as workers behind a
 small contract: given this user message and assistant context, produce the reply
 or task result that should be sent back.
 
-push owns the personal assistant layer:
+Push owns the personal assistant layer:
 
 - Message ingress and egress.
 - Sender allowlists and reply loop prevention.
@@ -44,7 +44,7 @@ push owns the personal assistant layer:
 
 The framing is personal assistant first, coding agent second. The backend may be
 Claude Code today and Codex tomorrow, but the assistant identity, memory, and
-messaging relationship stay with push.
+messaging relationship stay with Push.
 
 See [docs/strategy.md](docs/strategy.md) for the full direction.
 
@@ -112,25 +112,25 @@ back through the same channel and conversation.
 channel's requirements. Telegram-only use does not need Messages, `chat.db`, or
 `osascript`.
 
-To run push continuously, see [Running push as a Service](docs/services.md) for
+To run Push continuously, see [Running Push as a Service](docs/services.md) for
 macOS `launchd`, Linux `systemd` where supported, logs, restart behavior, and
 headless security notes.
 
 ## iMessage Support
 
-push supports one-to-one iMessage conversations: self-chat and allowlisted
+Push supports one-to-one iMessage conversations: self-chat and allowlisted
 direct messages. Group chats are not supported in v1 and are ignored.
 
 The iMessage channel reads `~/Library/Messages/chat.db` directly, so the process
 needs Full Disk Access on macOS. It assumes the recent macOS Messages schema with
 `message`, `handle`, `chat`, `chat_message_join`, and `chat_handle_join` tables;
 `push doctor` and the runtime report database access or query failures. Tapbacks,
-system rows, blank messages, messages from non-allowlisted senders, and push's
+system rows, blank messages, messages from non-allowlisted senders, and Push's
 own marked replies are ignored. Phone numbers are matched after removing
 formatting, and email handles are matched case-insensitively.
 
 `state.json` stores the last completed Messages row and backend sessions. On
-restart, push resumes after the last completed row and keeps existing backend
+restart, Push resumes after the last completed row and keeps existing backend
 sessions when the selected backend has not changed.
 
 `push.db` is the canonical conversation journal. It stores accepted inbound
@@ -164,7 +164,7 @@ audit state without entering the conversation transcript used for rehydration.
 
 ## Telegram Support
 
-Telegram uses Bot API long polling, so push opens no public port and needs no
+Telegram uses Bot API long polling, so Push opens no public port and needs no
 webhook server. Private chats are supported first. Group chats, forum topics,
 and non-text updates are ignored before they can reach the agent. Replies go to
 the chat that originated the accepted message. Replies up to Telegram's 32,768
@@ -330,7 +330,7 @@ Backend translation is intentionally conservative:
 - `workspace`: Claude gets read and file-edit tools but no Bash because Claude
   Code has no equivalent to Codex filesystem sandboxing; Codex uses
   `workspace-write` with approvals disabled.
-- `full-access`: maps to backend bypass modes, but push rejects it for
+- `full-access`: maps to backend bypass modes, but Push rejects it for
   unattended routes and jobs because it cannot protect installed jobs,
   configuration, or state from direct writes.
 
@@ -435,18 +435,18 @@ before installing from the stored bytes with an atomic no-clobber operation.
 Any edit after presentation invalidates the approval. Rejection leaves the file
 inactive in `drafts_dir`; duplicate answers cannot install twice.
 
-push reads TOML only. Convert any earlier `config.json` file to `config.toml`
+Push reads TOML only. Convert any earlier `config.json` file to `config.toml`
 before upgrading. The old JSON filename remains gitignored to reduce the risk
 of committing a config that contains credentials.
 
 ## Assistant Identity and Migration
 
-`SOUL.md` is the only assistant identity source. By default push reads
+`SOUL.md` is the only assistant identity source. By default Push reads
 `~/.push/SOUL.md`; set `assistant_dir` to keep the file elsewhere. Push reads
 the file for every run, appends its own invariant instructions in memory, and
 never creates or rewrites `SOUL.md`.
 
-If `SOUL.md` is missing, backend runs continue with only push's invariants and
+If `SOUL.md` is missing, backend runs continue with only Push's invariants and
 no custom identity. Copy any identity, preferences, or stable context that you
 want to preserve from the old `[assistant]`, `User.md`, and `Memory.md` inputs
 into `SOUL.md`. Old context files are not loaded, and a remaining `[assistant]`
@@ -470,7 +470,7 @@ enforcement differs and an allowed sender controls the request.
 
 ## Audit Log
 
-push writes a structured JSONL audit log to `audit_log_path`, which defaults to
+Push writes a structured JSONL audit log to `audit_log_path`, which defaults to
 `~/.push/audit.jsonl`. Each line is one event, such as `message_accepted`,
 `message_ignored`, `backend_run_started`, `backend_run_failed`, `reply_sent`, or
 `message_completed`.

@@ -1,8 +1,8 @@
-# push v1 PRD
+# Push v1 PRD
 
 ## Summary
 
-push is a small Rust binary that turns coding-agent runtimes into a personal
+Push is a small Rust binary that turns coding-agent runtimes into a personal
 assistant you can text.
 
 It polls iMessage, filters allowed senders, loads user-owned assistant context,
@@ -55,9 +55,9 @@ Hermes and similar projects build more of the runtime: memory databases,
 summarizers, skills, subagents, schedulers, provider abstractions, and custom
 agent behavior.
 
-push takes a narrower bet:
+Push takes a narrower bet:
 
-| Area | Hermes-style product | push |
+| Area | Hermes-style product | Push |
 |---|---|---|
 | Runtime | Built into the product | External backend |
 | Tools | Product-owned | Backend-owned |
@@ -69,13 +69,13 @@ push takes a narrower bet:
 ## Core User Flow
 
 1. User sends a text.
-2. push reads the new row from `chat.db`.
-3. push filters by allowlist and reply marker.
-4. push loads assistant context.
-5. push resolves the thread's backend session.
-6. push runs Claude Code or Codex.
-7. push sends the final reply back over iMessage.
-8. push stores the latest message row and backend session state.
+2. Push reads the new row from `chat.db`.
+3. Push filters by allowlist and reply marker.
+4. Push loads assistant context.
+5. Push resolves the thread's backend session.
+6. Push runs Claude Code or Codex.
+7. Push sends the final reply back over iMessage.
+8. Push stores the latest message row and backend session state.
 
 ## Components
 
@@ -161,7 +161,7 @@ user prompt.
 | `audit_log_content` | Whether audit events include message and reply text. |
 | `database_path` | Canonical SQLite history path; defaults to `~/.push/push.db`. |
 | `assistant_dir` | Directory with `SOUL.md`; defaults to `~/.push`. |
-| `reply_marker` | Footer used to skip push's own replies. |
+| `reply_marker` | Footer used to skip Push's own replies. |
 
 ## Control Commands
 
@@ -172,8 +172,8 @@ user prompt.
 
 - A configured self-chat message gets a reply.
 - Non-allowlisted senders are ignored.
-- push does not answer messages containing the reply marker.
-- push only advances `last_row_id` after a message is ignored or completed.
+- Push does not answer messages containing the reply marker.
+- Push only advances `last_row_id` after a message is ignored or completed.
 - `/clear` starts a fresh backend session.
 - Claude backend can create and resume a session.
 - Codex backend can create a session, store the Codex thread id, and resume it.
