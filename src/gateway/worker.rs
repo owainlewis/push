@@ -33,18 +33,24 @@ pub(super) async fn run(ctx: Ctx, mut rx: mpsc::Receiver<Job>) {
 }
 
 pub(super) async fn handle(ctx: &Ctx, job: Job) {
-    let draft_directory =
-        if job.permission.capability == crate::config::PermissionCapability::Workspace {
-            match crate::drafts::origin_directory(&ctx.cfg, &job.approval_origin) {
-                Ok(directory) => Some(directory),
-                Err(error) => {
-                    error!("[{}] draft boundary error: {error:#}", job.thread);
-                    return;
-                }
+    use crate::config::PermissionCapability;
+    // Threads whose capability allows writes get the draft boundary, so they
+    // can propose recurring jobs for approval.
+    let can_write = matches!(
+        job.permission.capability,
+        PermissionCapability::Workspace | PermissionCapability::Inherit
+    );
+    let draft_directory = if can_write {
+        match crate::drafts::origin_directory(&ctx.cfg, &job.approval_origin) {
+            Ok(directory) => Some(directory),
+            Err(error) => {
+                error!("[{}] draft boundary error: {error:#}", job.thread);
+                return;
             }
-        } else {
-            None
-        };
+        }
+    } else {
+        None
+    };
     let existing_outbound = { ctx.history.lock().unwrap().outbound_for(job.inbound_id) };
     match existing_outbound {
         Ok(Some(outbound)) => {

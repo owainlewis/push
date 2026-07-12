@@ -2,6 +2,10 @@
 channel = "telegram"
 agent = "codex"
 
+# Chat is read-only by default. Uncomment to defer entirely to your own
+# backend settings (Claude Code allow rules, Codex sandbox), including shell.
+# permission_profile = "inherit"
+
 [telegram]
 # Replace this once with your numeric Telegram user ID.
 allow_user_ids = [123456789]
