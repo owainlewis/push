@@ -62,12 +62,22 @@ pub struct AuditContent {
 }
 
 impl AuditLog {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(path: String, include_content: bool, channel: &str) -> Self {
+        Self::with_lock(path, include_content, channel, Arc::new(Mutex::new(())))
+    }
+
+    pub(crate) fn with_lock(
+        path: String,
+        include_content: bool,
+        channel: &str,
+        lock: Arc<Mutex<()>>,
+    ) -> Self {
         Self {
             path,
             include_content,
             channel: channel.to_string(),
-            lock: Arc::new(Mutex::new(())),
+            lock,
         }
     }
 

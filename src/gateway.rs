@@ -1,20 +1,19 @@
 //! The message loop: poll, filter, and route each message to a per-thread
 //! worker task that runs an agent backend and sends the reply.
 //!
-//! Design: a single loop task owns the queue map and the store. Each thread
-//! gets its own task fed by an mpsc channel, which serializes that thread's
-//! messages. Workers share only the store, behind a mutex, for tiny bookkeeping
-//! writes. Everything else is message passing.
+//! Design: each enabled channel has an independent loop, acknowledgement state,
+//! and queue map. Channel loops share the durable store and history behind
+//! short-lived locks. Each channel-qualified thread gets its own worker task,
+//! which serializes that thread's messages.
 
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use tokio::sync::{mpsc, watch};
+use tokio::task::{JoinHandle, JoinSet};
 use tracing::{error, info, warn};
 
 use crate::agent::{Request, RunError, Runner};
@@ -25,7 +24,7 @@ use crate::audit::{AuditEvent, AuditLog};
 use crate::channel::{Channel, RawMessage};
 use crate::claude;
 use crate::codex;
-use crate::config::{AgentBackend, Config, PermissionProfile};
+use crate::config::{AgentBackend, ChannelKind, Config, PermissionProfile, PrimaryDeliveryConfig};
 use crate::history::{DeliveryStatus, History, OutboundMessage, OutboundOrigin};
 use crate::rehydration::{self, RehydrationPrompt};
 use crate::soul;
@@ -82,6 +81,18 @@ pub struct Gateway {
     cfg: Config,
     poll_interval: Duration,
     queues: HashMap<String, mpsc::Sender<Job>>,
+    handles: Vec<JoinHandle<()>>,
+}
+
+pub struct GatewayGroup {
+    gateways: Vec<Gateway>,
+    primary_delivery: Option<PrimaryDeliveryConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrimaryDestination {
+    pub channel: String,
+    pub target: String,
 }
 
 #[derive(Default)]
@@ -90,19 +101,192 @@ struct AckState {
     completed: BTreeSet<i64>,
 }
 
+impl GatewayGroup {
+    pub fn new(cfg: Config) -> Result<Self> {
+        let enabled = cfg.enabled_channel_kinds()?;
+        let store = Arc::new(Mutex::new(Store::open(&cfg.state_path)?));
+        let history = Arc::new(Mutex::new(History::open(&cfg.database_path).with_context(
+            || format!("open canonical history database {}", cfg.database_path),
+        )?));
+        let runners = Arc::new(runners(&cfg));
+        let audit_lock = Arc::new(Mutex::new(()));
+        let mut gateways = Vec::with_capacity(enabled.len());
+        for kind in enabled {
+            gateways.push(Gateway::new_with_shared(
+                cfg.clone(),
+                kind,
+                store.clone(),
+                history.clone(),
+                runners.clone(),
+                audit_lock.clone(),
+            )?);
+        }
+        Ok(Self {
+            gateways,
+            primary_delivery: cfg.primary_delivery,
+        })
+    }
+
+    #[allow(dead_code)]
+    pub fn primary_destination(&self) -> Result<PrimaryDestination> {
+        let configured = self
+            .primary_delivery
+            .as_ref()
+            .context("primary delivery is not configured")?;
+        let kind =
+            ChannelKind::parse(&configured.channel).context("invalid primary delivery channel")?;
+        let gateway = self
+            .gateways
+            .iter()
+            .find(|gateway| gateway.channel.id() == kind.as_str())
+            .with_context(|| {
+                format!(
+                    "primary delivery channel {:?} is not enabled in channels",
+                    configured.channel
+                )
+            })?;
+        let target = gateway
+            .channel
+            .primary_target(&configured.target)
+            .context("invalid primary delivery target")?;
+        Ok(PrimaryDestination {
+            channel: kind.as_str().to_string(),
+            target,
+        })
+    }
+
+    #[allow(dead_code)]
+    pub async fn deliver_primary(&self, text: &str) -> Result<PrimaryDestination> {
+        if text.trim().is_empty() {
+            anyhow::bail!("primary delivery text cannot be empty");
+        }
+        let destination = self.primary_destination()?;
+        let gateway = self
+            .gateways
+            .iter()
+            .find(|gateway| gateway.channel.id() == destination.channel)
+            .context("resolved primary delivery channel is unavailable")?;
+        if !reply_to(&gateway.ctx, &destination.target, text).await {
+            anyhow::bail!(
+                "primary delivery to {} target {:?} failed",
+                destination.channel,
+                destination.target
+            );
+        }
+        Ok(destination)
+    }
+
+    #[allow(dead_code)]
+    pub async fn ask_user(&self, question: Question) -> Result<String> {
+        let gateway = self
+            .gateways
+            .iter()
+            .find(|gateway| gateway.channel.id() == question.channel)
+            .with_context(|| {
+                format!(
+                    "approval question channel {:?} is not enabled",
+                    question.channel
+                )
+            })?;
+        gateway.ask_user(question).await
+    }
+
+    pub async fn run(self) -> Result<()> {
+        self.run_until(shutdown_signal()).await
+    }
+
+    async fn run_until<S>(self, shutdown: S) -> Result<()>
+    where
+        S: Future<Output = ()>,
+    {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let mut tasks = JoinSet::new();
+        for gateway in self.gateways {
+            let channel = gateway.channel.id();
+            let receiver = shutdown_rx.clone();
+            tasks.spawn(async move {
+                gateway
+                    .run_with_shutdown(receiver)
+                    .await
+                    .with_context(|| format!("{channel} channel stopped"))?;
+                Ok(channel)
+            });
+        }
+        drop(shutdown_rx);
+        coordinate_channel_tasks(tasks, shutdown_tx, shutdown).await
+    }
+}
+
+async fn coordinate_channel_tasks<S>(
+    mut tasks: JoinSet<Result<&'static str>>,
+    shutdown_tx: watch::Sender<bool>,
+    shutdown: S,
+) -> Result<()>
+where
+    S: Future<Output = ()>,
+{
+    let mut active = tasks.len();
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            result = tasks.join_next(), if active > 0 => {
+                active -= 1;
+                match result {
+                    Some(Ok(Ok(channel))) => warn!("{channel} channel exited before shutdown"),
+                    Some(Ok(Err(error))) => error!("{error:#}"),
+                    Some(Err(error)) => error!("channel task failed: {error}"),
+                    None => {}
+                }
+                if active == 0 {
+                    anyhow::bail!("all enabled reply channels stopped");
+                }
+            }
+        }
+    }
+
+    let _ = shutdown_tx.send(true);
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok(Ok(channel)) => info!("{channel} channel shut down cleanly"),
+            Ok(Err(error)) => error!("{error:#}"),
+            Err(error) => error!("channel task failed during shutdown: {error}"),
+        }
+    }
+    Ok(())
+}
+
 impl Gateway {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(cfg: Config) -> Result<Self> {
         let store = Arc::new(Mutex::new(Store::open(&cfg.state_path)?));
         let history = Arc::new(Mutex::new(History::open(&cfg.database_path).with_context(
             || format!("open canonical history database {}", cfg.database_path),
         )?));
-        let ack = Arc::new(Mutex::new(AckState::default()));
         let runners = Arc::new(runners(&cfg));
-        let channel = Channel::new(&cfg)?;
-        let audit = Arc::new(AuditLog::new(
+        let kind = cfg
+            .enabled_channel_kinds()?
+            .into_iter()
+            .next()
+            .context("at least one reply channel must be enabled")?;
+        Self::new_with_shared(cfg, kind, store, history, runners, Arc::new(Mutex::new(())))
+    }
+
+    fn new_with_shared(
+        cfg: Config,
+        kind: ChannelKind,
+        store: Arc<Mutex<Store>>,
+        history: Arc<Mutex<History>>,
+        runners: Arc<HashMap<AgentBackend, Runner>>,
+        audit_lock: Arc<Mutex<()>>,
+    ) -> Result<Self> {
+        let ack = Arc::new(Mutex::new(AckState::default()));
+        let channel = Channel::new_for(&cfg, kind)?;
+        let audit = Arc::new(AuditLog::with_lock(
             cfg.audit_log_path.clone(),
             cfg.audit_log_content,
             channel.id(),
+            audit_lock,
         ));
         let ctx = Ctx {
             store: store.clone(),
@@ -131,6 +315,7 @@ impl Gateway {
             cfg,
             poll_interval,
             queues: HashMap::new(),
+            handles: Vec::new(),
         })
     }
 
@@ -165,46 +350,72 @@ impl Gateway {
     }
 
     /// Runs until SIGINT/SIGTERM, then drains in-flight runs and returns.
-    pub async fn run(mut self) -> Result<()> {
-        self.skip_backlog().await?;
+    #[allow(dead_code)]
+    pub async fn run(self) -> Result<()> {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            let _ = shutdown_tx.send(true);
+        });
+        self.run_with_shutdown(shutdown_rx).await
+    }
 
-        let mut handles: Vec<JoinHandle<()>> = Vec::new();
-        let mut ticker = tokio::time::interval(self.poll_interval);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let shutdown = shutdown_signal();
-        tokio::pin!(shutdown);
-        info!(
-            "push gateway running, polling every {:?}",
-            self.poll_interval
-        );
+    async fn run_with_shutdown(mut self, mut shutdown: watch::Receiver<bool>) -> Result<()> {
+        if let Some(result) = wait_for_channel_shutdown_or(&mut shutdown, self.skip_backlog()).await
+        {
+            result?;
+            let mut ticker = tokio::time::interval(self.poll_interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            info!(
+                "{} gateway running, polling every {:?}",
+                self.channel.id(),
+                self.poll_interval
+            );
 
-        loop {
-            let poll = async {
-                ticker.tick().await;
-                self.tick(&mut handles).await;
-            };
-            if wait_for_shutdown_or(shutdown.as_mut(), poll)
-                .await
-                .is_none()
-            {
-                info!("signal received, draining in-flight runs");
-                break;
+            loop {
+                let poll = async {
+                    ticker.tick().await;
+                    self.tick().await;
+                };
+                if wait_for_channel_shutdown_or(&mut shutdown, poll)
+                    .await
+                    .is_none()
+                {
+                    break;
+                }
             }
         }
+        info!(
+            "shutdown requested for {}, draining in-flight runs",
+            self.channel.id()
+        );
 
         // Dropping the senders lets each worker finish its current job, drain
         // its queue, and exit. Then wait, bounded by a grace period.
         self.queues.clear();
-        let drain = async {
-            for h in handles {
-                let _ = h.await;
-            }
-        };
-        if tokio::time::timeout(SHUTDOWN_GRACE, drain).await.is_err() {
-            warn!("shutdown grace expired with runs still in flight");
-        }
+        self.drain_workers().await;
         info!("shut down cleanly");
         Ok(())
+    }
+
+    async fn drain_workers(&mut self) {
+        let deadline = tokio::time::Instant::now() + SHUTDOWN_GRACE;
+        let mut workers = std::mem::take(&mut self.handles).into_iter();
+        while let Some(mut worker) = workers.next() {
+            if tokio::time::timeout_at(deadline, &mut worker)
+                .await
+                .is_err()
+            {
+                worker.abort();
+                let _ = worker.await;
+                for worker in workers {
+                    worker.abort();
+                    let _ = worker.await;
+                }
+                warn!("shutdown grace expired; remaining channel workers were aborted");
+                return;
+            }
+        }
     }
 
     async fn skip_backlog(&self) -> Result<()> {
@@ -226,25 +437,25 @@ impl Gateway {
         Ok(())
     }
 
-    async fn tick(&mut self, handles: &mut Vec<JoinHandle<()>>) {
+    async fn tick(&mut self) {
         let since = self.store.lock().unwrap().cursor(self.channel.id());
         let msgs = match self.channel.poll(since).await {
             Ok(messages) => messages,
             Err(e) => {
-                error!("poll error: {e}");
+                error!("{} poll error: {e}", self.channel.id());
                 return;
             }
         };
 
-        self.process_messages(msgs, handles).await;
+        self.process_messages(msgs).await;
     }
 
     #[cfg(test)]
-    async fn tick_fake(&mut self, msgs: Vec<RawMessage>, handles: &mut Vec<JoinHandle<()>>) {
-        self.process_messages(msgs, handles).await;
+    async fn tick_fake(&mut self, msgs: Vec<RawMessage>) {
+        self.process_messages(msgs).await;
     }
 
-    async fn process_messages(&mut self, msgs: Vec<RawMessage>, handles: &mut Vec<JoinHandle<()>>) {
+    async fn process_messages(&mut self, msgs: Vec<RawMessage>) {
         let since = self.store.lock().unwrap().cursor(self.channel.id());
         let mut max_row = 0i64;
         for m in &msgs {
@@ -333,7 +544,7 @@ impl Gateway {
                     permission: route.permission,
                     text: m.text.trim().to_string(),
                 };
-                if !self.route(job, handles).await {
+                if !self.route(job).await {
                     return;
                 }
             } else {
@@ -346,7 +557,7 @@ impl Gateway {
         }
     }
 
-    async fn route(&mut self, job: Job, handles: &mut Vec<JoinHandle<()>>) -> bool {
+    async fn route(&mut self, job: Job) -> bool {
         let row_id = job.row_id;
         let thread = job.thread.clone();
         let target = job.target.clone();
@@ -354,7 +565,7 @@ impl Gateway {
         if !self.queues.contains_key(&thread) {
             let (tx, rx) = mpsc::channel::<Job>(QUEUE_DEPTH);
             let ctx = self.ctx.clone();
-            handles.push(tokio::spawn(worker(ctx, rx)));
+            self.handles.push(tokio::spawn(worker(ctx, rx)));
             self.queues.insert(thread.clone(), tx);
         }
 
@@ -1231,14 +1442,26 @@ fn sanitize(s: &str) -> String {
         .collect()
 }
 
-async fn wait_for_shutdown_or<S, O>(shutdown: Pin<&mut S>, operation: O) -> Option<O::Output>
+async fn wait_for_channel_shutdown_or<O>(
+    shutdown: &mut watch::Receiver<bool>,
+    operation: O,
+) -> Option<O::Output>
 where
-    S: Future<Output = ()> + ?Sized,
     O: Future,
 {
-    tokio::select! {
-        _ = shutdown => None,
-        output = operation => Some(output),
+    if *shutdown.borrow() {
+        return None;
+    }
+    tokio::pin!(operation);
+    loop {
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return None;
+                }
+            }
+            output = &mut operation => return Some(output),
+        }
     }
 }
 
@@ -1328,11 +1551,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn shutdown_cancels_a_pending_poll_operation() {
-        let (send_shutdown, receive_shutdown) = tokio::sync::oneshot::channel();
-        let shutdown = async {
-            let _ = receive_shutdown.await;
-        };
-        tokio::pin!(shutdown);
+        let (send_shutdown, mut receive_shutdown) = watch::channel(false);
 
         let operation_dropped = Arc::new(AtomicBool::new(false));
         let drop_flag = operation_dropped.clone();
@@ -1342,12 +1561,12 @@ pub(crate) mod tests {
         };
         tokio::spawn(async move {
             tokio::task::yield_now().await;
-            let _ = send_shutdown.send(());
+            let _ = send_shutdown.send(true);
         });
 
         let result = tokio::time::timeout(
             Duration::from_secs(1),
-            wait_for_shutdown_or(shutdown.as_mut(), operation),
+            wait_for_channel_shutdown_or(&mut receive_shutdown, operation),
         )
         .await
         .expect("shutdown should interrupt a pending poll");
@@ -1777,21 +1996,15 @@ pub(crate) mod tests {
         let mut gateway = Gateway::new(cfg).unwrap();
         gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
 
-        let mut handles = Vec::new();
         gateway
-            .tick_fake(
-                vec![
-                    message(1, "+19998887777", "+19998887777", false, "ignore me"),
-                    message(2, "+15551234567", "+15551234567", false, "first"),
-                    message(3, "+15551234567", "+15551234567", false, "second"),
-                ],
-                &mut handles,
-            )
+            .tick_fake(vec![
+                message(1, "+19998887777", "+19998887777", false, "ignore me"),
+                message(2, "+15551234567", "+15551234567", false, "first"),
+                message(3, "+15551234567", "+15551234567", false, "second"),
+            ])
             .await;
         gateway.queues.clear();
-        for handle in handles {
-            handle.await.unwrap();
-        }
+        gateway.drain_workers().await;
 
         assert_eq!(gateway.store.lock().unwrap().last_row(), 3);
         assert_eq!(
@@ -1856,17 +2069,17 @@ pub(crate) mod tests {
         ))
         .unwrap();
         replay_gateway.ctx.runners = Arc::new(fake_runners(replay_calls.clone()));
-        let mut replay_handles = Vec::new();
         replay_gateway
-            .tick_fake(
-                vec![message(3, "+15551234567", "+15551234567", false, "second")],
-                &mut replay_handles,
-            )
+            .tick_fake(vec![message(
+                3,
+                "+15551234567",
+                "+15551234567",
+                false,
+                "second",
+            )])
             .await;
         replay_gateway.queues.clear();
-        for handle in replay_handles {
-            handle.await.unwrap();
-        }
+        replay_gateway.drain_workers().await;
 
         assert!(replay_gateway.ctx.sent_replies.lock().unwrap().is_empty());
         assert!(replay_calls.lock().unwrap().is_empty());
@@ -2314,16 +2527,11 @@ pub(crate) mod tests {
             .lock()
             .unwrap()
             .execute_batch_for_test("DROP TABLE messages");
-        let mut handles = Vec::new();
-
         gateway
-            .tick_fake(
-                vec![message(1, "me@icloud.com", "", true, "hello")],
-                &mut handles,
-            )
+            .tick_fake(vec![message(1, "me@icloud.com", "", true, "hello")])
             .await;
 
-        assert!(handles.is_empty());
+        assert!(gateway.handles.is_empty());
         assert!(calls.lock().unwrap().is_empty());
         assert!(gateway.ctx.sent_replies.lock().unwrap().is_empty());
         assert_eq!(gateway.store.lock().unwrap().cursor("imessage"), 0);
@@ -2367,18 +2575,11 @@ pub(crate) mod tests {
         drop(history);
         let mut gateway = Gateway::new(config).unwrap();
         gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
-        let mut handles = Vec::new();
-
         gateway
-            .tick_fake(
-                vec![message(1, "me@icloud.com", "", true, "hello")],
-                &mut handles,
-            )
+            .tick_fake(vec![message(1, "me@icloud.com", "", true, "hello")])
             .await;
         gateway.queues.clear();
-        for handle in handles {
-            handle.await.unwrap();
-        }
+        gateway.drain_workers().await;
 
         assert!(calls.lock().unwrap().is_empty());
         assert_eq!(
@@ -2435,18 +2636,11 @@ pub(crate) mod tests {
                     .set_path_for_test(broken_state_path.clone());
             })),
         ));
-        let mut handles = Vec::new();
-
         gateway
-            .tick_fake(
-                vec![message(1, "me@icloud.com", "", true, "hello")],
-                &mut handles,
-            )
+            .tick_fake(vec![message(1, "me@icloud.com", "", true, "hello")])
             .await;
         gateway.queues.clear();
-        for handle in handles {
-            handle.await.unwrap();
-        }
+        gateway.drain_workers().await;
 
         assert_eq!(first_calls.lock().unwrap().len(), 1);
         assert!(gateway.ctx.sent_replies.lock().unwrap().is_empty());
@@ -2484,17 +2678,11 @@ pub(crate) mod tests {
         ))
         .unwrap();
         restarted.ctx.runners = Arc::new(fake_runners(second_calls.clone()));
-        let mut handles = Vec::new();
         restarted
-            .tick_fake(
-                vec![message(1, "me@icloud.com", "", true, "hello")],
-                &mut handles,
-            )
+            .tick_fake(vec![message(1, "me@icloud.com", "", true, "hello")])
             .await;
         restarted.queues.clear();
-        for handle in handles {
-            handle.await.unwrap();
-        }
+        restarted.drain_workers().await;
 
         assert!(second_calls.lock().unwrap().is_empty());
         assert_eq!(
@@ -2529,18 +2717,11 @@ pub(crate) mod tests {
         .unwrap();
         gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
         *gateway.ctx.send_failures_remaining.lock().unwrap() = DELIVERY_ATTEMPTS;
-        let mut handles = Vec::new();
-
         gateway
-            .tick_fake(
-                vec![message(1, "me@icloud.com", "", true, "hello")],
-                &mut handles,
-            )
+            .tick_fake(vec![message(1, "me@icloud.com", "", true, "hello")])
             .await;
         gateway.queues.clear();
-        for handle in handles {
-            handle.await.unwrap();
-        }
+        gateway.drain_workers().await;
 
         assert_eq!(calls.lock().unwrap().len(), 1);
         assert_eq!(gateway.ctx.sent_replies.lock().unwrap().len(), 1);
@@ -2597,21 +2778,15 @@ pub(crate) mod tests {
         let mut gateway = Gateway::new(cfg).unwrap();
         gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
 
-        let mut handles = Vec::new();
         gateway
-            .tick_fake(
-                vec![
-                    telegram_message(10, 8, 8, false, "ignore me"),
-                    telegram_message(11, 7, 7, false, "hello"),
-                    telegram_message(12, 7, -100, true, "group"),
-                ],
-                &mut handles,
-            )
+            .tick_fake(vec![
+                telegram_message(10, 8, 8, false, "ignore me"),
+                telegram_message(11, 7, 7, false, "hello"),
+                telegram_message(12, 7, -100, true, "group"),
+            ])
             .await;
         gateway.queues.clear();
-        for handle in handles {
-            handle.await.unwrap();
-        }
+        gateway.drain_workers().await;
 
         assert_eq!(gateway.store.lock().unwrap().cursor("telegram"), 12);
         assert_eq!(calls.lock().unwrap().len(), 1);
@@ -2649,17 +2824,14 @@ pub(crate) mod tests {
 
         let mut topic_message = telegram_message(20, 7, 7, false, "in topic");
         topic_message.thread_id = Some(99);
-        let mut handles = Vec::new();
         gateway
-            .tick_fake(
-                vec![topic_message, telegram_message(21, 7, 7, false, "in main")],
-                &mut handles,
-            )
+            .tick_fake(vec![
+                topic_message,
+                telegram_message(21, 7, 7, false, "in main"),
+            ])
             .await;
         gateway.queues.clear();
-        for handle in handles {
-            handle.await.unwrap();
-        }
+        gateway.drain_workers().await;
 
         assert_eq!(calls.lock().unwrap().len(), 2);
         assert!(calls.lock().unwrap().iter().all(|call| call.is_new));
@@ -2680,9 +2852,227 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(assistant_dir);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn enabled_channels_process_concurrently_with_isolated_state_and_origin_replies() {
+        let state_path = temp_state_path();
+        let sessions_dir = temp_path("multi-channel-sessions");
+        let assistant_dir = temp_path("multi-channel-assistant");
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut cfg = test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        );
+        cfg.channels = vec!["imessage".to_string(), "telegram".to_string()];
+        cfg.telegram_bot_token = Some("secret".to_string());
+        cfg.telegram_allow_user_ids = vec![7];
+        let mut group = GatewayGroup::new(cfg).unwrap();
+        for gateway in &mut group.gateways {
+            gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+        }
+
+        let (imessage, telegram) = group.gateways.split_at_mut(1);
+        tokio::join!(
+            imessage[0].tick_fake(vec![message(
+                5,
+                "+15551234567",
+                "+15551234567",
+                false,
+                "from imessage"
+            )],),
+            telegram[0].tick_fake(vec![telegram_message(5, 7, 7, false, "from telegram")])
+        );
+        imessage[0].queues.clear();
+        telegram[0].queues.clear();
+        tokio::join!(imessage[0].drain_workers(), telegram[0].drain_workers());
+
+        let store = imessage[0].store.lock().unwrap();
+        assert_eq!(store.cursor("imessage"), 5);
+        assert_eq!(store.cursor("telegram"), 5);
+        drop(store);
+        assert_eq!(
+            imessage[0].ctx.sent_replies.lock().unwrap().as_slice(),
+            [(
+                "+15551234567".to_string(),
+                "fake reply: from imessage\n\n-- sent by push".to_string()
+            )]
+        );
+        assert_eq!(
+            telegram[0].ctx.sent_replies.lock().unwrap().as_slice(),
+            [("7".to_string(), "fake reply: from telegram".to_string())]
+        );
+        let prompts = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.prompt.clone())
+            .collect::<Vec<_>>();
+        assert!(prompts.contains(&"from imessage".to_string()));
+        assert!(prompts.contains(&"from telegram".to_string()));
+        let persisted = std::fs::read_to_string(&state_path).unwrap();
+        assert!(persisted.contains("imessage:dm:+15551234567"));
+        assert!(persisted.contains("telegram:dm:7"));
+
+        let _ = std::fs::remove_file(&state_path);
+        let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+        let _ = std::fs::remove_dir_all(sessions_dir);
+        let _ = std::fs::remove_dir_all(assistant_dir);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn primary_delivery_is_scoped_validated_and_non_fatal_when_missing_or_invalid() {
+        let state_path = temp_state_path();
+        let sessions_dir = temp_path("primary-sessions");
+        let assistant_dir = temp_path("primary-assistant");
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        let mut cfg = test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        );
+        cfg.channels = vec!["imessage".to_string(), "telegram".to_string()];
+        cfg.telegram_bot_token = Some("secret".to_string());
+        cfg.telegram_allow_user_ids = vec![7];
+
+        let missing = GatewayGroup::new(cfg.clone()).unwrap();
+        assert!(missing
+            .primary_destination()
+            .unwrap_err()
+            .to_string()
+            .contains("not configured"));
+
+        cfg.primary_delivery = Some(PrimaryDeliveryConfig {
+            channel: "telegram".to_string(),
+            target: "99".to_string(),
+        });
+        let invalid = GatewayGroup::new(cfg.clone()).unwrap();
+        assert!(invalid
+            .primary_destination()
+            .unwrap_err()
+            .to_string()
+            .contains("invalid primary delivery target"));
+
+        cfg.primary_delivery = Some(PrimaryDeliveryConfig {
+            channel: "telegram".to_string(),
+            target: "7:42".to_string(),
+        });
+        let valid = GatewayGroup::new(cfg).unwrap();
+        let destination = valid.deliver_primary("scheduled result").await.unwrap();
+        assert_eq!(
+            destination,
+            PrimaryDestination {
+                channel: "telegram".to_string(),
+                target: "7:42".to_string(),
+            }
+        );
+        let telegram = valid
+            .gateways
+            .iter()
+            .find(|gateway| gateway.channel.id() == "telegram")
+            .unwrap();
+        assert_eq!(
+            telegram.ctx.sent_replies.lock().unwrap().as_slice(),
+            [("7:42".to_string(), "scheduled result".to_string())]
+        );
+
+        let _ = std::fs::remove_file(&state_path);
+        let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+        let _ = std::fs::remove_dir_all(sessions_dir);
+        let _ = std::fs::remove_dir_all(assistant_dir);
+    }
+
+    #[tokio::test]
+    async fn one_channel_failure_does_not_stop_another_and_shutdown_reaches_survivor() {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let healthy_started = Arc::new(AtomicBool::new(false));
+        let healthy_stopped = Arc::new(AtomicBool::new(false));
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async { anyhow::bail!("imessage rate limited") });
+        let started = healthy_started.clone();
+        let stopped = healthy_stopped.clone();
+        tasks.spawn(async move {
+            let mut shutdown = shutdown_rx;
+            started.store(true, Ordering::SeqCst);
+            shutdown.changed().await.unwrap();
+            stopped.store(true, Ordering::SeqCst);
+            Ok("telegram")
+        });
+        let shutdown = async {
+            while !healthy_started.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+            tokio::task::yield_now().await;
+        };
+
+        coordinate_channel_tasks(tasks, shutdown_tx, shutdown)
+            .await
+            .unwrap();
+
+        assert!(healthy_stopped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn group_shutdown_waits_for_an_in_flight_channel_worker() {
+        let state_path = temp_state_path();
+        let sessions_dir = temp_path("group-drain-sessions");
+        let assistant_dir = temp_path("group-drain-assistant");
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        let started = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+        let started_hook = started.clone();
+        let finished_hook = finished.clone();
+        let hook = Arc::new(move || {
+            started_hook.store(true, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(50));
+            finished_hook.store(true, Ordering::SeqCst);
+        });
+        let mut group = GatewayGroup::new(test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        ))
+        .unwrap();
+        group.gateways[0].ctx.runners = Arc::new(fake_runners_with_hook(
+            Arc::new(Mutex::new(Vec::new())),
+            Some(hook),
+        ));
+        group.gateways[0]
+            .tick_fake(vec![message(
+                1,
+                "+15551234567",
+                "+15551234567",
+                false,
+                "finish during shutdown",
+            )])
+            .await;
+        while !started.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+        group.gateways[0]
+            .store
+            .lock()
+            .unwrap()
+            .set_cursor("imessage", 1)
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), group.run_until(async {}))
+            .await
+            .expect("group shutdown should remain bounded")
+            .unwrap();
+
+        assert!(finished.load(Ordering::SeqCst));
+        let _ = std::fs::remove_file(&state_path);
+        let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+        let _ = std::fs::remove_dir_all(sessions_dir);
+        let _ = std::fs::remove_dir_all(assistant_dir);
+    }
+
     fn test_config(state_path: &str, sessions_dir: &str, assistant_dir: &str) -> Config {
         Config {
             channel: "imessage".to_string(),
+            channels: Vec::new(),
+            primary_delivery: None,
             db_path: "fake-chat.db".to_string(),
             poll_interval: "1s".to_string(),
             run_timeout: "1s".to_string(),
@@ -2753,12 +3143,9 @@ pub(crate) mod tests {
     }
 
     async fn run_messages(gateway: &mut Gateway, messages: Vec<RawMessage>) {
-        let mut handles = Vec::new();
-        gateway.tick_fake(messages, &mut handles).await;
+        gateway.tick_fake(messages).await;
         gateway.queues.clear();
-        for handle in handles {
-            handle.await.unwrap();
-        }
+        gateway.drain_workers().await;
     }
 
     fn approval_question(
