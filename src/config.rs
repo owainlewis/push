@@ -32,8 +32,6 @@ pub struct Config {
     pub agent: String,
     #[serde(default)]
     pub routes: Vec<RouteRule>,
-    #[serde(default)]
-    pub assistant: AssistantProfile,
     #[serde(default = "default_claude_bin")]
     pub claude_bin: String,
     #[serde(default = "default_claude_permission_mode", alias = "permission_mode")]
@@ -74,6 +72,11 @@ impl Config {
         let root = value
             .as_table_mut()
             .context("config must be a TOML table")?;
+        if root.contains_key("assistant") {
+            bail!(
+                "structured [assistant] settings are no longer supported; move assistant identity into assistant_dir/SOUL.md"
+            );
+        }
         flatten_provider_section(
             root,
             "imessage",
@@ -278,20 +281,6 @@ fn flatten_provider_section(
     Ok(())
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
-pub struct AssistantProfile {
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub tone: String,
-    #[serde(default)]
-    pub business: String,
-    #[serde(default)]
-    pub projects: Vec<String>,
-    #[serde(default)]
-    pub preferences: Vec<String>,
-}
-
 #[derive(Debug, Deserialize, Clone)]
 pub struct RouteRule {
     #[serde(default)]
@@ -426,7 +415,7 @@ fn default_audit_log_path() -> String {
     "~/.push/audit.jsonl".to_string()
 }
 fn default_assistant_dir() -> String {
-    "./assistant".to_string()
+    "~/.push".to_string()
 }
 fn default_reply_marker() -> String {
     "\n\n-- sent by push".to_string()

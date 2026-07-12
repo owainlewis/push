@@ -13,7 +13,7 @@ pub struct Request<'a> {
     pub session_id: &'a str,
     pub is_new: bool,
     pub work_dir: &'a str,
-    pub system_append: &'a str,
+    pub instructions: &'a str,
     pub prompt: &'a str,
 }
 
