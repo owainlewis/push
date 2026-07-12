@@ -201,10 +201,22 @@ each inbound message to its outbound response preserves the generation/delivery
 crash boundary. SQLite history does not replace `state.json` cursors or backend
 session IDs in this phase.
 
+The same database stores `ask_user` questions before delivery. Each question
+has a UUID correlation id, two to nine bounded choices, an expiry, delivery
+state, and an exact channel, sender, chat, and thread/topic binding. Inbound
+numbered replies pass the normal allowlist first, then resolve transactionally
+to one normalized value. The workflow consumes an answer at most once. Pending
+questions survive restart; cancellation and expiry are terminal, and rejected
+or duplicate answer attempts are audited without reaching a backend session or
+the rehydrated conversation transcript. Workflows can poll the durable question
+state and consume an answered value once; crossing the expiry first records an
+expired terminal state, so later cancellation cannot overwrite the timeout.
+
 `audit_log_path` stores a local JSONL event stream for production debugging.
-Audit events record message metadata, routing decisions, backend run starts and
-failures, reply delivery metadata, and row completion. Message and reply text
-are redacted by default; `audit_log_content` opts into content logging.
+Audit events record message metadata, routing decisions, approval outcomes,
+backend run starts and failures, reply delivery metadata, and row completion.
+Message and reply text are redacted by default; `audit_log_content` opts into
+content logging.
 
 ## Assistant Identity
 

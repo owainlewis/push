@@ -3,6 +3,7 @@
 //! coding-agent backend, and texts the reply back.
 
 mod agent;
+mod approval;
 mod audit;
 mod channel;
 mod claude;
