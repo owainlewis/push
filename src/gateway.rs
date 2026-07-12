@@ -26,6 +26,7 @@ use crate::claude;
 use crate::codex;
 use crate::config::{AgentBackend, ChannelKind, Config, PermissionProfile, PrimaryDeliveryConfig};
 use crate::history::{DeliveryStatus, History, OutboundMessage, OutboundOrigin};
+use crate::jobs;
 use crate::rehydration::{self, RehydrationPrompt};
 use crate::soul;
 use crate::store::Store;
@@ -87,6 +88,7 @@ pub struct Gateway {
 pub struct GatewayGroup {
     gateways: Vec<Gateway>,
     primary_delivery: Option<PrimaryDeliveryConfig>,
+    cfg: Config,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,7 +125,8 @@ impl GatewayGroup {
         }
         Ok(Self {
             gateways,
-            primary_delivery: cfg.primary_delivery,
+            primary_delivery: cfg.primary_delivery.clone(),
+            cfg,
         })
     }
 
@@ -200,6 +203,23 @@ impl GatewayGroup {
         S: Future<Output = ()>,
     {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let scheduler = match self.primary_destination() {
+            Ok(destination) => {
+                jobs::Scheduler::new(self.cfg.clone(), destination.channel, destination.target)
+            }
+            Err(error) => {
+                warn!("scheduled jobs disabled: {error:#}");
+                jobs::Scheduler::delivery_only(self.cfg.clone())
+            }
+        };
+        let contexts = self
+            .gateways
+            .iter()
+            .map(|gateway| (gateway.channel.id().to_string(), gateway.ctx.clone()))
+            .collect::<HashMap<_, _>>();
+        let receiver = shutdown_rx.clone();
+        let scheduler =
+            tokio::spawn(async move { run_scheduler(scheduler, contexts, receiver).await });
         let mut tasks = JoinSet::new();
         for gateway in self.gateways {
             let channel = gateway.channel.id();
@@ -213,8 +233,56 @@ impl GatewayGroup {
             });
         }
         drop(shutdown_rx);
-        coordinate_channel_tasks(tasks, shutdown_tx, shutdown).await
+        let result = coordinate_channel_tasks(tasks, shutdown_tx, shutdown).await;
+        match scheduler.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => error!("job scheduler stopped: {error:#}"),
+            Err(error) => error!("job scheduler task failed: {error}"),
+        }
+        result
     }
+}
+
+async fn run_scheduler(
+    mut scheduler: jobs::Scheduler,
+    contexts: HashMap<String, Ctx>,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<()> {
+    let contexts = Arc::new(contexts);
+    let mut ticker = tokio::time::interval(Duration::from_secs(1));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+            }
+            _ = ticker.tick() => {
+                let contexts = contexts.clone();
+                if let Err(error) = scheduler.tick(now_ms(), move |channel, target, text| {
+                    let contexts = contexts.clone();
+                    async move {
+                        let ctx = contexts.get(&channel).with_context(|| {
+                            format!("persisted delivery channel {channel:?} is not enabled")
+                        })?;
+                        let target = ctx.channel.primary_target(&target).context(
+                            "persisted delivery target is no longer allowlisted",
+                        )?;
+                        if reply_to(ctx, &target, &text).await {
+                            Ok(())
+                        } else {
+                            anyhow::bail!("delivery to {channel} target {target:?} failed")
+                        }
+                    }
+                }).await {
+                    error!("job scheduler tick failed: {error:#}");
+                }
+            }
+        }
+    }
+    scheduler.shutdown().await;
+    Ok(())
 }
 
 async fn coordinate_channel_tasks<S>(
@@ -2983,6 +3051,57 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn missing_primary_disables_new_schedules_without_stopping_gateway() {
+        let state_path = temp_state_path();
+        let sessions_dir = temp_path("missing-primary-sessions");
+        let assistant_dir = temp_path("missing-primary-assistant");
+        let jobs_dir = temp_path("missing-primary-jobs");
+        let workdir = temp_path("missing-primary-work");
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        std::fs::create_dir_all(&jobs_dir).unwrap();
+        std::fs::create_dir_all(&workdir).unwrap();
+        let mut cfg = test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        );
+        cfg.jobs_dir = jobs_dir.to_string_lossy().to_string();
+        std::fs::write(
+            jobs_dir.join("disabled.md"),
+            format!(
+                "+++\nversion = 1\npermission_profile = \"restricted\"\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"codex\"\n\n[[triggers]]\nid = \"minute\"\nkind = \"cron\"\nschedule = \"* * * * *\"\ntimezone = \"UTC\"\nenabled = true\n+++\n\nRun.\n",
+                workdir.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let group = GatewayGroup::new(cfg.clone()).unwrap();
+        group.gateways[0]
+            .store
+            .lock()
+            .unwrap()
+            .set_cursor("imessage", 1)
+            .unwrap();
+
+        group
+            .run_until(tokio::time::sleep(Duration::from_millis(50)))
+            .await
+            .unwrap();
+
+        let rows = crate::jobs::Ledger::open(&cfg.database_path)
+            .unwrap()
+            .runs(Some("disabled"))
+            .unwrap();
+        assert!(rows.is_empty());
+        let _ = std::fs::remove_file(&state_path);
+        let _ = std::fs::remove_file(format!("{state_path}.db"));
+        let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+        let _ = std::fs::remove_dir_all(sessions_dir);
+        let _ = std::fs::remove_dir_all(assistant_dir);
+        let _ = std::fs::remove_dir_all(jobs_dir);
+        let _ = std::fs::remove_dir_all(workdir);
+    }
+
+    #[tokio::test]
     async fn one_channel_failure_does_not_stop_another_and_shutdown_reaches_survivor() {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let healthy_started = Arc::new(AtomicBool::new(false));
@@ -3091,6 +3210,7 @@ pub(crate) mod tests {
             jobs_agent: None,
             jobs_max_timeout: "30m".to_string(),
             jobs_run_dir: format!("{state_path}.run"),
+            jobs_max_workers: 2,
             claude_bin: "claude".to_string(),
             codex_bin: "codex".to_string(),
             codex_model: None,

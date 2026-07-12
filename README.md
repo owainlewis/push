@@ -237,6 +237,7 @@ jobs_dir = "~/.push/jobs"
 jobs_agent = "codex"
 jobs_max_timeout = "30m"
 jobs_run_dir = "~/.push/run"
+jobs_max_workers = 2
 
 [permission_profiles.research]
 capability = "read-only"
@@ -380,8 +381,31 @@ for its full lifetime. An overlap is recorded as `skipped_overlap`. Once the
 lock is released, the next start safely marks a stale `running` manual claim as
 failed before claiming a new run. Results and diagnostics are bounded and
 remain visible through `push job runs`; manual results are printed to the
-terminal and are never proactively sent to a chat. Scheduling is not enabled in
-this release.
+terminal and are never proactively sent to a chat.
+
+Add one or more cron triggers to schedule a job. Cron uses five fields and an
+explicit IANA timezone:
+
+```toml
+[[triggers]]
+id = "weekday-morning"
+kind = "cron"
+schedule = "0 8 * * 1-5"
+timezone = "Europe/London"
+enabled = true
+```
+
+Scheduling starts only when `primary_delivery` resolves to an enabled,
+allowlisted destination. Missing or invalid primary delivery disables cron
+without affecting replies or manual jobs. The gateway runs at most
+`jobs_max_workers` scheduled jobs concurrently. It does not catch up occurrences
+missed while offline, and daylight-saving gaps are skipped while repeated local
+times run once at their first instant.
+
+Scheduled state and bounded output are persisted before delivery. Success,
+failure, timeout, overlap, and delivery state remain separate in
+`push job runs`. Delivery retries up to three times with backoff from the stored
+result, including after restart, and never reruns the backend.
 
 push reads TOML only. Convert any earlier `config.json` file to `config.toml`
 before upgrading. The old JSON filename remains gitignored to reduce the risk

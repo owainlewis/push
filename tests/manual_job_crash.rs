@@ -57,6 +57,21 @@ printf '%s\n' '{"type":"thread.started","thread_id":"cli-thread"}'
     assert!(stdout(&history).contains("\tcrash-test\tsucceeded\tcodex\t"));
     assert!(stdout(&history).contains("cli result"));
 
+    Connection::open(&database)
+        .unwrap()
+        .execute(
+            "UPDATE job_runs SET delivery_state = 'failed', delivery_attempts = 3,
+                delivery_error = 'delivery boom', delivery_channel = 'telegram',
+                delivery_target = '7' WHERE job_name = 'crash-test'",
+            [],
+        )
+        .unwrap();
+    let failed_delivery = run_cli(binary, &config, &["job", "runs", "crash-test"]);
+    let failed_output = stdout(&failed_delivery);
+    assert!(failed_output.contains("cli result"));
+    assert!(failed_output.contains("delivery boom"));
+    assert!(failed_output.contains("failed(3)\ttelegram:7"));
+
     std::fs::write(jobs.join("invalid.md"), "not a runbook").unwrap();
     let invalid = run_cli(binary, &config, &["job", "validate"]);
     assert!(!invalid.status.success());
