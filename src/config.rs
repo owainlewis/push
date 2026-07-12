@@ -56,6 +56,8 @@ pub struct Config {
     pub state_path: String,
     #[serde(default = "default_audit_log_path")]
     pub audit_log_path: String,
+    #[serde(default = "default_database_path")]
+    pub database_path: String,
     #[serde(default)]
     pub audit_log_content: bool,
     #[serde(default = "default_assistant_dir")]
@@ -101,6 +103,7 @@ impl Config {
         c.sessions_dir = expand_home(&c.sessions_dir);
         c.state_path = expand_home(&c.state_path);
         c.audit_log_path = expand_home(&c.audit_log_path);
+        c.database_path = expand_home(&c.database_path);
         c.assistant_dir = expand_home(&c.assistant_dir);
         c.validate()?;
         Ok(c)
@@ -413,6 +416,9 @@ fn default_state_path() -> String {
 }
 fn default_audit_log_path() -> String {
     "~/.push/audit.jsonl".to_string()
+}
+fn default_database_path() -> String {
+    "~/.push/push.db".to_string()
 }
 fn default_assistant_dir() -> String {
     "~/.push".to_string()

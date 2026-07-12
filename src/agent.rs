@@ -85,6 +85,7 @@ pub struct FakeRunner {
     pub backend: AgentBackend,
     pub session_id: String,
     pub calls: std::sync::Arc<std::sync::Mutex<Vec<FakeRunCall>>>,
+    pub before_return: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 }
 
 #[cfg(test)]
@@ -103,6 +104,9 @@ impl FakeRunner {
             is_new: req.is_new,
             prompt: req.prompt.to_string(),
         });
+        if let Some(before_return) = &self.before_return {
+            before_return();
+        }
         Ok(RunOutput {
             reply: format!("fake reply: {}", req.prompt),
             session_id: req.is_new.then(|| self.session_id.clone()),

@@ -15,10 +15,11 @@ iMessage or Telegram -> push gateway -> Claude Code or Codex -> same-channel rep
 
 1. Poll `~/Library/Messages/chat.db` or the Telegram Bot API for new messages.
 2. Keep only messages from yourself or configured allowed senders.
-3. Map each conversation to the active backend session.
-4. Load your assistant identity from `~/.push/SOUL.md`.
-5. Run the configured backend headlessly.
-6. Send the final answer back to the originating channel and conversation.
+3. Store the accepted message in `~/.push/push.db`.
+4. Map each conversation to the active backend session.
+5. Load your assistant identity from `~/.push/SOUL.md`.
+6. Run the configured backend headlessly.
+7. Store the generated reply, then deliver it to the originating conversation.
 
 Identity is plain Markdown you own. The gateway injects it into each run, so
 you can read it, edit it, and version it without learning a custom format.
@@ -132,6 +133,15 @@ formatting, and email handles are matched case-insensitively.
 restart, push resumes after the last completed row and keeps existing backend
 sessions when the selected backend has not changed.
 
+`push.db` is the canonical conversation journal. It stores accepted inbound
+messages before command or backend work, and stores generated outbound messages
+before delivery. Channel event IDs make inbound retries idempotent, while one
+outbound row per inbound turn prevents a restart from generating a second
+assistant response. Cursors and backend session IDs remain in `state.json`.
+If the process stops after a channel accepts a reply but before SQLite records
+delivery, restart may resend the same stored reply; it still does not generate
+a different second response.
+
 ## Telegram Support
 
 Telegram uses Bot API long polling, so push opens no public port and needs no
@@ -204,6 +214,7 @@ codex_sandbox = "workspace-write"
 codex_approval_policy = "never"
 audit_log_path = "~/.push/audit.jsonl"
 audit_log_content = false
+database_path = "~/.push/push.db"
 assistant_dir = "~/.push"
 
 [imessage]
