@@ -1,6 +1,7 @@
 # push Architecture
 
-push is one local Rust process. It polls iMessage or Telegram, filters messages,
+push is one local Rust process. It polls one or more configured iMessage and
+Telegram channels, filters messages,
 loads the assistant identity, runs a configured agent backend, and sends the
 final reply.
 
@@ -192,6 +193,18 @@ now means "backend session id".
 
 If the configured backend changes for a thread, push starts a fresh backend
 session instead of trying to resume the old runtime's session.
+
+With advanced `channels = ["imessage", "telegram"]` configuration, one
+coordinator starts an independent polling loop, acknowledgement tracker, and
+thread queue map for each enabled provider. The loops share one locked state
+store, canonical history database, backend runner set, and serialized audit log.
+One provider can fail or rate-limit without cancelling the other. A shared
+shutdown signal cancels pending polls and lets every channel drain its workers.
+Replies remain bound to the originating loop and exact target.
+
+Optional `primary_delivery` selects one enabled, allowlisted channel target for
+proactive output. Resolution is lazy: an absent or invalid primary returns a
+scoped error to the proactive caller without affecting reply polling.
 
 `push.db` stores channel-qualified conversations and their inbound and outbound
 messages. Accepted inbound messages are inserted before gateway commands or

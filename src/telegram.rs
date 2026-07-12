@@ -151,6 +151,11 @@ impl Telegram {
                 .is_some_and(|id| self.allow_chat_ids.contains(&id))
     }
 
+    #[allow(dead_code)]
+    pub fn allows_target(&self, chat_id: i64) -> bool {
+        self.allow_user_ids.contains(&chat_id) || self.allow_chat_ids.contains(&chat_id)
+    }
+
     pub async fn send_rich(&self, target: &str, text: &str) -> Result<()> {
         let mut payload = target_payload(target);
         payload["rich_message"] = json!({"markdown": text});

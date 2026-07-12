@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 
 use crate::config::{ChannelKind, Config};
 use crate::imessage::{Poller as IMessagePoller, Sender as IMessageSender};
@@ -48,8 +48,13 @@ pub enum Channel {
 }
 
 impl Channel {
+    #[allow(dead_code)]
     pub fn new(cfg: &Config) -> Result<Self> {
-        match cfg.channel_kind()? {
+        Self::new_for(cfg, cfg.channel_kind()?)
+    }
+
+    pub fn new_for(cfg: &Config, kind: ChannelKind) -> Result<Self> {
+        match kind {
             ChannelKind::IMessage => Ok(Self::IMessage {
                 poller: IMessagePoller::new(cfg.db_path.clone()),
                 sender: IMessageSender::new(),
@@ -71,6 +76,62 @@ impl Channel {
                 cfg.telegram_allow_user_ids.clone(),
                 cfg.telegram_allow_chat_ids.clone(),
             ))),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn primary_target(&self, configured: &str) -> Result<String> {
+        if configured.trim().is_empty() {
+            bail!("primary delivery target cannot be empty");
+        }
+        match self {
+            Self::IMessage {
+                self_set,
+                allow_set,
+                ..
+            } => {
+                let normalized = normalize_handle(configured);
+                self_set
+                    .get(&normalized)
+                    .or_else(|| allow_set.get(&normalized))
+                    .cloned()
+                    .with_context(|| {
+                        format!(
+                            "iMessage primary target {configured:?} is not in imessage.self_handles or imessage.allow_from"
+                        )
+                    })
+            }
+            Self::Telegram(telegram) => {
+                let (chat, topic) = configured
+                    .trim()
+                    .split_once(':')
+                    .map_or((configured.trim(), None), |(chat, topic)| {
+                        (chat, Some(topic))
+                    });
+                let chat_id = chat
+                    .parse::<i64>()
+                    .with_context(|| format!("invalid Telegram primary chat id {chat:?}"))?;
+                if !telegram.allows_target(chat_id) {
+                    bail!(
+                        "Telegram primary chat id {chat_id} is not in telegram.allow_user_ids or telegram.allow_chat_ids"
+                    );
+                }
+                match topic {
+                    None => Ok(chat_id.to_string()),
+                    Some(value) => {
+                        if value.contains(':') {
+                            bail!("invalid Telegram primary target {configured:?}");
+                        }
+                        let topic_id = value.parse::<i64>().with_context(|| {
+                            format!("invalid Telegram primary topic id {value:?}")
+                        })?;
+                        if topic_id <= 0 {
+                            bail!("Telegram primary topic id must be positive");
+                        }
+                        Ok(format!("{chat_id}:{topic_id}"))
+                    }
+                }
+            }
         }
     }
 
