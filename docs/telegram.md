@@ -80,7 +80,9 @@ state.
 
 ## Cursor and Restart Behavior
 
-`state.json` stores independent `imessage` and `telegram` cursors. On the first
+`state.json` stores independent `imessage` and `telegram` cursors. `push.db`
+stores channel-qualified canonical conversations, so Telegram and iMessage
+history cannot collide. On the first
 Telegram start, push asks Telegram for the newest pending update and records its
 id without running it. This explicit backlog skip prevents old bot messages
 from unexpectedly starting agent work. Later accepted and ignored updates
@@ -101,6 +103,7 @@ Protect these files as credentials or private assistant data:
 
 - the bot token and configuration
 - `state.json` and the audit log
+- `push.db`
 - the session workspace directory
 - `assistant_dir/SOUL.md`
 
