@@ -22,7 +22,7 @@ Use absolute paths in service files. The service user needs:
 - write access to `state_path`
 - write access to `audit_log_path`
 - write access to `sessions_dir`
-- read access to `assistant_dir`
+- read access to `assistant_dir/SOUL.md` when custom identity is configured
 - access to `claude` or `codex` on `PATH`
 - backend login, tokens, settings, MCP config, and project credentials
 - for iMessage on macOS, Full Disk Access and `osascript`

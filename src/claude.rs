@@ -68,8 +68,8 @@ impl Runner {
         } else {
             cmd.arg("--resume").arg(req.session_id);
         }
-        if !req.system_append.trim().is_empty() {
-            cmd.arg("--append-system-prompt").arg(req.system_append);
+        if !req.instructions.trim().is_empty() {
+            cmd.arg("--append-system-prompt").arg(req.instructions);
         }
         if let Some(tools) = &self.tools {
             cmd.arg("--tools");
@@ -194,7 +194,7 @@ mod tests {
                     session_id: "push-session",
                     is_new: true,
                     work_dir: work_dir.to_str().unwrap(),
-                    system_append: "assistant context",
+                    instructions: "assistant identity",
                     prompt: "hello",
                 },
                 Duration::from_secs(5),
@@ -207,7 +207,8 @@ mod tests {
         let args = read_args(&args_path);
         assert_arg_pair(&args, "--session-id", "push-session");
         assert_arg_pair(&args, "--permission-mode", "bypassPermissions");
-        assert_arg_pair(&args, "--append-system-prompt", "assistant context");
+        assert_arg_pair(&args, "--append-system-prompt", "assistant identity");
+        assert_arg_pair(&args, "-p", "hello");
         assert_arg_pair(&args, "--tools", "Read");
         assert_arg_pair(&args, "--allowed-tools", "Read");
         assert_arg_pair(&args, "--disallowed-tools", "Edit");
@@ -239,7 +240,7 @@ mod tests {
                     session_id: "existing-session",
                     is_new: false,
                     work_dir: work_dir.to_str().unwrap(),
-                    system_append: "",
+                    instructions: "assistant identity",
                     prompt: "continue",
                 },
                 Duration::from_secs(5),
@@ -251,7 +252,8 @@ mod tests {
         let args = read_args(&args_path);
         assert_arg_pair(&args, "--resume", "existing-session");
         assert!(!args.contains(&"--session-id".to_string()));
-        assert!(!args.contains(&"--append-system-prompt".to_string()));
+        assert_arg_pair(&args, "--append-system-prompt", "assistant identity");
+        assert_arg_pair(&args, "-p", "continue");
     }
 
     #[tokio::test]
@@ -311,7 +313,7 @@ mod tests {
             session_id: "session",
             is_new: true,
             work_dir,
-            system_append: "",
+            instructions: "",
             prompt: "hello",
         }
     }
@@ -432,7 +434,7 @@ mod tests {
             session_id: "contract-session".to_string(),
             is_new,
             work_dir,
-            system_append: String::new(),
+            instructions: String::new(),
             prompt: "hello".to_string(),
         }
     }

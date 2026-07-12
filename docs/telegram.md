@@ -102,9 +102,9 @@ Protect these files as credentials or private assistant data:
 - the bot token and configuration
 - `state.json` and the audit log
 - the session workspace directory
-- `assistant/User.md` and `assistant/Memory.md`
+- `assistant_dir/SOUL.md`
 
 Never commit bot tokens, state files, audit logs, session workspaces, or
-assistant memory. Rotate the bot token with BotFather immediately if it is
+assistant identity. Rotate the bot token with BotFather immediately if it is
 exposed. Keep allowlists narrow because an allowed sender can instruct the
 configured agent to use its local tools and credentials.

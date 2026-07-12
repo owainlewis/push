@@ -73,7 +73,7 @@ pub struct ContractRequest {
     pub session_id: String,
     pub is_new: bool,
     pub work_dir: PathBuf,
-    pub system_append: String,
+    pub instructions: String,
     pub prompt: String,
 }
 
@@ -83,7 +83,7 @@ impl ContractRequest {
             session_id: &self.session_id,
             is_new: self.is_new,
             work_dir: self.work_dir.to_str().unwrap(),
-            system_append: &self.system_append,
+            instructions: &self.instructions,
             prompt: &self.prompt,
         }
     }

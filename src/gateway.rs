@@ -22,8 +22,8 @@ use crate::audit::{AuditEvent, AuditLog};
 use crate::channel::{Channel, RawMessage};
 use crate::claude;
 use crate::codex;
-use crate::config::{AgentBackend, AssistantProfile, Config};
-use crate::memory;
+use crate::config::{AgentBackend, Config};
+use crate::soul;
 use crate::store::Store;
 
 const QUEUE_DEPTH: usize = 32;
@@ -55,7 +55,6 @@ struct Ctx {
     reply_marker: String,
     sessions_dir: String,
     assistant_dir: String,
-    assistant: AssistantProfile,
     audit: Arc<AuditLog>,
     #[cfg(test)]
     setup_failure_replies: Arc<Mutex<Vec<String>>>,
@@ -99,7 +98,6 @@ impl Gateway {
             reply_marker: cfg.reply_marker.clone(),
             sessions_dir: cfg.sessions_dir.clone(),
             assistant_dir: cfg.assistant_dir.clone(),
-            assistant: cfg.assistant.clone(),
             audit,
             #[cfg(test)]
             setup_failure_replies: Arc::new(Mutex::new(Vec::new())),
@@ -430,7 +428,24 @@ async fn handle(ctx: &Ctx, job: Job) {
         return;
     }
 
-    let system = memory::load(&ctx.assistant_dir, &ctx.assistant);
+    let instructions = match soul::load(&ctx.assistant_dir) {
+        Ok(instructions) => instructions,
+        Err(error) => {
+            error!("[{}] assistant identity error: {error}", job.thread);
+            audit(
+                ctx,
+                ctx.audit.failed(
+                    "backend_setup_failed",
+                    job.row_id,
+                    &job.thread,
+                    Some(job.backend),
+                    error.to_string(),
+                ),
+            );
+            complete_setup_failure(ctx, &job, SESSION_SETUP_FAILURE).await;
+            return;
+        }
+    };
 
     // Some backends let push choose the session id. Mark those before the run
     // so a post-create failure does not retry the same create call.
@@ -442,7 +457,7 @@ async fn handle(ctx: &Ctx, job: Job) {
         session_id: &session_id,
         is_new,
         work_dir: &work_dir,
-        system_append: &system,
+        instructions: &instructions,
         prompt: &job.text,
     };
 
@@ -1051,7 +1066,6 @@ mod tests {
             reply_marker: String::new(),
             sessions_dir,
             assistant_dir: String::new(),
-            assistant: AssistantProfile::default(),
             audit: Arc::new(AuditLog::new(
                 temp_path("setup-failure-audit")
                     .to_string_lossy()
@@ -1340,6 +1354,37 @@ mod tests {
         let _ = std::fs::remove_file(sessions_blocker);
     }
 
+    #[tokio::test]
+    async fn soul_read_failure_stops_backend_dispatch_and_completes_row() {
+        let state_path = temp_state_path();
+        let store = Arc::new(Mutex::new(Store::open(&state_path).unwrap()));
+        let sessions_dir = temp_path("soul-failure-sessions");
+        let assistant_dir = temp_path("soul-failure-assistant");
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        std::fs::write(assistant_dir.join("SOUL.md"), [0xff, 0xfe]).unwrap();
+        let ack = Arc::new(Mutex::new(AckState::default()));
+        ack.lock().unwrap().in_flight.insert(10);
+        let mut ctx = setup_failure_ctx(
+            store.clone(),
+            ack.clone(),
+            sessions_dir.to_string_lossy().to_string(),
+        );
+        ctx.assistant_dir = assistant_dir.to_string_lossy().to_string();
+
+        handle(&ctx, setup_failure_job(10)).await;
+
+        assert_eq!(
+            ctx.setup_failure_replies.lock().unwrap().as_slice(),
+            [SESSION_SETUP_FAILURE]
+        );
+        assert_eq!(store.lock().unwrap().last_row(), 10);
+        assert!(ack.lock().unwrap().in_flight.is_empty());
+
+        let _ = std::fs::remove_file(state_path);
+        let _ = std::fs::remove_dir_all(sessions_dir);
+        let _ = std::fs::remove_dir_all(assistant_dir);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn fake_channel_e2e_replies_once_ignores_unallowlisted_and_reuses_session() {
         let state_path = temp_state_path();
@@ -1571,7 +1616,6 @@ mod tests {
             telegram_allow_chat_ids: Vec::new(),
             agent: "codex".to_string(),
             routes: Vec::new(),
-            assistant: AssistantProfile::default(),
             claude_bin: "claude".to_string(),
             claude_permission_mode: "bypassPermissions".to_string(),
             claude_tools: None,

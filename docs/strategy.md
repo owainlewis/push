@@ -23,7 +23,7 @@ The gateway answers these questions:
 
 - Who is allowed to talk to the assistant?
 - Which conversation is this?
-- Which assistant profile and memory should be loaded?
+- Which assistant identity should be loaded?
 - Which runtime should handle the work?
 - What should be sent back to the user?
 - What state should persist for next time?
@@ -51,8 +51,8 @@ A personal assistant needs:
 - A stable identity across backend changes.
 - Permission and routing rules that match the user's life.
 
-For now, push stores the assistant profile and memory as markdown files. That is
-small, legible, and good enough for one person's assistant.
+For now, push stores assistant identity in one user-owned `SOUL.md`. That is
+small, legible, and stable across backends.
 
 ## What The Gateway Owns
 
@@ -60,7 +60,7 @@ small, legible, and good enough for one person's assistant.
 - Allowlist and reply-loop filtering.
 - Conversation ids.
 - Backend session ids.
-- Assistant config and memory loading.
+- Assistant identity loading.
 - Runtime selection.
 - User-visible delivery.
 - The audit trail in plain files and JSON state.

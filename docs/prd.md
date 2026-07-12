@@ -28,7 +28,7 @@ Build the smallest useful personal assistant gateway:
 - Persist conversation to backend-session mappings.
 - Inject user-owned assistant context into each run.
 - Support simple per-thread backend routing.
-- Support structured assistant profile fields.
+- Load one user-owned `SOUL.md` identity file.
 - Keep the binary local and self-contained.
 
 ## Non-Goals
@@ -86,7 +86,7 @@ push takes a narrower bet:
 - `src/claude.rs`: Claude Code adapter.
 - `src/codex.rs`: Codex adapter.
 - `src/store.rs`: last row and backend session state.
-- `src/memory.rs`: markdown assistant context loading.
+- `src/soul.rs`: Markdown assistant identity loading.
 - `src/config.rs`: TOML configuration.
 
 ## Backend Behavior
@@ -104,7 +104,7 @@ It uses:
 - `claude -p`
 - `--session-id` for new conversations
 - `--resume` for existing conversations
-- `--append-system-prompt` for assistant context
+- `--append-system-prompt` for assistant identity
 
 ### Codex
 
@@ -121,7 +121,8 @@ It uses:
 - `--output-last-message` internally for final reply capture
 - JSONL event parsing to store the Codex thread id
 
-Codex assistant context is passed as part of the prompt wrapper.
+Codex assistant identity is passed as developer instructions, separate from the
+user prompt.
 
 ## Configuration
 
@@ -129,7 +130,6 @@ Codex assistant context is passed as part of the prompt wrapper.
 |---|---|
 | `agent` | `claude` or `codex`. |
 | `routes` | Exact thread to backend overrides. |
-| `assistant` | Structured assistant profile fields. |
 | `imessage.db_path` | Path to Messages `chat.db`. |
 | `poll_interval` | How often to poll. |
 | `run_timeout` | Max backend run time. |
@@ -151,7 +151,7 @@ Codex assistant context is passed as part of the prompt wrapper.
 | `state_path` | JSON state path. |
 | `audit_log_path` | Local JSONL audit log path. |
 | `audit_log_content` | Whether audit events include message and reply text. |
-| `assistant_dir` | Directory with `User.md` and `Memory.md`. |
+| `assistant_dir` | Directory with `SOUL.md`; defaults to `~/.push`. |
 | `reply_marker` | Footer used to skip push's own replies. |
 
 ## Control Commands
@@ -168,8 +168,7 @@ Codex assistant context is passed as part of the prompt wrapper.
 - `/clear` starts a fresh backend session.
 - Claude backend can create and resume a session.
 - Codex backend can create a session, store the Codex thread id, and resume it.
-- Assistant memory is included in backend runs.
-- Assistant profile fields are included in backend runs.
+- Assistant identity is included in backend runs at instruction priority.
 - Exact thread routes can choose a non-default backend.
 - Tests cover filtering and backend output parsing.
 
