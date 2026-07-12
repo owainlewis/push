@@ -11,7 +11,7 @@ use crate::approval::{
     NormalizedAnswer, Question, QuestionState,
 };
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 const MAX_HISTORY_READ_BYTES: usize = 8 * 1024;
 const READ_TRUNCATED: &str = "\n[truncated by push while reading history]";
 
@@ -82,6 +82,18 @@ impl ConversationRole {
 pub struct ConversationMessage {
     pub role: ConversationRole,
     pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftProposal {
+    pub question_id: String,
+    pub name: String,
+    pub path: String,
+    pub snapshot_hash: String,
+    pub contents: String,
+    pub proposed_by: String,
+    pub approved_by: Option<String>,
+    pub status: String,
 }
 
 pub struct History {
@@ -285,6 +297,228 @@ impl History {
                 question.expires_at_ms,
             ],
         )?;
+        Ok(())
+    }
+
+    pub fn create_draft_question(
+        &mut self,
+        question: &Question,
+        proposal: &DraftProposal,
+        now_ms: i64,
+    ) -> Result<bool> {
+        question.validate()?;
+        if proposal.question_id != question.id {
+            bail!("draft proposal question id does not match approval question");
+        }
+        if question.expires_at_ms <= now_ms {
+            bail!("approval question expiry must be in the future");
+        }
+        let choices = serde_json::to_string(&question.choices)?;
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO approval_questions (
+                id, channel, thread_key, sender_key, chat_key, target,
+                prompt, choices_json, expires_at_ms, status, delivery_status
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', 'pending')",
+            params![
+                question.id,
+                question.channel,
+                question.thread_key,
+                question.sender_key,
+                question.chat_key,
+                question.target,
+                question.prompt,
+                choices,
+                question.expires_at_ms,
+            ],
+        )?;
+        let inserted = tx.execute(
+            "INSERT INTO job_draft_proposals (
+                question_id, name, path, snapshot_hash, contents, proposed_by,
+                proposed_channel, proposed_thread, proposed_sender, proposed_chat,
+                status, proposed_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending', ?11)
+             ON CONFLICT(path, snapshot_hash) DO NOTHING",
+            params![
+                proposal.question_id,
+                proposal.name,
+                proposal.path,
+                proposal.snapshot_hash,
+                proposal.contents,
+                proposal.proposed_by,
+                question.channel,
+                question.thread_key,
+                question.sender_key,
+                question.chat_key,
+                now_ms,
+            ],
+        )?;
+        if inserted == 0 {
+            tx.rollback()?;
+            return Ok(false);
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn draft_proposal(&self, question_id: &str) -> Result<Option<DraftProposal>> {
+        self.conn
+            .query_row(
+                "SELECT question_id, name, path, snapshot_hash, contents, proposed_by, approved_by, status
+                 FROM job_draft_proposals WHERE question_id = ?1",
+                [question_id],
+                |row| {
+                    Ok(DraftProposal {
+                        question_id: row.get(0)?,
+                        name: row.get(1)?,
+                        path: row.get(2)?,
+                        snapshot_hash: row.get(3)?,
+                        contents: row.get(4)?,
+                        proposed_by: row.get(5)?,
+                        approved_by: row.get(6)?,
+                        status: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn draft_revision(
+        &self,
+        path: &Path,
+        snapshot_hash: &str,
+    ) -> Result<Option<DraftProposal>> {
+        self.conn
+            .query_row(
+                "SELECT question_id, name, path, snapshot_hash, contents, proposed_by,
+                        approved_by, status
+                 FROM job_draft_proposals WHERE path = ?1 AND snapshot_hash = ?2",
+                params![path.to_string_lossy(), snapshot_hash],
+                |row| {
+                    Ok(DraftProposal {
+                        question_id: row.get(0)?,
+                        name: row.get(1)?,
+                        path: row.get(2)?,
+                        snapshot_hash: row.get(3)?,
+                        contents: row.get(4)?,
+                        proposed_by: row.get(5)?,
+                        approved_by: row.get(6)?,
+                        status: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn pending_draft_question(
+        &self,
+        question_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<Question>> {
+        self.conn
+            .query_row(
+                "SELECT channel, thread_key, sender_key, chat_key, target, prompt,
+                        choices_json, expires_at_ms
+                 FROM approval_questions
+                 WHERE id = ?1 AND status = 'pending' AND expires_at_ms > ?2
+                   AND delivery_status IN ('pending', 'failed')",
+                params![question_id, now_ms],
+                |row| {
+                    let choices: String = row.get(6)?;
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        choices,
+                        row.get::<_, i64>(7)?,
+                    ))
+                },
+            )
+            .optional()?
+            .map(
+                |(
+                    channel,
+                    thread_key,
+                    sender_key,
+                    chat_key,
+                    target,
+                    prompt,
+                    choices,
+                    expires_at_ms,
+                )| {
+                    Ok(Question {
+                        id: question_id.to_string(),
+                        channel,
+                        thread_key,
+                        sender_key,
+                        chat_key,
+                        target,
+                        prompt,
+                        choices: serde_json::from_str(&choices)?,
+                        expires_at_ms,
+                    })
+                },
+            )
+            .transpose()
+    }
+
+    pub fn draft_answer(&self, question_id: &str) -> Result<Option<NormalizedAnswer>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT choices_json, answer_index FROM approval_questions
+                 WHERE id = ?1 AND status = 'answered'",
+                [question_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        let Some((choices, selected_number)) = row else {
+            return Ok(None);
+        };
+        let choices: Vec<crate::approval::Choice> = serde_json::from_str(&choices)?;
+        let choice = choices
+            .get(selected_number.saturating_sub(1) as usize)
+            .context("stored draft approval answer index is invalid")?;
+        Ok(Some(NormalizedAnswer {
+            correlation_id: question_id.to_string(),
+            selected_number: selected_number as usize,
+            value: choice.value.clone(),
+        }))
+    }
+
+    pub fn finish_draft_decision(
+        &mut self,
+        question_id: &str,
+        status: &str,
+        approved_by: Option<&str>,
+        error: Option<&str>,
+        now_ms: i64,
+    ) -> Result<()> {
+        if !matches!(status, "installed" | "rejected" | "invalidated" | "failed") {
+            bail!("invalid draft proposal terminal status {status:?}");
+        }
+        let tx = self.conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE job_draft_proposals
+             SET status = ?2, approved_by = ?3, decision_at_ms = ?4, error = ?5
+             WHERE question_id = ?1 AND status = 'pending'",
+            params![question_id, status, approved_by, now_ms, error],
+        )?;
+        if changed != 1 {
+            bail!("pending draft proposal {question_id:?} does not exist");
+        }
+        tx.execute(
+            "UPDATE approval_questions
+             SET status = 'consumed', consumed_at_ms = ?2, updated_at_ms = ?2
+             WHERE id = ?1 AND status = 'answered'",
+            params![question_id, now_ms],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -657,6 +891,33 @@ fn migrate(conn: &Connection) -> Result<()> {
              PRAGMA user_version = 4;",
         )?;
     }
+    if version <= 4 {
+        conn.execute_batch(
+            "CREATE TABLE job_draft_proposals (
+                 question_id TEXT PRIMARY KEY REFERENCES approval_questions(id),
+                 name TEXT NOT NULL,
+                 path TEXT NOT NULL,
+                 snapshot_hash TEXT NOT NULL,
+                 contents TEXT NOT NULL,
+                 proposed_by TEXT NOT NULL,
+                 proposed_channel TEXT NOT NULL,
+                 proposed_thread TEXT NOT NULL,
+                 proposed_sender TEXT NOT NULL,
+                 proposed_chat TEXT NOT NULL,
+                 approved_by TEXT,
+                 status TEXT NOT NULL CHECK(status IN (
+                     'pending', 'installed', 'rejected', 'invalidated', 'failed'
+                 )),
+                 proposed_at_ms INTEGER NOT NULL,
+                 decision_at_ms INTEGER,
+                 error TEXT,
+                 UNIQUE(path, snapshot_hash)
+             );
+             CREATE INDEX job_draft_proposals_status_idx
+                 ON job_draft_proposals(status, proposed_at_ms);
+             PRAGMA user_version = 5;",
+        )?;
+    }
     conn.execute_batch("COMMIT;")?;
     Ok(())
 }
@@ -781,7 +1042,7 @@ mod tests {
             .record_inbound("imessage", "imessage:self:me", "imessage:1", "hello")
             .unwrap();
         history.execute_batch_for_test(
-            "DROP TABLE job_runs; DROP TABLE approval_questions; PRAGMA user_version = 1;",
+            "DROP TABLE job_draft_proposals; DROP TABLE job_runs; DROP TABLE approval_questions; PRAGMA user_version = 1;",
         );
         drop(history);
 
@@ -805,7 +1066,9 @@ mod tests {
         let mut history = History::open(path.to_str().unwrap()).unwrap();
         let question = question(2_000);
         history.create_question(&question, 1_000).unwrap();
-        history.execute_batch_for_test("DROP TABLE job_runs; PRAGMA user_version = 2;");
+        history.execute_batch_for_test(
+            "DROP TABLE job_draft_proposals; DROP TABLE job_runs; PRAGMA user_version = 2;",
+        );
         drop(history);
 
         let mut reopened = History::open(path.to_str().unwrap()).unwrap();
