@@ -142,6 +142,7 @@ user prompt.
 | `jobs_agent` | Optional default job backend; otherwise uses `agent`. |
 | `jobs_max_timeout` | Maximum validated job timeout; defaults to `30m`. |
 | `jobs_run_dir` | Local advisory-lock state; defaults to `~/.push/run`. |
+| `jobs_max_workers` | Maximum concurrent scheduled jobs; defaults to `2`. |
 | `imessage.db_path` | Path to Messages `chat.db`. |
 | `poll_interval` | How often to poll. |
 | `run_timeout` | Max backend run time. |

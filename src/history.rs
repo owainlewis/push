@@ -11,7 +11,7 @@ use crate::approval::{
     NormalizedAnswer, Question, QuestionState,
 };
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 const MAX_HISTORY_READ_BYTES: usize = 8 * 1024;
 const READ_TRUNCATED: &str = "\n[truncated by push while reading history]";
 
@@ -647,6 +647,16 @@ fn migrate(conn: &Connection) -> Result<()> {
              PRAGMA user_version = 3;",
         )?;
     }
+    if version <= 3 {
+        conn.execute_batch(
+            "ALTER TABLE job_runs ADD COLUMN delivery_channel TEXT;
+             ALTER TABLE job_runs ADD COLUMN delivery_target TEXT;
+             CREATE UNIQUE INDEX job_runs_scheduled_occurrence
+                 ON job_runs(job_name, trigger_id, scheduled_at_ms)
+                 WHERE trigger_kind = 'cron';
+             PRAGMA user_version = 4;",
+        )?;
+    }
     conn.execute_batch("COMMIT;")?;
     Ok(())
 }
@@ -809,7 +819,7 @@ mod tests {
                 .conn
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            3
+            SCHEMA_VERSION
         );
         let run_table: i64 = reopened
             .conn
@@ -820,6 +830,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(run_table, 1);
+        let delivery_columns: i64 = reopened
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('job_runs')
+                 WHERE name IN ('delivery_channel', 'delivery_target')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(delivery_columns, 2);
         let _ = std::fs::remove_file(path);
     }
 
