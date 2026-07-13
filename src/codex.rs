@@ -100,7 +100,7 @@ impl Runner {
                 .arg(req.work_dir)
                 .arg("-o")
                 .arg(out_path);
-            if let Some(path) = req.additional_write_dir {
+            for path in req.additional_dirs {
                 cmd.arg("--add-dir").arg(path);
             }
             if let Some(model) = self.model.as_deref() {
@@ -109,7 +109,7 @@ impl Runner {
             cmd.arg(req.prompt);
         } else {
             cmd.arg("exec");
-            if let Some(path) = req.additional_write_dir {
+            for path in req.additional_dirs {
                 cmd.arg("--add-dir").arg(path);
             }
             cmd.arg("resume")
@@ -248,7 +248,7 @@ mod tests {
                     session_id: "",
                     is_new: true,
                     work_dir: work_dir.to_str().unwrap(),
-                    additional_write_dir: None,
+                    additional_dirs: &[],
                     instructions: "assistant identity",
                     permission: PermissionCapability::Workspace,
                     prompt: "hello",
@@ -275,6 +275,7 @@ mod tests {
     async fn runs_resumed_session_with_resume_command() {
         let args_path = temp_path("codex-resume-args");
         let work_dir = temp_dir("codex-resume-work");
+        let context_dir = temp_dir("codex-resume-context");
         let drafts_dir = temp_dir("codex-resume-drafts");
         let script = codex_success_script(&args_path, "resumed reply", None);
         let cli = FakeCli::new("codex", &script);
@@ -286,7 +287,7 @@ mod tests {
                     session_id: "existing-thread",
                     is_new: false,
                     work_dir: work_dir.to_str().unwrap(),
-                    additional_write_dir: Some(drafts_dir.to_str().unwrap()),
+                    additional_dirs: &[context_dir.to_str().unwrap(), drafts_dir.to_str().unwrap()],
                     instructions: "assistant identity",
                     permission: PermissionCapability::ReadOnly,
                     prompt: "continue",
@@ -301,11 +302,17 @@ mod tests {
         let args = read_args(&args_path);
         assert_arg_sequence(
             &args,
-            &["exec", "--add-dir", drafts_dir.to_str().unwrap(), "resume"],
+            &[
+                "exec",
+                "--add-dir",
+                context_dir.to_str().unwrap(),
+                "--add-dir",
+                drafts_dir.to_str().unwrap(),
+                "resume",
+            ],
         );
         assert_arg_present(&args, "existing-thread");
         assert_arg_pair(&args, "--sandbox", "read-only");
-        assert_arg_pair(&args, "--add-dir", drafts_dir.to_str().unwrap());
         assert_arg_pair(&args, "-c", &developer_instructions("assistant identity"));
         assert_eq!(args.last().unwrap(), "continue");
         assert!(!args.contains(&"-C".to_string()));
@@ -326,7 +333,7 @@ mod tests {
                     session_id: "missing",
                     is_new: false,
                     work_dir: work_dir.to_str().unwrap(),
-                    additional_write_dir: None,
+                    additional_dirs: &[],
                     instructions: "",
                     permission: PermissionCapability::ReadOnly,
                     prompt: "continue",
@@ -388,7 +395,7 @@ mod tests {
             session_id: "",
             is_new: true,
             work_dir,
-            additional_write_dir: None,
+            additional_dirs: &[],
             instructions: "",
             permission: PermissionCapability::ReadOnly,
             prompt: "hello",

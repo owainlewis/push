@@ -11,7 +11,7 @@ use uuid::Uuid;
 #[test]
 fn job_cli_validates_lists_shows_runs_and_reads_history() {
     let root = std::env::temp_dir().join(format!("push-job-cli-{}", Uuid::new_v4()));
-    let jobs = root.join("jobs");
+    let jobs = root.join("assistant/jobs");
     let work = root.join("work");
     let run = root.join("run");
     let database = root.join("push.db");
@@ -84,7 +84,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"cli-thread"}'
 #[test]
 fn concurrent_first_runs_on_a_fresh_database_skip_without_sqlite_errors() {
     let root = std::env::temp_dir().join(format!("push-job-race-{}", Uuid::new_v4()));
-    let jobs = root.join("jobs");
+    let jobs = root.join("assistant/jobs");
     let work = root.join("work");
     let run = root.join("run");
     let database = root.join("push.db");
@@ -121,7 +121,7 @@ fn concurrent_first_runs_on_a_fresh_database_skip_without_sqlite_errors() {
 #[test]
 fn live_cli_is_not_reclaimed_and_crashed_cli_is_recovered() {
     let root = std::env::temp_dir().join(format!("push-job-crash-{}", Uuid::new_v4()));
-    let jobs = root.join("jobs");
+    let jobs = root.join("assistant/jobs");
     let work = root.join("work");
     let run = root.join("run");
     let database = root.join("push.db");
@@ -228,9 +228,9 @@ fn write_job_and_config(
     std::fs::write(
         config,
         format!(
-            "channel = \"telegram\"\nagent = \"codex\"\ntelegram_bot_token = \"test\"\ntelegram_allow_user_ids = [1]\ndatabase_path = {:?}\njobs_dir = {:?}\njobs_run_dir = {:?}\ncodex_bin = {:?}\n",
+            "channel = \"telegram\"\nagent = \"codex\"\ntelegram_bot_token = \"test\"\ntelegram_allow_user_ids = [1]\ndatabase_path = {:?}\nassistant_root = {:?}\njobs_run_dir = {:?}\ncodex_bin = {:?}\n",
             database.to_string_lossy(),
-            jobs.to_string_lossy(),
+            jobs.parent().unwrap().to_string_lossy(),
             run.to_string_lossy(),
             codex.to_string_lossy(),
         ),

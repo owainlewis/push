@@ -1,6 +1,7 @@
 # Telegram quick start. The bot token comes from TELEGRAM_BOT_TOKEN.
 channel = "telegram"
 agent = "codex"
+assistant_root = "~/Code/assistant"
 
 # Chat is read-only by default. Uncomment to defer entirely to your own
 # backend settings (Claude Code allow rules, Codex sandbox), including shell.

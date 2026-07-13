@@ -1,8 +1,8 @@
 # Push Architecture
 
 Push is one local Rust process. It polls one or more configured iMessage and
-Telegram channels, filters messages,
-loads the assistant identity, runs a configured agent backend, and sends the
+Telegram channels, filters messages, loads the configured assistant repository,
+runs a configured agent backend, and sends the
 final reply.
 
 The important boundary is not iMessage or Claude. The important boundary is:
@@ -11,7 +11,13 @@ The important boundary is not iMessage or Claude. The important boundary is:
 message gateway -> agent backend -> message gateway
 ```
 
-The gateway owns the personal assistant state. The backend owns execution.
+Ownership is split deliberately:
+
+```text
+Push runtime         = channels, scheduling, history, security, delivery
+Assistant repository = SOUL.md, context, jobs
+Agent runtime        = reasoning, tools, skills, MCP, authentication
+```
 
 ## Principles
 
@@ -23,7 +29,7 @@ own the durable pieces:
 - channels
 - allowlists
 - routing
-- assistant identity
+- assistant repository location and runtime instruction composition
 - canonical conversation history
 - validated runbook jobs and their durable run ledger
 - cursor and backend-session state
@@ -66,7 +72,7 @@ flowchart LR
         gateway --> worker[Per-thread worker]
         store[(state.json)] <--> gateway
         history[(push.db)] <--> gateway
-        soul[/SOUL.md/] --> worker
+        assistant[/assistant repo: SOUL.md, context, jobs/] --> worker
         worker --> adapter[Agent adapter]
     end
     adapter -->|claude -p| claude[Claude Code]
@@ -101,7 +107,7 @@ sequenceDiagram
         G->>S: handle command locally
     else assistant turn
         G->>W: enqueue job by thread
-        W->>W: load SOUL.md identity
+        W->>W: load SOUL.md and append resolved assistant paths
         W->>W: resolve routed backend session
         opt fresh backend session
             W->>H: read bounded recent conversation
@@ -125,6 +131,7 @@ Request {
     session_id,
     is_new,
     work_dir,
+    additional_dirs,
     instructions,
     prompt,
 }
@@ -151,7 +158,7 @@ Claude Code lets Push choose the session id.
 
 - New conversation: `claude -p --session-id <uuid>`
 - Existing conversation: `claude -p --resume <uuid>`
-- Identity: `--append-system-prompt <SOUL.md + gateway invariants>`
+- Instructions: `--append-system-prompt <SOUL.md + resolved assistant paths + gateway policy>`
 - Work dir: per-thread sandbox dir
 
 ### Codex Adapter
@@ -160,7 +167,7 @@ Codex creates its own thread id.
 
 - New conversation: `codex exec --json ...`
 - Existing conversation: `codex exec resume <thread_id> ...`
-- Identity: `-c developer_instructions=<SOUL.md + gateway invariants>`
+- Instructions: `-c developer_instructions=<SOUL.md + resolved assistant paths + gateway policy>`
 - Work dir: per-thread sandbox dir on the first run
 
 The adapter reads Codex JSONL events to capture `thread.started.thread_id` and
@@ -229,7 +236,7 @@ crash boundary. SQLite history does not replace `state.json` cursors or backend
 session IDs in this phase.
 
 The same database stores immutable job-run claims and bounded terminal results.
-Markdown runbooks remain operator-owned files under `jobs_dir`. A manual CLI
+Markdown runbooks remain operator-owned files under `<assistant_root>/jobs`. A manual CLI
 start rereads and validates the exact file, acquires a non-blocking per-job lock,
 then records and claims the run in one immediate SQLite transaction before
 spawning a fresh backend session. The CLI holds the lock through result
@@ -248,7 +255,7 @@ the rehydrated conversation transcript. Workflows can poll the durable question
 state and consume an answered value once; crossing the expiry first records an
 expired terminal state, so later cancellation cannot overwrite the timeout.
 
-Agent-written job proposals live separately under identity-specific inboxes in
+Agent-written job proposals live separately under origin-specific inboxes in
 `drafts_dir`. Route backends receive only their exact inbox as an additional
 writable root under contained
 permission profiles; full-access routes and jobs are rejected. Push snapshots
@@ -258,7 +265,8 @@ originating channel. Reconciliation also runs after backend failure or timeout
 and before replaying a persisted outbound reply, so a crash cannot orphan an
 unrecorded revision. Approval rechecks the path, symlink status, revision, job
 schema, protected work directory, and configured permission ceiling. A valid
-stored revision is staged inside `jobs_dir` and installed with an atomic
+stored revision is staged inside the derived assistant `jobs/` directory and
+installed with an atomic
 no-clobber link. Rejection and revision mismatch never activate the draft, and
 consumed or duplicate answers cannot repeat installation.
 
@@ -268,13 +276,27 @@ backend run starts and failures, reply delivery metadata, and row completion.
 Message and reply text are redacted by default; `audit_log_content` opts into
 content logging.
 
-## Assistant Identity
+## Assistant Repository
 
-Push loads only `SOUL.md` from `assistant_dir`, which defaults to `~/.push`.
-The gateway appends invariants in memory without changing the file, then injects
-the result at instruction priority. Missing `SOUL.md` means no custom identity;
-backend runs continue with the gateway invariants. The backend still owns how
-tools, skills, MCP, repo context, and permissions work.
+Push supports one assistant and stores one canonical `assistant_root`. It
+derives `SOUL.md`, `context/`, and `jobs/` from that root. `push init [path]`
+creates the conventional structure, initializes Git when needed, and persists
+the root through the selected `--config` file. There are no assistant IDs,
+registries, active selections, or multi-assistant commands.
+
+For every conversation and scheduled or manual job run, Push reads `SOUL.md`
+and appends a gateway-owned footer in memory containing the resolved absolute
+assistant, context, and jobs paths. The footer directs the backend to begin
+with `context/README.md` when useful, protect `SOUL.md` and installed jobs, and
+use the job draft approval flow. Push does not write the footer to the
+repository or inject all context files into each prompt. The selected backend
+and permission profile decide what to inspect. Conversation runs receive
+`context/` as an additional workspace; installed jobs are not added as a
+writable root.
+
+Sessions, databases, drafts, audit logs, delivery state, locks, config secrets,
+and other runtime state stay outside the Git-versioned assistant repository.
+The backend still owns tools, skills, MCP, authentication, and execution.
 
 ## Concurrency
 

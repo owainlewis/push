@@ -9,13 +9,15 @@ Push has two surfaces:
 
 - **Conversations.** Message it over iMessage or Telegram and get a reply from
   a real coding agent with full context.
-- **Jobs.** Plain Markdown runbooks in `~/.push/jobs/`. Each one is an
+- **Jobs.** Plain Markdown runbooks in your assistant repository's `jobs/`
+  directory. Each one is an
   instruction body plus a cron trigger. Push runs them unattended, records
   every run, and delivers the result to your chat.
 
 The agent runtime underneath is deliberately disposable. Claude Code and Codex
-are the first two backends. Push owns the relationship: messaging, identity,
-scheduling, run history, and delivery.
+are the first two backends. Push owns messaging, scheduling, run history,
+security, and delivery. You own identity, context, and jobs in one assistant
+repository.
 
 ## How it works
 
@@ -28,7 +30,8 @@ cron trigger        -> Push gateway -> Claude Code or Codex -> result to your ch
 2. Keep only messages from yourself or configured allowed senders.
 3. Store the accepted message in `~/.push/push.db`.
 4. Map each conversation to the active backend session.
-5. Load your assistant identity from `~/.push/SOUL.md`.
+5. Load `SOUL.md` from the configured assistant repository and append the
+   resolved `context/` and `jobs/` locations as gateway-owned instructions.
 6. Run the configured backend headlessly.
 7. Store the generated reply, then deliver it to the originating conversation.
 
@@ -75,21 +78,21 @@ Push does not try to win that layer. It treats those agents as workers behind a
 small contract: given this user message and assistant context, produce the reply
 or task result that should be sent back.
 
-Push owns the personal assistant layer:
+The personal assistant layer has three clear owners:
 
-- Message ingress and egress.
-- Sender allowlists and reply loop prevention.
-- User-owned assistant identity.
-- Conversation to backend-session mapping.
-- Routing between channels and runtimes.
-- Scheduled jobs: triggers, overlap locks, a durable run ledger, and delivery.
-- The approval flow when an agent proposes a new job.
+- You own a Git-versioned assistant repository containing `SOUL.md`, `context/`,
+  and approved `jobs/`.
+- Push owns message ingress and egress, sender allowlists, reply loop prevention,
+  backend-session mapping, routing, scheduling, approvals, run history, and
+  delivery. Its runtime state and secrets stay outside the assistant repository.
+- The configured agent runtime owns reasoning, tools, skills, MCP servers, and
+  authentication.
 
 Push is the orchestrator, not the agent. Intelligence lives in the backend and
 in your runbooks; Push provides the triggers, state, and delivery that turn a
 capable agent into an assistant that works while you sleep. The backend may be
-Claude Code today and Codex tomorrow, but the assistant identity, jobs, run
-history, and messaging relationship stay with Push.
+Claude Code today and Codex tomorrow, while your assistant identity, context,
+and approved jobs remain portable in your repository.
 
 See [docs/strategy.md](docs/strategy.md) for the full direction.
 
@@ -116,7 +119,8 @@ separate from the user's message on new and resumed sessions.
 - Markdown jobs with cron triggers, manual runs, a durable run ledger, and
   delivery of results to your primary chat.
 - Agent-drafted jobs installed only after explicit approval in chat.
-- Read-only assistant identity from `~/.push/SOUL.md`.
+- One Git-versioned assistant repository containing `SOUL.md`, `context/`, and
+  `jobs/`.
 
 ## Requirements
 
@@ -143,10 +147,11 @@ git clone https://github.com/owainlewis/push.git
 cd push
 cp config.toml.example config.toml
 # edit config.toml: replace the Telegram user ID
-mkdir -p ~/.push
-cp assistant/SOUL.example.md ~/.push/SOUL.md
-export TELEGRAM_BOT_TOKEN='your-bot-token'
 cargo build --release
+./target/release/push init ~/Code/assistant --config config.toml
+$EDITOR ~/Code/assistant/SOUL.md
+$EDITOR ~/Code/assistant/context/README.md
+export TELEGRAM_BOT_TOKEN='your-bot-token'
 ./target/release/push doctor --config config.toml
 ./target/release/push
 ```
@@ -276,9 +281,8 @@ codex_bin = "codex"
 audit_log_path = "~/.push/audit.jsonl"
 audit_log_content = false
 database_path = "~/.push/push.db"
-assistant_dir = "~/.push"
+assistant_root = "~/Code/assistant"
 permission_profile = "restricted"
-jobs_dir = "~/.push/jobs"
 drafts_dir = "~/.push/drafts"
 jobs_agent = "codex"
 jobs_max_timeout = "30m"
@@ -307,6 +311,11 @@ permission_profile = "workspace"
 Channel settings belong under `[imessage]` and `[telegram]`. Existing flat
 channel keys remain accepted for compatibility, but do not set the same option
 in both places.
+
+`assistant_root` is the one configured assistant repository. Push derives
+`SOUL.md`, `context/`, and `jobs/` from it. Runtime state such as sessions,
+drafts, databases, audit logs, locks, and secrets remains under separate
+runtime paths and must not be committed to the assistant repository.
 
 The single `channel` setting remains the default quick start. To poll both
 configured providers concurrently, replace it with the advanced `channels`
@@ -398,7 +407,7 @@ profile.
 
 ## Manual Jobs
 
-Jobs are user-owned Markdown runbooks in `~/.push/jobs/`. The filename is a
+Jobs are user-owned Markdown runbooks in `<assistant_root>/jobs/`. The filename is a
 lowercase slug and the body is sent verbatim to a fresh backend session:
 
 ```markdown
@@ -462,7 +471,7 @@ result, including after restart, and never reruns the backend.
 ## Agent-Drafted Jobs
 
 A route using the `workspace` or `inherit` profile can propose a job by writing
-one complete runbook to the identity-specific inbox Push provides beneath
+one complete runbook to the origin-specific inbox Push provides beneath
 `drafts_dir`, which defaults to `~/.push/drafts`. Push gives the backend that
 opaque inbox as its extra writable root, so concurrent senders and topics
 cannot claim each other's files. `restricted` routes
@@ -491,16 +500,52 @@ of committing a config that contains credentials.
 
 ## Assistant Identity and Migration
 
-`SOUL.md` is the only assistant identity source. By default Push reads
-`~/.push/SOUL.md`; set `assistant_dir` to keep the file elsewhere. Push reads
-the file for every run, appends its own invariant instructions in memory, and
-never creates or rewrites `SOUL.md`.
+Create the one assistant repository with an explicit config file:
 
-If `SOUL.md` is missing, backend runs continue with only Push's invariants and
-no custom identity. Copy any identity, preferences, or stable context that you
-want to preserve from the old `[assistant]`, `User.md`, and `Memory.md` inputs
-into `SOUL.md`. Old context files are not loaded, and a remaining `[assistant]`
-table produces an actionable configuration error.
+```sh
+push init ~/Code/assistant --config ~/.config/push/config.toml
+$EDITOR ~/Code/assistant/SOUL.md
+$EDITOR ~/Code/assistant/context/README.md
+push doctor --config ~/.config/push/config.toml
+push --config ~/.config/push/config.toml
+```
+
+With no path, `push init` creates `./assistant`. Initialization expands and
+resolves the path, creates useful starter files plus an empty `jobs/`, starts a
+Git repository when needed, and records one canonical `assistant_root`. It is
+safe to repeat for a valid assistant and never overwrites an existing user
+file. An unrelated non-empty target or a config that already points at another
+assistant is rejected.
+
+The selected config may sit inside the assistant repository for a portable
+`push init .` setup only when it contains no inline secret. Push rejects an
+inline Telegram token there. Prefer a config outside the repository and use
+`telegram.bot_token_env` for the token.
+
+```text
+assistant/
+├── SOUL.md
+├── AGENTS.md
+├── README.md
+├── context/
+│   └── README.md
+└── jobs/
+```
+
+Push reads the user-owned `SOUL.md` for every conversation and job run. In
+memory, it appends the resolved absolute assistant root, context directory, and
+jobs directory plus the ownership rules. Machine paths are never written into
+`SOUL.md`. Backends decide which context or job files to inspect; Push does not
+inject every context file into every prompt. The context directory is exposed
+as the assistant workspace subject to the selected route or backend permission
+settings. Installed jobs remain behind the existing draft and approval flow.
+
+Legacy configs with `assistant_dir` and `jobs_dir` continue to load only when
+the jobs path is exactly `<assistant_dir>/jobs`. This preserves the old default
+`~/.push` layout without guessing. For separate legacy paths, move or copy
+`SOUL.md`, context, and jobs under one directory, replace both keys with
+`assistant_root = "/path/to/assistant"`, and keep runtime state outside that
+repository. Old `[assistant]`, `User.md`, and `Memory.md` inputs are not loaded.
 
 ## Safety
 

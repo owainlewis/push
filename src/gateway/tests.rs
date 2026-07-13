@@ -585,7 +585,9 @@ async fn fake_channel_e2e_replies_once_ignores_unallowlisted_and_reuses_session(
     let audit_path = format!("{state_path}.audit.jsonl");
     let sessions_dir = temp_path("e2e-sessions");
     let assistant_dir = temp_path("e2e-assistant");
-    std::fs::create_dir_all(&assistant_dir).unwrap();
+    std::fs::create_dir_all(assistant_dir.join("context")).unwrap();
+    std::fs::create_dir_all(assistant_dir.join("jobs")).unwrap();
+    std::fs::write(assistant_dir.join("SOUL.md"), "Be useful.\n").unwrap();
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mut cfg = test_config(
         &state_path,
@@ -625,23 +627,48 @@ async fn fake_channel_e2e_replies_once_ignores_unallowlisted_and_reuses_session(
             )
         ]
     );
-    assert_eq!(
-        calls.lock().unwrap().as_slice(),
-        [
-            FakeRunCall {
-                session_id: String::new(),
-                is_new: true,
-                prompt: "first".to_string(),
-                permission: crate::config::PermissionCapability::Workspace,
-            },
-            FakeRunCall {
-                session_id: "fake-session".to_string(),
-                is_new: false,
-                prompt: "second".to_string(),
-                permission: crate::config::PermissionCapability::Workspace,
-            }
-        ]
-    );
+    {
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].session_id, "");
+        assert!(calls[0].is_new);
+        assert_eq!(calls[0].prompt, "first");
+        assert_eq!(calls[1].session_id, "fake-session");
+        assert!(!calls[1].is_new);
+        assert_eq!(calls[1].prompt, "second");
+        for call in calls.iter() {
+            assert_eq!(
+                call.permission,
+                crate::config::PermissionCapability::Workspace
+            );
+            assert!(call.instructions.starts_with("Be useful."));
+            assert!(call.instructions.contains(&format!(
+                "Assistant root: {}",
+                std::fs::canonicalize(&assistant_dir).unwrap().display()
+            )));
+            assert!(call.instructions.contains(&format!(
+                "Context: {}",
+                std::fs::canonicalize(assistant_dir.join("context"))
+                    .unwrap()
+                    .display()
+            )));
+            assert!(call.instructions.contains(&format!(
+                "Jobs: {}",
+                std::fs::canonicalize(assistant_dir.join("jobs"))
+                    .unwrap()
+                    .display()
+            )));
+            assert!(call.additional_dirs.contains(
+                &std::fs::canonicalize(assistant_dir.join("context"))
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            ));
+            assert!(!call
+                .additional_dirs
+                .contains(&assistant_dir.join("jobs").to_string_lossy().to_string()));
+        }
+    }
     let events = audit_events(&audit_path);
     assert!(events.iter().any(|e| {
         e.event == "message_ignored"
@@ -2064,6 +2091,7 @@ fn test_config(state_path: &str, sessions_dir: &str, assistant_dir: &str) -> Con
         routes: Vec::new(),
         permission_profile: "restricted".to_string(),
         permission_profiles: HashMap::new(),
+        assistant_root: assistant_dir.to_string(),
         jobs_dir: format!("{state_path}.jobs"),
         drafts_dir: format!("{state_path}.drafts"),
         jobs_agent: None,

@@ -13,6 +13,8 @@ own the service:
 
 ```sh
 mkdir -p ~/.config/push ~/.push
+# Copy config.toml.example to ~/.config/push/config.toml and edit channel settings.
+push init ~/Code/assistant --config ~/.config/push/config.toml
 push doctor --config /Users/YOU/.config/push/config.toml
 ```
 
@@ -23,7 +25,10 @@ Use absolute paths in service files. The service user needs:
 - write access to `audit_log_path`
 - write access to `database_path`
 - write access to `sessions_dir`
-- read access to `assistant_dir/SOUL.md` when custom identity is configured
+- read access to `assistant_root/SOUL.md`, `assistant_root/context/`, and
+  `assistant_root/jobs/`
+- write access to `assistant_root/context/` for workspace or inherited routes,
+  and to `assistant_root/jobs/` only for approved job installation
 - access to `claude` or `codex` on `PATH`
 - backend login, tokens, settings, MCP config, and project credentials
 - for iMessage on macOS, Full Disk Access and `osascript`
@@ -36,6 +41,9 @@ ids. `database_path` stores the canonical conversation journal. Keep these
 paths on durable storage. Restarting the service resumes after
 the last completed row and reuses existing backend sessions when the backend for
 that thread has not changed.
+
+Keep `assistant_root` in its own Git repository. Keep config secrets, state,
+sessions, databases, drafts, logs, locks, and service credentials outside it.
 
 ## macOS launchd
 
@@ -161,21 +169,22 @@ loginctl enable-linger "$USER"
 
 `push job run <name>` executes in the invoking terminal process, not in the
 managed service. Use the same config file so the CLI and service share
-`push.db`, `jobs_dir`, and the local per-job lock directory. Invalid job files
+`push.db`, `<assistant_root>/jobs`, and the local per-job lock directory. Invalid job files
 are reported and disabled individually; they do not stop the messaging service.
 
 ## Scheduled Jobs
 
 Cron triggers run inside the managed gateway only when `primary_delivery`
-resolves. Keep `push.db`, `jobs_dir`, and `jobs_run_dir` on persistent local
+resolves. Keep `push.db`, `<assistant_root>/jobs`, and `jobs_run_dir` on persistent local
 storage. Restarting the service resumes queued runs and pending result delivery;
 it does not catch up missed cron times or rerun interrupted agent execution.
 Use `push job runs` to distinguish execution state from delivery attempts.
 
 ## Drafted Jobs
 
-The service creates `drafts_dir` and `jobs_dir` with owner-only permissions.
-A workspace route may write proposals only to its identity-specific drafts
+The service prepares `drafts_dir` and the derived assistant `jobs/` directory
+with owner-only permissions.
+A workspace route may write proposals only to its origin-specific drafts
 inbox, but they
 remain inactive until the exact revision is approved from its originating
 allowlisted channel identity. Pending questions survive service restart.

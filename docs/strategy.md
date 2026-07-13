@@ -11,9 +11,10 @@ task execution.
 
 Push should not compete there.
 
-Push should own the durable personal assistant layer: messages, identity,
-memory, user preferences, business context, routing, and state. The agent
-runtime should be replaceable.
+Push should own the durable gateway layer: messages, routing, scheduling,
+history, security, and delivery. The user should own one portable assistant
+repository with identity, context, and jobs. The agent runtime should be
+replaceable.
 
 ## Product Thesis
 
@@ -23,7 +24,7 @@ The gateway answers these questions:
 
 - Who is allowed to talk to the assistant?
 - Which conversation is this?
-- Which assistant identity should be loaded?
+- Where is the single configured assistant repository?
 - Which runtime should handle the work?
 - What should be sent back to the user?
 - What state should persist for next time?
@@ -51,8 +52,11 @@ A personal assistant needs:
 - A stable identity across backend changes.
 - Permission and routing rules that match the user's life.
 
-For now, Push stores assistant identity in one user-owned `SOUL.md`. That is
-small, legible, and stable across backends.
+Push supports exactly one assistant. `push init [path]` creates its user-owned,
+Git-versioned repository with `SOUL.md`, `context/`, and `jobs/`. One canonical
+root is configured; the other paths are derived. There are no assistant names,
+IDs, registries, or selection flows. This stays small, legible, and stable
+across backends and machines.
 
 ## What The Gateway Owns
 
@@ -60,7 +64,8 @@ small, legible, and stable across backends.
 - Allowlist and reply-loop filtering.
 - Conversation ids.
 - Backend session ids.
-- Assistant identity loading.
+- Assistant root loading and runtime instruction composition.
+- Job validation, approval, scheduling, history, and delivery.
 - Runtime selection.
 - User-visible delivery.
 - The audit trail in plain files and JSON state.
@@ -76,6 +81,10 @@ small, legible, and stable across backends.
 - Repo context.
 - Long-running task mechanics.
 
+The assistant repository owns `SOUL.md`, editable context, and installed job
+runbooks. The runtime owns skills, tools, MCP, and authentication. Push runtime
+state and secrets remain outside the repository.
+
 The gateway should not rebuild these unless there is no reliable backend
 contract for the job.
 
@@ -87,6 +96,7 @@ The backend seam should stay small:
 input:
   user message
   assistant context
+  resolved assistant, context, and jobs locations
   conversation/session id if one exists
   working directory
   timeout and permission config

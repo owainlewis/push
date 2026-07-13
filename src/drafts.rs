@@ -438,6 +438,7 @@ mod tests {
                 routes: Vec::new(),
                 permission_profile: "workspace".to_string(),
                 permission_profiles: HashMap::new(),
+                assistant_root: root.to_string_lossy().to_string(),
                 jobs_dir: root.join("jobs").to_string_lossy().to_string(),
                 drafts_dir: root.join("drafts").to_string_lossy().to_string(),
                 jobs_agent: None,
