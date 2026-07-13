@@ -4,7 +4,9 @@ on:
   push:
     branches: [main]
     paths:
-      - "site/**"
+      - "docs/**"
+      - "mkdocs.yml"
+      - "requirements-docs.txt"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -25,6 +27,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-docs.txt
+      - name: Install documentation dependencies
+        run: pip install --requirement requirements-docs.txt
+      - name: Build documentation
+        run: mkdocs build --strict
       - uses: actions/configure-pages@v5
         with:
           enablement: true
