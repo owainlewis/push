@@ -803,7 +803,7 @@ fn complete_row(store: &Arc<Mutex<Store>>, ack: &Arc<Mutex<AckState>>, channel: 
 }
 
 fn runners(cfg: &Config) -> HashMap<AgentBackend, Runner> {
-    [AgentBackend::Claude, AgentBackend::Codex]
+    [AgentBackend::Claude, AgentBackend::Codex, AgentBackend::Pi]
         .into_iter()
         .map(|backend| (backend, Runner::for_backend(backend, cfg)))
         .collect()

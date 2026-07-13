@@ -10,8 +10,8 @@ You need:
 
 - Apple Silicon macOS or x86_64 Linux for the current prebuilt release
 - macOS for iMessage, or macOS/Linux for Telegram
-- Claude Code or Codex installed, authenticated, and runnable by the same user
-  that will run Push
+- Claude Code, Codex, or Pi installed, authenticated, and runnable by the same
+  user that will run Push
 - `curl` and `tar` for the release installer
 
 Push uses the backend's existing login, settings, tools, MCP servers, skills,
@@ -30,6 +30,12 @@ Confirm the selected command works before starting Push:
 
     ```sh
     claude --version
+    ```
+
+=== "Pi"
+
+    ```sh
+    pi --version
     ```
 
 ## 2. Install Push
@@ -113,7 +119,8 @@ time and never writes machine-specific paths into the repository.
     Read the [iMessage guide](channels/imessage.md) for database permissions
     and filtering behavior.
 
-Replace `codex` with `claude` if Claude Code is your backend.
+Replace `codex` with `claude` for Claude Code or `pi` for Pi. Pi must already
+have a configured model provider or authenticated account for the service user.
 
 If you replace the config file created by `push init`, keep its
 `assistant_root` setting. Running the same init command again is safe for a

@@ -10,7 +10,7 @@ hide:
 
 # Put your coding agent on call.
 
-Push turns Claude Code or Codex into a personal assistant you can message and
+Push turns Claude Code, Codex, or Pi into a personal assistant you can message and
 schedule. It runs on your machine, keeps durable state, and sends results back
 to iMessage or Telegram.
 
@@ -70,7 +70,7 @@ message or cron trigger
         ↓
 Push: filter → route → persist → schedule → deliver
         ↓
-Claude Code or Codex: reason → use tools → produce result
+Claude Code, Codex, or Pi: reason → use tools → produce result
 ```
 
 You own one Git-versioned assistant repository containing identity, context,

@@ -2101,6 +2101,7 @@ fn test_config(state_path: &str, sessions_dir: &str, assistant_dir: &str) -> Con
         claude_bin: "claude".to_string(),
         codex_bin: "codex".to_string(),
         codex_model: None,
+        pi_bin: "pi".to_string(),
         sessions_dir: sessions_dir.to_string(),
         state_path: state_path.to_string(),
         audit_log_path: format!("{state_path}.audit.jsonl"),

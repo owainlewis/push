@@ -39,7 +39,7 @@ history in SQLite outside that repository.
 
 - Push remains one local Rust process with no inbound server port.
 - Telegram and iMessage conversations must remain channel-qualified.
-- Claude Code and Codex retain different session and instruction mechanisms.
+- Claude Code, Codex, and Pi retain different session and instruction mechanisms.
 - A failed history write must not result in an unrecorded request being sent to
   an agent.
 - A failed future reconciliation run must not block replies.
@@ -61,7 +61,7 @@ security, delivery              user-owned and Git-versioned   skills, MCP, auth
 The gateway owns durable runtime state. The user owns the assistant repository.
 Agent runtimes own execution. A
 backend session is a cache of conversational context, not the source of truth.
-Losing a Claude or Codex session must not lose the conversation record.
+Losing a Claude Code, Codex, or Pi session must not lose the conversation record.
 
 ### Identity
 
@@ -86,8 +86,8 @@ Do not modify SOUL.md or installed jobs directly.
 Propose job changes through Push's approval workflow.
 ```
 
-Claude receives the composed text as appended system instructions. Codex
-receives it as developer instructions. Push never writes resolved machine paths
+Claude Code and Pi receive the composed text as appended system instructions.
+Codex receives it as developer instructions. Push never writes resolved machine paths
 into `SOUL.md` and does not inject all context files into every prompt. The
 backend decides which files to inspect. Conversation routes receive `context/`
 as an additional workspace subject to their permission profile; `SOUL.md` and

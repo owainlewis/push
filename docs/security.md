@@ -21,15 +21,22 @@ compromised allowed sender as access to the assistant.
 
 ## Chat permission profiles
 
-| Profile | Claude Code | Codex | Intended use |
-| --- | --- | --- | --- |
-| `restricted` | Read, Grep, and Glob; Bash and write tools denied | read-only sandbox, approvals disabled | Default inspection and conversation |
-| `workspace` | Read and file-edit tools; Bash omitted | workspace-write sandbox, approvals disabled | Contained repository edits and job drafts |
-| `inherit` | No Push mode or tool filters | No Push sandbox override | Defer to the operator's backend configuration |
-| `full-access` | Backend bypass mode | Backend bypass mode | Rejected for unattended chat routes |
+| Profile | Claude Code | Codex | Pi | Intended use |
+| --- | --- | --- | --- | --- |
+| `restricted` | Read, Grep, and Glob; Bash and write tools denied | read-only sandbox, approvals disabled | `read,grep,find,ls` allowlist | Default inspection and conversation |
+| `workspace` | Read and file-edit tools; Bash omitted | workspace-write sandbox, approvals disabled | `read,edit,write,grep,find,ls` allowlist; no Bash | Repository edits and job drafts |
+| `inherit` | No Push mode or tool filters | No Push sandbox override | No Push tool allowlist | Defer to the operator's backend configuration |
+| `full-access` | Backend bypass mode | Backend bypass mode | Explicit allowlist including Bash | Rejected for unattended chat routes |
 
 Claude Code does not expose a Codex-equivalent filesystem sandbox. Its
 `workspace` mapping allows file tools but deliberately omits shell access.
+Pi also has no native sandbox or permission prompts. Its tool allowlist can
+remove mutating tools or Bash, but it cannot confine file tools to the session
+workspace. `workspace` prevents direct shell access but Pi's read, edit, and
+write tools can still address paths allowed by the operating-system user.
+`inherit` may enable built-in or extension tools from Pi's configuration.
+`full-access` explicitly enables all built-in tools, including unrestricted
+Bash, and therefore remains unsuitable for unattended chat routes.
 
 These profiles control the local filesystem and process capabilities that Push
 passes to the backend. They do not rewrite the backend's own integration
@@ -49,7 +56,7 @@ Custom profiles only alias a capability:
 capability = "workspace"
 ```
 
-Push rejects raw Claude or Codex permission flags in TOML so a route cannot
+Push rejects raw backend permission flags in TOML so a route cannot
 quietly bypass the shared local policy model.
 
 ## Job permissions

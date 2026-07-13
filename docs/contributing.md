@@ -31,7 +31,7 @@ cargo test --locked
 | Channel-neutral boundary | `src/channel.rs` |
 | iMessage and Telegram adapters | `src/imessage/`, `src/telegram.rs` |
 | Gateway, queues, workers, delivery | `src/gateway/` |
-| Claude Code and Codex adapters | `src/claude.rs`, `src/codex.rs` |
+| Claude Code, Codex, and Pi adapters | `src/claude.rs`, `src/codex.rs`, `src/pi.rs` |
 | Canonical SQLite history | `src/history.rs` |
 | Jobs, scheduling, locks, run ledger | `src/jobs.rs` |
 | Agent-authored draft approval | `src/drafts.rs`, `src/approval.rs` |

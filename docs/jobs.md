@@ -33,7 +33,7 @@ Frontmatter fields:
 | `version` | yes | Format version, currently `1` |
 | `timeout` | yes | Positive duration no greater than `jobs_max_timeout` |
 | `workdir` | yes | Existing working directory for the backend |
-| `backend` | no | `claude` or `codex`; defaults to `jobs_agent`, then root `agent` |
+| `backend` | no | `claude`, `codex`, or `pi`; defaults to `jobs_agent`, then root `agent` |
 | `triggers` | no | One or more cron trigger tables |
 
 Unknown fields are errors. A job work directory may not overlap the assistant

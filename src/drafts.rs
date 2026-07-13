@@ -448,6 +448,7 @@ mod tests {
                 claude_bin: "claude".to_string(),
                 codex_bin: "codex".to_string(),
                 codex_model: None,
+                pi_bin: "pi".to_string(),
                 sessions_dir: root.join("sessions").to_string_lossy().to_string(),
                 state_path: root.join("state.json").to_string_lossy().to_string(),
                 audit_log_path: root.join("audit.jsonl").to_string_lossy().to_string(),
