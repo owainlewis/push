@@ -12,6 +12,23 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  docs:
+    name: build docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-docs.txt
+
+      - name: Install documentation dependencies
+        run: pip install --requirement requirements-docs.txt
+
+      - name: Build documentation
+        run: mkdocs build --strict
+
   test:
     name: fmt, clippy, build, test (${{ matrix.os }})
     strategy:

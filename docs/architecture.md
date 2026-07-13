@@ -250,8 +250,8 @@ expired terminal state, so later cancellation cannot overwrite the timeout.
 
 Agent-written job proposals live separately under identity-specific inboxes in
 `drafts_dir`. Route backends receive only their exact inbox as an additional
-writable root under contained
-permission profiles; full-access routes and jobs are rejected. Push snapshots
+writable root under contained permission profiles; full-access routes are
+rejected because they cannot enforce that boundary. Push snapshots
 and validates a changed regular file, stores its exact bytes, hash, proposer,
 and bound approval question in SQLite, then sends the full proposal to the
 originating channel. Reconciliation also runs after backend failure or timeout
@@ -291,14 +291,15 @@ the trust boundary. iMessage uses `imessage.self_handles` and
 `imessage.allow_from`; Telegram uses stable numeric `telegram.allow_user_ids`
 and `telegram.allow_chat_ids`.
 
-Routes select a named Push permission profile. `restricted` is the default and
-jobs may use only explicitly allow-listed profile names. Push rejects
-`full-access` for routes and jobs because backend bypass modes cannot protect
-Push-owned files. Claude receives a fixed tool allowlist and denies Bash;
-Codex receives `read-only` or `workspace-write`. Claude does not provide a
-Codex-equivalent filesystem sandbox, so its `workspace` mapping permits file
+Routes select a named Push permission profile. `restricted` is the default.
+Push rejects `full-access` for routes because backend bypass modes cannot
+protect Push-owned files. Claude receives a fixed tool allowlist and denies
+Bash; Codex receives `read-only` or `workspace-write`. Claude does not provide
+a Codex-equivalent filesystem sandbox, so its `workspace` mapping permits file
 tools but deliberately omits shell access. Custom profiles select a capability,
-not raw backend flags.
+not raw backend flags. Jobs always inherit the backend's own permission
+configuration and must use a work directory that does not overlap Push-owned
+state or configuration.
 
 ## Extension Points
 
