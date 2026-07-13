@@ -477,6 +477,78 @@ async fn sandbox_setup_failure_completes_in_flight_row_and_advances_cursor() {
 }
 
 #[tokio::test]
+async fn draft_boundary_failure_completes_in_flight_row_and_advances_cursor() {
+    let state_path = temp_state_path();
+    let store = Arc::new(Mutex::new(Store::open(&state_path).unwrap()));
+    let drafts_blocker = temp_path("drafts-blocker");
+    std::fs::write(&drafts_blocker, "not a directory").unwrap();
+    let ack = Arc::new(Mutex::new(AckState::default()));
+    {
+        let mut ack = ack.lock().unwrap();
+        ack.in_flight.insert(10);
+        ack.completed.insert(11);
+    }
+    let mut ctx = setup_failure_ctx(
+        store.clone(),
+        ack.clone(),
+        temp_path("sessions").to_string_lossy().to_string(),
+    );
+    ctx.cfg.drafts_dir = drafts_blocker.to_string_lossy().to_string();
+    let mut job = setup_failure_job(10);
+    job.permission.capability = crate::config::PermissionCapability::Workspace;
+
+    handle(&ctx, job).await;
+
+    assert_eq!(
+        ctx.setup_failure_replies.lock().unwrap().as_slice(),
+        [SANDBOX_SETUP_FAILURE]
+    );
+    assert_eq!(store.lock().unwrap().last_row(), 11);
+    let ack = ack.lock().unwrap();
+    assert!(ack.in_flight.is_empty());
+    assert!(ack.completed.is_empty());
+
+    let _ = std::fs::remove_file(state_path);
+    let _ = std::fs::remove_file(drafts_blocker);
+}
+
+#[tokio::test]
+async fn draft_boundary_failure_delivers_existing_outbound_without_misreporting_setup() {
+    let state_path = temp_state_path();
+    let store = Arc::new(Mutex::new(Store::open(&state_path).unwrap()));
+    let drafts_blocker = temp_path("drafts-recovery-blocker");
+    std::fs::write(&drafts_blocker, "not a directory").unwrap();
+    let ack = Arc::new(Mutex::new(AckState::default()));
+    ack.lock().unwrap().in_flight.insert(10);
+    let mut ctx = setup_failure_ctx(
+        store.clone(),
+        ack.clone(),
+        temp_path("recovery-sessions").to_string_lossy().to_string(),
+    );
+    ctx.cfg.drafts_dir = drafts_blocker.to_string_lossy().to_string();
+    ctx.history
+        .lock()
+        .unwrap()
+        .record_outbound(1, OutboundOrigin::Backend, Some("claude"), "stored reply")
+        .unwrap();
+    let mut job = setup_failure_job(10);
+    job.permission.capability = crate::config::PermissionCapability::Workspace;
+
+    handle(&ctx, job).await;
+
+    assert!(ctx.setup_failure_replies.lock().unwrap().is_empty());
+    assert_eq!(
+        ctx.sent_replies.lock().unwrap().as_slice(),
+        [("me@icloud.com".to_string(), "stored reply".to_string())]
+    );
+    assert_eq!(store.lock().unwrap().last_row(), 10);
+    assert!(ack.lock().unwrap().in_flight.is_empty());
+
+    let _ = std::fs::remove_file(state_path);
+    let _ = std::fs::remove_file(drafts_blocker);
+}
+
+#[tokio::test]
 async fn soul_read_failure_stops_backend_dispatch_and_completes_row() {
     let state_path = temp_state_path();
     let store = Arc::new(Mutex::new(Store::open(&state_path).unwrap()));

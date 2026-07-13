@@ -34,6 +34,13 @@ pub(super) async fn run(ctx: Ctx, mut rx: mpsc::Receiver<Job>) {
 
 pub(super) async fn handle(ctx: &Ctx, job: Job) {
     use crate::config::PermissionCapability;
+    let existing_outbound = match ctx.history.lock().unwrap().outbound_for(job.inbound_id) {
+        Ok(outbound) => outbound,
+        Err(error) => {
+            history_error(ctx, &job, "read outbound", error);
+            return;
+        }
+    };
     // Threads whose capability allows writes get the draft boundary, so they
     // can propose recurring jobs for approval.
     let can_write = matches!(
@@ -45,39 +52,43 @@ pub(super) async fn handle(ctx: &Ctx, job: Job) {
             Ok(directory) => Some(directory),
             Err(error) => {
                 error!("[{}] draft boundary error: {error:#}", job.thread);
+                if let Some(outbound) = &existing_outbound {
+                    report_delivery(
+                        ctx,
+                        &job,
+                        deliver_stored(ctx, &job, outbound).await,
+                        &outbound.content,
+                        "recovered_outbound",
+                        "recover outbound",
+                    );
+                } else {
+                    complete_setup_failure(ctx, &job, SANDBOX_SETUP_FAILURE).await;
+                }
                 return;
             }
         }
     } else {
         None
     };
-    let existing_outbound = { ctx.history.lock().unwrap().outbound_for(job.inbound_id) };
-    match existing_outbound {
-        Ok(Some(outbound)) => {
-            if let Some(directory) = &draft_directory {
-                if let Err(error) = present_drafts(ctx, &job, directory).await {
-                    error!(
-                        "[{}] recovered draft presentation failed: {error:#}",
-                        job.thread
-                    );
-                    return;
-                }
+    if let Some(outbound) = existing_outbound {
+        if let Some(directory) = &draft_directory {
+            if let Err(error) = present_drafts(ctx, &job, directory).await {
+                error!(
+                    "[{}] recovered draft presentation failed: {error:#}",
+                    job.thread
+                );
+                return;
             }
-            report_delivery(
-                ctx,
-                &job,
-                deliver_stored(ctx, &job, &outbound).await,
-                &outbound.content,
-                "recovered_outbound",
-                "recover outbound",
-            );
-            return;
         }
-        Ok(None) => {}
-        Err(error) => {
-            history_error(ctx, &job, "read outbound", error);
-            return;
-        }
+        report_delivery(
+            ctx,
+            &job,
+            deliver_stored(ctx, &job, &outbound).await,
+            &outbound.content,
+            "recovered_outbound",
+            "recover outbound",
+        );
+        return;
     }
 
     if let Some(reply) = command(ctx, &job) {
