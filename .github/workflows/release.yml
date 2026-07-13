@@ -37,6 +37,104 @@ jobs:
       - name: Build
         run: cargo build --locked --release
 
+      - name: Sign and notarize macOS binary
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+
+          required_secrets=(
+            MACOS_CERTIFICATE
+            MACOS_CERTIFICATE_PASSWORD
+            APPLE_API_KEY
+            APPLE_API_KEY_ID
+            APPLE_API_ISSUER
+          )
+          for name in "${required_secrets[@]}"; do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing required secret: $name" >&2
+              exit 1
+            fi
+          done
+
+          certificate_path="$RUNNER_TEMP/developer-id-application.p12"
+          api_key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          keychain_path="$RUNNER_TEMP/push-signing.keychain-db"
+          notary_archive="$RUNNER_TEMP/push-notarization.zip"
+          keychain_password="$(openssl rand -base64 32)"
+
+          cleanup() {
+            rm -f "$certificate_path" "$api_key_path" "$notary_archive"
+            security delete-keychain "$keychain_path" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          printf '%s' "$MACOS_CERTIFICATE" | base64 --decode > "$certificate_path"
+          printf '%s' "$APPLE_API_KEY" | base64 --decode > "$api_key_path"
+          chmod 600 "$certificate_path" "$api_key_path"
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+
+          signing_identity="$(
+            security find-identity -v -p codesigning "$keychain_path" \
+              | awk '/Developer ID Application/ { print $2; exit }'
+          )"
+          if [ -z "$signing_identity" ]; then
+            echo "No Developer ID Application identity found" >&2
+            exit 1
+          fi
+
+          codesign \
+            --force \
+            --options runtime \
+            --timestamp \
+            --keychain "$keychain_path" \
+            --sign "$signing_identity" \
+            target/release/push
+          codesign --verify --strict --verbose=2 target/release/push
+
+          ditto -c -k --keepParent target/release/push "$notary_archive"
+          notary_result="$(xcrun notarytool submit "$notary_archive" \
+            --key "$api_key_path" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait \
+            --output-format json)"
+          printf '%s\n' "$notary_result"
+
+          notary_status="$(
+            printf '%s' "$notary_result" \
+              | plutil -extract status raw -o - -
+          )"
+          if [ "$notary_status" != "Accepted" ]; then
+            submission_id="$(
+              printf '%s' "$notary_result" \
+                | plutil -extract id raw -o - -
+            )"
+            xcrun notarytool log "$submission_id" \
+              --key "$api_key_path" \
+              --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_ISSUER"
+            exit 1
+          fi
+
       - name: Package
         shell: bash
         run: |
