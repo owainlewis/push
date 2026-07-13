@@ -1,6 +1,9 @@
 # Rust build output
 /target/
 
+# Generated documentation site
+/site/
+
 # Stray compiled binary at repo root
 /push
 

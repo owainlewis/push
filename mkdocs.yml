@@ -1,0 +1,97 @@
+site_name: Push
+site_description: Turn Claude Code or Codex into an always-on personal assistant.
+site_url: https://owainlewis.github.io/push/
+repo_url: https://github.com/owainlewis/push
+repo_name: owainlewis/push
+edit_uri: edit/main/docs/
+docs_dir: docs
+site_dir: site
+strict: true
+
+exclude_docs: |
+  core-system/
+  jobs/design.md
+  prd.md
+
+theme:
+  name: material
+  language: en
+  font: false
+  icon:
+    logo: material/arrow-up-bold-box-outline
+  features:
+    - navigation.instant
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: push-light
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Use dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Use light mode
+
+nav:
+  - Home: index.md
+  - Get started:
+      - Quickstart: getting-started.md
+      - Configuration: configuration.md
+      - iMessage: channels/imessage.md
+      - Telegram: telegram.md
+  - Use Push:
+      - Jobs and schedules: jobs.md
+      - Permissions and security: security.md
+      - Run as a service: services.md
+  - Reference:
+      - CLI commands: reference/cli.md
+      - Architecture: architecture.md
+  - Develop:
+      - Contributing: contributing.md
+      - Product strategy: strategy.md
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+
+extra_css:
+  - stylesheets/extra.css
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/owainlewis/push
+
+copyright: Push is open source under the MIT License.

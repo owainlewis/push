@@ -46,7 +46,7 @@ mkdir -p ~/Library/Logs
 ```
 
 Create `~/Library/LaunchAgents/com.owainlewis.push.plist`. You can start from
-[`examples/launchd/com.owainlewis.push.plist`](../examples/launchd/com.owainlewis.push.plist)
+[`examples/launchd/com.owainlewis.push.plist`](https://github.com/owainlewis/push/blob/main/examples/launchd/com.owainlewis.push.plist)
 and replace `YOU` with your macOS user name:
 
 ```xml
@@ -117,7 +117,7 @@ mkdir -p ~/.config/push ~/.config/systemd/user ~/.push
 ```
 
 Create `~/.config/systemd/user/push.service`. You can start from
-[`examples/systemd/push.service`](../examples/systemd/push.service):
+[`examples/systemd/push.service`](https://github.com/owainlewis/push/blob/main/examples/systemd/push.service):
 
 ```ini
 [Unit]
@@ -185,8 +185,9 @@ allowlisted channel identity. Pending questions survive service restart.
 Push only advances the selected channel cursor after a message is ignored or
 completed. If the process stops during an in-flight backend run, that message
 can be retried after restart. This avoids silently losing accepted messages,
-but it can repeat backend work or send a duplicate reply if the backend
-finished and the process stopped before state was saved.
+but it can repeat backend work if the process stops before the result is
+persisted. If an outbound reply is already stored, restart delivers that exact
+reply without generating a different second response.
 
 Ignored messages, completed rows, and setup failures advance the cursor. Rows
 newer than an in-flight row do not push the cursor past it until the earlier row
@@ -198,8 +199,9 @@ Managed services run without a person watching the terminal. An allowed sender
 can instruct the configured backend to use its tools, subject to your backend
 settings. Keep `imessage.allow_from` narrow and use the least-powerful named
 permission profile that works. The default `restricted` profile omits shell and
-write tools. Push rejects `full-access` for unattended routes and jobs because
-it cannot enforce the drafted-job boundary.
+write tools. Push rejects `full-access` for unattended routes because it cannot
+enforce the drafted-job boundary. Jobs inherit backend permissions and are
+kept away from Push-owned paths by work-directory validation.
 
 Store config files, state files, audit logs, backend credentials, and service
 logs with permissions appropriate for the service user. Logs may contain

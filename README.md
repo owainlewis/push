@@ -1,535 +1,119 @@
 # Push
 
-Push is an always-on AI assistant that does real work for you. It runs 24/7 on
-your own machine. You text it like a person, and it answers. You give it jobs,
-and it runs them on a schedule: reviewing your repositories, watching pull
-requests, checking your task list, and reporting back to your phone.
+**Your coding agent, on call 24/7.**
 
-Push has two surfaces:
+[![CI](https://github.com/owainlewis/push/actions/workflows/ci.yml/badge.svg)](https://github.com/owainlewis/push/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-read-12756f)](https://owainlewis.github.io/push/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-111417)](LICENSE)
 
-- **Conversations.** Message it over iMessage or Telegram and get a reply from
-  a real coding agent with full context.
-- **Jobs.** Plain Markdown runbooks in `~/.push/jobs/`. Each one is an
-  instruction body plus a cron trigger. Push runs them unattended, records
-  every run, and delivers the result to your chat.
+Push turns Claude Code or Codex into an always-on personal assistant. Run one
+small process on your own machine, message it over iMessage or Telegram, and
+schedule work with plain Markdown runbooks.
 
-The agent runtime underneath is deliberately disposable. Claude Code and Codex
-are the first two backends. Push owns the relationship: messaging, identity,
-scheduling, run history, and delivery.
+It can review repositories before you wake up, watch pull requests, prepare a
+daily brief, or pick up a conversation from your phone. Push owns the durable
+assistant layer: channels, identity, schedules, history, approvals, and result
+delivery. Your coding agent still owns the intelligence and tools.
 
-## How it works
+[Read the documentation](https://owainlewis.github.io/push/) ·
+[Install Push](https://owainlewis.github.io/push/getting-started/) ·
+[View releases](https://github.com/owainlewis/push/releases)
+
+## What Push gives you
+
+- **An assistant that is actually available.** Push runs continuously under
+  `launchd` or `systemd`, not only while a terminal window is open.
+- **The agents you already use.** Keep Claude Code or Codex, including their
+  model access, tools, MCP servers, skills, login, and backend configuration.
+- **Conversations from your phone.** Use private iMessage or Telegram chats.
+  Each thread keeps its own backend session and canonical history.
+- **Work that starts without you.** A five-field cron trigger can run a
+  Markdown job and send the stored result back to your primary chat.
+- **State you own.** Identity is `SOUL.md`, jobs are Markdown, history is local
+  SQLite, and configuration is TOML.
+- **A small local control layer.** Sender allowlists and permission profiles
+  constrain chat access and local execution. Backend tools such as Codex MCP
+  servers keep the permissions defined in the backend. Telegram uses outbound
+  long polling and opens no port.
+
+## The model
 
 ```text
-iMessage or Telegram -> Push gateway -> Claude Code or Codex -> same-channel reply
-cron trigger        -> Push gateway -> Claude Code or Codex -> result to your chat
+you by iMessage or Telegram ─┐
+                            ├─> Push ─> Claude Code or Codex ─> reply to you
+cron-triggered Markdown job ┘
 ```
 
-1. Poll `~/Library/Messages/chat.db` or the Telegram Bot API for new messages.
-2. Keep only messages from yourself or configured allowed senders.
-3. Store the accepted message in `~/.push/push.db`.
-4. Map each conversation to the active backend session.
-5. Load your assistant identity from `~/.push/SOUL.md`.
-6. Run the configured backend headlessly.
-7. Store the generated reply, then deliver it to the originating conversation.
+Push is deliberately not another agent loop. Coding agents are already good
+at reading repositories, running tools, and completing technical work. Push
+makes one of those agents persistent, reachable, schedulable, and accountable.
 
-Jobs follow the same path with a schedule instead of a message: a cron trigger
-claims a run, a fresh backend session executes the runbook with your own agent
-permissions, and the bounded result is stored and delivered to your primary
-chat. Conversations and jobs run concurrently and never block each other.
+The backend can change. Your assistant identity, conversations, jobs, run
+history, and delivery routes stay with Push.
 
-Identity is plain Markdown you own. The gateway injects it into each run, so
-you can read it, edit it, and version it without learning a custom format.
+## Push and Hermes Agent
 
-## A job is a Markdown file
+[Hermes Agent](https://hermes-agent.nousresearch.com/docs/) is a broad,
+batteries-included autonomous agent platform. Push is a smaller orchestration
+layer for people who already want Claude Code or Codex to do the work.
 
-```markdown
-+++
-version = 1
-timeout = "5m"
-workdir = "~/Code"
+| | Push | Hermes Agent |
+| --- | --- | --- |
+| Product shape | Small gateway and scheduler around external coding agents | Full autonomous agent runtime and platform |
+| Agent runtime | Claude Code or Codex | Hermes's integrated agent and tool system |
+| Main focus | A durable 24/7 assistant over private chat and Markdown jobs | A broad agent environment with many tools, channels, skills, and deployment modes |
+| Tools and context | Come from your existing backend configuration | Managed as part of the Hermes ecosystem |
+| State | Local TOML, Markdown, JSON, and SQLite owned by Push | Managed by the Hermes runtime |
+| Best fit | You trust a coding agent already and want it always available | You want an all-in-one autonomous agent platform |
 
-[[triggers]]
-id = "morning"
-kind = "cron"
-schedule = "0 9 * * *"
-timezone = "Europe/London"
-enabled = true
-+++
+The projects are not forks and do not try to solve the same layer. Hermes is a
+useful choice when breadth and an integrated runtime matter. Push is useful
+when you want a narrow, inspectable bridge between your existing coding agent
+and the rest of your day.
 
-List my Todoist tasks for today using the `td` CLI. Group them into Overdue
-and Today. Read-only: do not add, complete, or edit any tasks.
-```
+## What works today
 
-That is the whole format: TOML frontmatter for policy, Markdown for
-instructions. No pipeline DSL, no YAML workflow graph. The agent's
-capabilities come from your own backend configuration, so anything you can do
-in a terminal session with your agent, a job can do on a schedule.
+- iMessage on macOS and Telegram private chats on macOS or Linux
+- Claude Code and Codex backends, selectable by channel or conversation
+- Durable conversation history and backend session recovery
+- Named read-only, workspace, and backend-inherited permission profiles
+- Manual and scheduled Markdown jobs with a durable run ledger
+- Agent-drafted jobs that require approval of the exact revision in chat
+- Local structured audit logs with message content redacted by default
 
-## The Bet
+Push is early software. Its scope is intentionally smaller than a general
+agent platform, and its security depends on a tight sender allowlist plus the
+permissions you give your backend.
 
-Coding agents are becoming commodity runtimes. Claude Code, Codex, Cursor, AMP,
-Pi-style agents, and independent agents all compete on the same layer: tool use,
-repo edits, command execution, MCP, plugins, model choice, and coding workflow.
+## Start here
 
-Push does not try to win that layer. It treats those agents as workers behind a
-small contract: given this user message and assistant context, produce the reply
-or task result that should be sent back.
-
-Push owns the personal assistant layer:
-
-- Message ingress and egress.
-- Sender allowlists and reply loop prevention.
-- User-owned assistant identity.
-- Conversation to backend-session mapping.
-- Routing between channels and runtimes.
-- Scheduled jobs: triggers, overlap locks, a durable run ledger, and delivery.
-- The approval flow when an agent proposes a new job.
-
-Push is the orchestrator, not the agent. Intelligence lives in the backend and
-in your runbooks; Push provides the triggers, state, and delivery that turn a
-capable agent into an assistant that works while you sleep. The backend may be
-Claude Code today and Codex tomorrow, but the assistant identity, jobs, run
-history, and messaging relationship stay with Push.
-
-See [docs/strategy.md](docs/strategy.md) for the full direction.
-
-## Backends
-
-### Claude Code
-
-Claude Code uses `claude -p` with `--session-id` for new conversations and
-`--resume` for existing conversations. `SOUL.md` is passed with
-`--append-system-prompt`, so Claude Code keeps its normal tools, MCP servers,
-permissions, login, and `CLAUDE.md` behavior.
-
-### Codex
-
-Codex uses `codex exec` in non-interactive mode. The first run captures the
-Codex thread id from JSONL output; later turns resume that session with
-`codex exec resume`. `SOUL.md` is passed as Codex developer instructions, kept
-separate from the user's message on new and resumed sessions.
-
-## Scope today
-
-- iMessage and Telegram private-chat channels, polled concurrently.
-- Claude Code and Codex backends, selectable per route and per job.
-- Markdown jobs with cron triggers, manual runs, a durable run ledger, and
-  delivery of results to your primary chat.
-- Agent-drafted jobs installed only after explicit approval in chat.
-- Read-only assistant identity from `~/.push/SOUL.md`.
-
-## Requirements
-
-- For iMessage: macOS with iMessage signed in, Full Disk Access for your
-  terminal, and `osascript`.
-- For Telegram: a bot token and an allowlisted private-chat user or chat id.
-- At least one backend on your `PATH`:
-  - `claude` for Claude Code.
-  - `codex` for Codex.
-- A recent Rust toolchain.
-
-## Quick Start
-
-Install the latest release:
+Install the latest available prebuilt release:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/owainlewis/push/main/install.sh | sh
 ```
 
-Or build from source:
+The current release publishes archives for Apple Silicon macOS and x86_64
+Linux. Other Rust-supported architectures can [build from source](docs/getting-started.md#build-from-source).
 
-```sh
-git clone https://github.com/owainlewis/push.git
-cd push
-cp config.toml.example config.toml
-# edit config.toml: replace the Telegram user ID
-mkdir -p ~/.push
-cp assistant/SOUL.example.md ~/.push/SOUL.md
-export TELEGRAM_BOT_TOKEN='your-bot-token'
-cargo build --release
-./target/release/push doctor --config config.toml
-./target/release/push
-```
+Then follow the [quickstart](https://owainlewis.github.io/push/getting-started/)
+to choose a channel, configure a backend, run `push doctor`, and keep the
+gateway online.
 
-Then message the configured iMessage account or Telegram bot. The reply comes
-back through the same channel and conversation.
+## Documentation
 
-`push doctor` checks shared paths and backend binaries, then only the selected
-channel's requirements. Telegram-only use does not need Messages, `chat.db`, or
-`osascript`.
+The Markdown under [`docs/`](docs/) is the canonical documentation source. It
+builds the [Push documentation site](https://owainlewis.github.io/push/) on
+every documentation change to `main`.
 
-To run Push continuously, see [Running Push as a Service](docs/services.md) for
-macOS `launchd`, Linux `systemd` where supported, logs, restart behavior, and
-headless security notes.
+- [Quickstart](docs/getting-started.md)
+- [Configuration](docs/configuration.md)
+- [Jobs and schedules](docs/jobs.md)
+- [Permissions and security](docs/security.md)
+- [Running as a service](docs/services.md)
+- [Architecture](docs/architecture.md)
+- [Contributing](docs/contributing.md)
 
-## iMessage Support
+## License
 
-Push supports one-to-one iMessage conversations: self-chat and allowlisted
-direct messages. Group chats are not supported in v1 and are ignored.
-
-The iMessage channel reads `~/Library/Messages/chat.db` directly, so the process
-needs Full Disk Access on macOS. It assumes the recent macOS Messages schema with
-`message`, `handle`, `chat`, `chat_message_join`, and `chat_handle_join` tables;
-`push doctor` and the runtime report database access or query failures. Tapbacks,
-system rows, blank messages, messages from non-allowlisted senders, and Push's
-own marked replies are ignored. Phone numbers are matched after removing
-formatting, and email handles are matched case-insensitively.
-
-`state.json` stores the last completed Messages row and backend sessions. On
-restart, Push resumes after the last completed row and keeps existing backend
-sessions when the selected backend has not changed.
-
-`push.db` is the canonical conversation journal. It stores accepted inbound
-messages before command or backend work, and stores generated outbound messages
-before delivery. Channel event IDs make inbound retries idempotent, while one
-outbound row per inbound turn prevents a restart from generating a second
-assistant response. Cursors and backend session IDs remain in `state.json`.
-If the process stops after a channel accepts a reply but before SQLite records
-delivery, restart may resend the same stored reply; it still does not generate
-a different second response.
-
-Backend sessions are disposable caches. A normal resumed turn sends only the
-new message. A new session, backend switch, `/clear`, or recognized missing
-backend session is seeded with up to 20 recent messages from the exact
-channel-qualified conversation. Historical content is JSON-delimited, each
-message is capped at 4 KiB, and the complete history block is capped at 16 KiB.
-`SOUL.md` remains separate backend instruction context. Audit events record
-whether a run was new and how many messages were used for rehydration.
-
-`ask_user` is the durable approval boundary for later workflows. It stores a
-bounded question in `push.db` before sending the same plain numbered list on
-iMessage or Telegram. A reply may be a number when exactly one question is
-pending for that origin, or `<correlation-id> <number>`. Answers are bound to
-the allowlisted sender, chat, channel, and exact thread or Telegram topic. The
-workflow can consume the normalized selected value once. Pending questions
-survive restart; expired, cancelled, duplicate, ambiguous, and mismatched
-replies never reach an agent and are recorded in the audit log. Failed delivery
-leaves the question persisted with failed delivery status for diagnosis or
-cancellation. Approval replies are control inputs, so they update approval and
-audit state without entering the conversation transcript used for rehydration.
-
-## Telegram Support
-
-Telegram uses Bot API long polling, so Push opens no public port and needs no
-webhook server. Private chats are supported first. Group chats, forum topics,
-and non-text updates are ignored before they can reach the agent. Replies go to
-the chat that originated the accepted message. Replies up to Telegram's 32,768
-character rich-message limit use native Rich Markdown, so headings, lists,
-links, quotes, tables, and code render instead of appearing as raw Markdown.
-Larger replies fall back to ordered, Unicode-safe 4,096-character plain-text
-chunks.
-
-Use stable numeric Telegram user or chat ids in the allowlist. Usernames are
-mutable and are not accepted as security identities. Keep the bot token in the
-`TELEGRAM_BOT_TOKEN` environment variable rather than committing it to
-`config.toml`:
-
-```toml
-channel = "telegram"
-agent = "codex"
-
-[telegram]
-allow_user_ids = [123456789]
-```
-
-See [Telegram Setup and Security](docs/telegram.md) for BotFather setup, finding
-numeric ids, routes, first-run cursor behavior, Linux service configuration,
-and credential handling.
-
-## Releases
-
-Tagged releases publish binary archives for Linux and macOS on
-[GitHub Releases](https://github.com/owainlewis/push/releases). Release notes
-are generated from the merged pull requests and commits for the tag.
-
-To create a release:
-
-```sh
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-The release workflow builds with `cargo build --locked --release`, packages the
-binary with `README.md`, `LICENSE`, and `config.toml.example`, uploads checksum
-files, and publishes generated notes.
-
-## Website
-
-The project site is published with GitHub Pages from the static files in
-[`site/`](site/). Once Pages is enabled for GitHub Actions in the repository
-settings, pushes to `main` deploy the site automatically.
-
-### Commands You Can Text
-
-- `/clear`, `/new`, `/reset`: start a fresh backend session.
-- `/help`: list commands.
-
-## Configuration
-
-```toml
-channel = "imessage"
-agent = "codex"
-
-# Advanced shared settings.
-claude_bin = "claude"
-codex_bin = "codex"
-audit_log_path = "~/.push/audit.jsonl"
-audit_log_content = false
-database_path = "~/.push/push.db"
-assistant_dir = "~/.push"
-permission_profile = "restricted"
-jobs_dir = "~/.push/jobs"
-drafts_dir = "~/.push/drafts"
-jobs_agent = "codex"
-jobs_max_timeout = "30m"
-jobs_run_dir = "~/.push/run"
-jobs_max_workers = 2
-
-[permission_profiles.research]
-capability = "read-only"
-
-[imessage]
-self_handles = ["you@icloud.com"]
-allow_from = ["+15551234567"]
-
-[telegram]
-bot_token_env = "TELEGRAM_BOT_TOKEN"
-allow_user_ids = [123456789]
-allow_chat_ids = []
-
-[[routes]]
-thread = "imessage:self:you@icloud.com"
-agent = "codex"
-permission_profile = "workspace"
-```
-
-`channel` can be `imessage` or `telegram`. `agent` can be `claude` or `codex`.
-Channel settings belong under `[imessage]` and `[telegram]`. Existing flat
-channel keys remain accepted for compatibility, but do not set the same option
-in both places.
-
-The single `channel` setting remains the default quick start. To poll both
-configured providers concurrently, replace it with the advanced `channels`
-list:
-
-```toml
-channels = ["imessage", "telegram"]
-
-[imessage]
-self_handles = ["you@icloud.com"]
-allow_from = ["+15551234567"]
-
-[telegram]
-bot_token_env = "TELEGRAM_BOT_TOKEN"
-allow_user_ids = [123456789]
-
-[primary_delivery]
-channel = "telegram"
-target = "123456789"
-```
-
-Each enabled channel polls independently, keeps its own cursor and ordered
-thread queues, and replies through the provider and exact topic that originated
-the message. A poll failure on one provider is logged without stopping the
-other. Startup preflight checks only enabled providers.
-
-`primary_delivery` is optional and is reserved for proactive job results,
-failures, and future approvals. Its channel must be enabled and its target must
-already appear in that provider's allowlist. Telegram topics use
-`"<chat_id>:<topic_id>"`; iMessage uses an allowed handle. Missing or invalid
-primary delivery produces a scoped error only when proactive delivery is
-requested and never disables ordinary replies.
-
-Routes can override the backend by channel or exact channel-qualified thread:
-
-```toml
-[[routes]]
-channel = "telegram"
-agent = "codex"
-permission_profile = "restricted"
-
-[[routes]]
-thread = "telegram:dm:123456789"
-agent = "claude"
-permission_profile = "workspace"
-```
-
-iMessage thread keys are `imessage:self:<handle>` and
-`imessage:dm:<handle>`. Telegram private-chat keys are
-`telegram:dm:<chat_id>`. Private-chat topic keys append
-`:topic:<topic_id>`; topic routes inherit the parent private-chat route unless
-an exact topic route is configured. Legacy unqualified iMessage route keys
-remain accepted.
-
-## Permission Profiles
-
-Every route selects a named Push permission profile. The default is the built-in
-`restricted` profile. Built-ins are `restricted` (`read-only` capability),
-`workspace`, `inherit`, and the deliberately explicit `full-access`. Custom
-profiles can only select one of those capabilities; they cannot inject raw
-backend flags.
-
-Backend translation is intentionally conservative:
-
-- `restricted`: Claude gets only Read, Grep, and Glob with Bash and write tools
-  denied; Codex uses the read-only sandbox with approvals disabled.
-- `workspace`: Claude gets read and file-edit tools but no Bash because Claude
-  Code has no equivalent to Codex filesystem sandboxing; Codex uses
-  `workspace-write` with approvals disabled.
-- `inherit`: Push enforces nothing and defers to the backend's own permission
-  configuration. Claude Code runs headless with the operator's settings
-  (permission mode, allow and deny rules), so tools such as Bash work only when
-  those settings pre-approve them, because a headless run cannot prompt. Codex
-  runs without a `--sandbox` flag, so its configured default sandbox applies.
-  Set `permission_profile = "inherit"` to make this the default for chat.
-- `full-access`: maps to backend bypass modes, but Push rejects it for
-  unattended routes because it overrides even the operator's own backend
-  settings and cannot protect installed jobs, configuration, or state.
-
-Jobs do not select a profile. A job always runs with the `inherit` behavior
-described above. Because `inherit` may write, every job work directory must
-stay clear of Push-owned paths, including the loaded config file.
-Unknown route profiles fail startup.
-
-Legacy raw settings such as `claude_permission_mode`, `claude_tools`,
-`claude_allowed_tools`, `claude_disallowed_tools`, `codex_sandbox`, and
-`codex_approval_policy` now produce a migration error; replace them with a named
-profile.
-
-## Manual Jobs
-
-Jobs are user-owned Markdown runbooks in `~/.push/jobs/`. The filename is a
-lowercase slug and the body is sent verbatim to a fresh backend session:
-
-```markdown
-+++
-version = 1
-timeout = "5m"
-workdir = "~/Code"
-backend = "codex"
-+++
-
-Review repositories with uncommitted work. Do not change files or remote state.
-```
-
-Use:
-
-```bash
-push job validate --config config.toml
-push job list --config config.toml
-push job show repo-review --config config.toml
-push job run repo-review --config config.toml
-push job runs repo-review --config config.toml
-```
-
-Validation rejects unknown frontmatter, unsafe filenames, symlinks, missing
-work directories, unknown backends, excessive timeouts, and work directories
-that overlap Push-owned paths. Invalid jobs are disabled individually and do
-not stop messaging or other valid jobs.
-
-Manual runs execute in the invoking CLI process. Push records and claims the
-run in SQLite before execution and holds a non-blocking per-job OS advisory lock
-for its full lifetime. An overlap is recorded as `skipped_overlap`. Once the
-lock is released, the next start safely marks a stale `running` manual claim as
-failed before claiming a new run. Results and diagnostics are bounded and
-remain visible through `push job runs`; manual results are printed to the
-terminal and are never proactively sent to a chat.
-
-Add one or more cron triggers to schedule a job. Cron uses five fields and an
-explicit IANA timezone:
-
-```toml
-[[triggers]]
-id = "weekday-morning"
-kind = "cron"
-schedule = "0 8 * * 1-5"
-timezone = "Europe/London"
-enabled = true
-```
-
-Scheduling starts only when `primary_delivery` resolves to an enabled,
-allowlisted destination. Missing or invalid primary delivery disables cron
-without affecting replies or manual jobs. The gateway runs at most
-`jobs_max_workers` scheduled jobs concurrently. It does not catch up occurrences
-missed while offline, and daylight-saving gaps are skipped while repeated local
-times run once at their first instant.
-
-Scheduled state and bounded output are persisted before delivery. Success,
-failure, timeout, overlap, and delivery state remain separate in
-`push job runs`. Delivery retries up to three times with backoff from the stored
-result, including after restart, and never reruns the backend.
-
-## Agent-Drafted Jobs
-
-A route using the `workspace` or `inherit` profile can propose a job by writing
-one complete runbook to the identity-specific inbox Push provides beneath
-`drafts_dir`, which defaults to `~/.push/drafts`. Push gives the backend that
-opaque inbox as its extra writable root, so concurrent senders and topics
-cannot claim each other's files. `restricted` routes
-remain read-only, and `full-access` routes are rejected because their
-backend bypass modes cannot enforce this boundary.
-
-After a route run finishes, fails, times out, or resumes from a persisted
-outbound reply, Push reconciles every unrecorded revision in that route's inbox.
-It validates each filename,
-complete contents, work directory, timeout, backend, triggers, and named
-permission profile. Invalid files, symlinks, path escapes, protected Push paths,
-and profiles above the configured job ceiling never reach approval. A valid
-draft is sent in full to the originating allowlisted channel followed by an
-Approve or Reject `ask_user` question.
-
-Approval is bound to that channel, sender, chat, thread or topic, and the exact
-SHA-256 revision shown in the question. Push stores the proposal bytes and both
-identities in `push.db`. It revalidates the current draft and configured ceiling
-before installing from the stored bytes with an atomic no-clobber operation.
-Any edit after presentation invalidates the approval. Rejection leaves the file
-inactive in `drafts_dir`; duplicate answers cannot install twice.
-
-Push reads TOML only. Convert any earlier `config.json` file to `config.toml`
-before upgrading. The old JSON filename remains gitignored to reduce the risk
-of committing a config that contains credentials.
-
-## Assistant Identity and Migration
-
-`SOUL.md` is the only assistant identity source. By default Push reads
-`~/.push/SOUL.md`; set `assistant_dir` to keep the file elsewhere. Push reads
-the file for every run, appends its own invariant instructions in memory, and
-never creates or rewrites `SOUL.md`.
-
-If `SOUL.md` is missing, backend runs continue with only Push's invariants and
-no custom identity. Copy any identity, preferences, or stable context that you
-want to preserve from the old `[assistant]`, `User.md`, and `Memory.md` inputs
-into `SOUL.md`. Old context files are not loaded, and a remaining `[assistant]`
-table produces an actionable configuration error.
-
-## Safety
-
-An inbound text is an instruction to an agent with tool access. The trust
-boundary is the sender filter: iMessage uses `imessage.self_handles` and
-`imessage.allow_from`;
-Telegram uses stable numeric `telegram.allow_user_ids` and
-`telegram.allow_chat_ids`. These fields decide who can
-ask the configured backend to read files, edit files, run shell commands, call
-MCP servers, or use any other backend tool. Keep `imessage.allow_from` tight, and treat a
-lost or shared phone, forwarded iMessage account, or compromised allowed sender
-as able to instruct the agent.
-
-The default `restricted` profile does not grant write or shell tools. Broader
-profiles should still be treated as powerful automation because backend
-enforcement differs and an allowed sender controls the request. With `inherit`,
-everything the backend's own configuration allows, including shell access, is
-one text message away, so pair it with a tight sender allowlist.
-
-## Audit Log
-
-Push writes a structured JSONL audit log to `audit_log_path`, which defaults to
-`~/.push/audit.jsonl`. Each line is one event, such as `message_accepted`,
-`message_ignored`, `backend_run_started`, `backend_run_failed`, `reply_sent`, or
-`message_completed`.
-
-By default, audit events include metadata only: row id, channel, thread,
-backend, routing or error reason, target handle, and message or reply character
-count. Message and reply text are not stored unless `audit_log_content` is set
-to `true`. Keep the audit log local and protect it like service logs because it
-can still contain handles, thread ids, file paths, backend errors, and optional
-message content.
+Push is available under the [MIT License](LICENSE).
