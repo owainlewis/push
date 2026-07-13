@@ -6,7 +6,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::config::{AgentBackend, Config, PermissionCapability};
-use crate::{claude, codex};
+use crate::{claude, codex, pi};
 
 /// One headless agent turn.
 pub struct Request<'a> {
@@ -37,6 +37,7 @@ pub enum RunError {
 pub enum Runner {
     Claude(claude::Runner),
     Codex(codex::Runner),
+    Pi(pi::Runner),
     #[cfg(test)]
     Fake(FakeRunner),
 }
@@ -72,6 +73,9 @@ impl Runner {
                 bin: cfg.codex_bin.clone(),
                 model: cfg.codex_model.clone(),
             }),
+            AgentBackend::Pi => Runner::Pi(pi::Runner {
+                bin: cfg.pi_bin.clone(),
+            }),
         }
     }
 
@@ -79,6 +83,7 @@ impl Runner {
         match self {
             Runner::Claude(_) => AgentBackend::Claude,
             Runner::Codex(_) => AgentBackend::Codex,
+            Runner::Pi(_) => AgentBackend::Pi,
             #[cfg(test)]
             Runner::Fake(r) => r.backend,
         }
@@ -88,6 +93,7 @@ impl Runner {
         match self {
             Runner::Claude(_) => "Claude",
             Runner::Codex(_) => "Codex",
+            Runner::Pi(_) => "Pi",
             #[cfg(test)]
             Runner::Fake(_) => "Fake",
         }
@@ -97,6 +103,7 @@ impl Runner {
         match self {
             Runner::Claude(_) => Uuid::new_v4().to_string(),
             Runner::Codex(_) => String::new(),
+            Runner::Pi(_) => String::new(),
             #[cfg(test)]
             Runner::Fake(_) => String::new(),
         }
@@ -110,6 +117,7 @@ impl Runner {
         match self {
             Runner::Claude(r) => r.run(req, timeout).await,
             Runner::Codex(r) => r.run(req, timeout).await,
+            Runner::Pi(r) => r.run(req, timeout).await,
             #[cfg(test)]
             Runner::Fake(r) => r.run(req, timeout).await,
         }

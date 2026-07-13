@@ -9,7 +9,7 @@ It polls iMessage, filters allowed senders, loads user-owned assistant context,
 runs a configured backend, and sends the backend's final reply back over
 iMessage.
 
-The first supported backends are Claude Code and Codex.
+The supported backends are Claude Code, Codex, and Pi.
 
 ## Product Goal
 
@@ -66,7 +66,7 @@ Push takes a narrower bet:
 | Memory | Opaque or generated store | Plain markdown first |
 | Gateway | One part of the product | The product |
 | Backend choice | Abstracted provider/runtime | Adapter to real CLIs |
-| First backends | Product-specific | Claude Code and Codex |
+| Backends | Product-specific | Claude Code, Codex, and Pi |
 
 ## Core User Flow
 
@@ -75,7 +75,7 @@ Push takes a narrower bet:
 3. Push filters by allowlist and reply marker.
 4. Push loads assistant context.
 5. Push resolves the thread's backend session.
-6. Push runs Claude Code or Codex.
+6. Push runs Claude Code, Codex, or Pi.
 7. Push sends the final reply back over iMessage.
 8. Push stores the latest message row and backend session state.
 
@@ -134,7 +134,7 @@ user prompt.
 
 | Field | Meaning |
 |---|---|
-| `agent` | `claude` or `codex`. |
+| `agent` | `claude`, `codex`, or `pi`. |
 | `routes` | Exact thread to backend overrides. |
 | `permission_profile` | Default named profile; defaults to `restricted`. |
 | `channels` | Optional advanced list of reply channels to poll concurrently; otherwise `channel` is used unchanged. |
@@ -157,6 +157,7 @@ user prompt.
 | `claude_bin` | Claude Code binary. |
 | `codex_bin` | Codex binary. |
 | `codex_model` | Optional Codex model override. |
+| `pi_bin` | Pi coding agent binary. |
 | `sessions_dir` | Per-thread working dirs. |
 | `state_path` | JSON state path. |
 | `audit_log_path` | Local JSONL audit log path. |
@@ -178,6 +179,7 @@ user prompt.
 - `/clear` starts a fresh backend session.
 - Claude backend can create and resume a session.
 - Codex backend can create a session, store the Codex thread id, and resume it.
+- Pi backend can create a session, store the Pi session id, and resume it.
 - Workspace routes can propose a validated job draft, but only an exact-revision
   approval from the bound allowlisted identity can install it.
 - Fresh or lost backend sessions receive bounded recent canonical history;

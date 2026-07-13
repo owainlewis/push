@@ -38,9 +38,26 @@ assistant_root = "~/Code/assistant"
 allow_user_ids = [123456789]
 ```
 
-`channel` is the easiest single-provider setup. `agent` is `claude` or
-`codex`. Chat uses the built-in `restricted` permission profile unless you
+`channel` is the easiest single-provider setup. `agent` is `claude`, `codex`,
+or `pi`. Chat uses the built-in `restricted` permission profile unless you
 select another profile.
+
+### Pi setup
+
+Install Pi from [pi.dev](https://pi.dev/) and configure a model provider or
+complete its authentication as the same user that runs Push. Confirm `pi
+--version` works in the service environment, then select it:
+
+```toml
+agent = "pi"
+pi_bin = "pi"
+```
+
+Push runs `pi --print --mode json`, stores the session ID from Pi's JSON event
+stream, and resumes it with `--session`. Clearing a conversation discards that
+mapping, so the next turn creates a fresh Pi session. Push appends `SOUL.md` as
+system instructions, separate from the user message. Pi is not required unless
+the default backend, an enabled route, or `jobs_agent` selects it.
 
 ## Channels
 
@@ -165,6 +182,7 @@ flags. See [permissions and security](security.md) for exact backend mappings.
 | `claude_bin` | `"claude"` | Claude Code executable |
 | `codex_bin` | `"codex"` | Codex executable |
 | `codex_model` | unset | Optional Codex model override |
+| `pi_bin` | `"pi"` | Pi coding agent executable |
 | `reply_marker` | `"\n\n-- sent by push"` | iMessage loop-prevention marker |
 
 ### Local state

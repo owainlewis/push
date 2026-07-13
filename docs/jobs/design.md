@@ -42,7 +42,7 @@ an agent runtime.
 - Push has one long-running gateway process with no inbound server port.
   Commands may run as short-lived local processes against the same SQLite
   store.
-- Claude Code and Codex have different permission controls, but a job selects
+- Claude Code, Codex, and Pi have different permission controls, but a job selects
   only a named Push permission profile.
 - Scheduled work can have external side effects, so duplicate execution is more
   dangerous than skipping a missed run.
@@ -68,7 +68,7 @@ Markdown instruction body. Version 1 supports these fields:
 - `permission_profile`: required named profile from Push configuration.
 - `timeout`: required positive duration, capped by the configured job maximum.
 - `workdir`: required fixed directory, expanded and canonicalised at validation.
-- `backend`: optional `claude` or `codex` override; otherwise use the configured
+- `backend`: optional `claude`, `codex`, or `pi` override; otherwise use the configured
   jobs default.
 - `triggers`: optional list of separately identified trigger definitions.
 
@@ -165,7 +165,7 @@ snapshot hash of the validated job, trigger information, scheduled time,
 backend, permission profile, timeout, and canonical work directory. Editing the
 job affects later runs but not an already claimed run.
 
-Each run starts a fresh Claude or Codex session. Push supplies the composed
+Each run starts a fresh Claude Code, Codex, or Pi session. Push supplies the composed
 `SOUL.md`, resolved assistant paths, and gateway policy at instruction priority
 and the job body as the current request. Jobs receive neither backend
 conversation history nor canonical chat history. Their backend session ids are

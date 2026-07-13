@@ -29,7 +29,7 @@ Use absolute paths in service files. The service user needs:
   `assistant_root/jobs/`
 - write access to `assistant_root/context/` for workspace or inherited routes,
   and to `assistant_root/jobs/` only for approved job installation
-- access to `claude` or `codex` on `PATH`
+- access to the selected `claude`, `codex`, or `pi` executable on `PATH`
 - backend login, tokens, settings, MCP config, and project credentials
 - for iMessage on macOS, Full Disk Access and `osascript`
 - for Telegram, `TELEGRAM_BOT_TOKEN` in the service environment and network

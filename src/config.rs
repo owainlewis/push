@@ -65,6 +65,8 @@ pub struct Config {
     pub codex_bin: String,
     #[serde(default)]
     pub codex_model: Option<String>,
+    #[serde(default = "default_pi_bin")]
+    pub pi_bin: String,
     #[serde(default = "default_sessions_dir")]
     pub sessions_dir: String,
     #[serde(default = "default_state_path")]
@@ -378,15 +380,23 @@ impl Config {
         }) {
             backends.insert(AgentBackend::parse(&route.agent)?);
         }
+        if let Some(jobs_agent) = self.jobs_agent.as_deref() {
+            backends.insert(AgentBackend::parse(jobs_agent).context("invalid jobs_agent")?);
+        }
 
         let mut bins = Vec::new();
         for backend in backends {
-            bins.push(match backend {
-                AgentBackend::Claude => self.claude_bin.as_str(),
-                AgentBackend::Codex => self.codex_bin.as_str(),
-            });
+            bins.push(self.agent_bin(backend));
         }
         Ok(bins)
+    }
+
+    pub fn agent_bin(&self, backend: AgentBackend) -> &str {
+        match backend {
+            AgentBackend::Claude => self.claude_bin.as_str(),
+            AgentBackend::Codex => self.codex_bin.as_str(),
+            AgentBackend::Pi => self.pi_bin.as_str(),
+        }
     }
 
     fn validate(&self) -> Result<()> {
@@ -799,6 +809,7 @@ impl ChannelKind {
 pub enum AgentBackend {
     Claude,
     Codex,
+    Pi,
 }
 
 impl AgentBackend {
@@ -806,7 +817,8 @@ impl AgentBackend {
         match s {
             "claude" => Ok(AgentBackend::Claude),
             "codex" => Ok(AgentBackend::Codex),
-            other => bail!("invalid agent {other:?}; expected \"claude\" or \"codex\""),
+            "pi" => Ok(AgentBackend::Pi),
+            other => bail!("invalid agent {other:?}; expected \"claude\", \"codex\", or \"pi\""),
         }
     }
 
@@ -814,6 +826,7 @@ impl AgentBackend {
         match self {
             AgentBackend::Claude => "claude",
             AgentBackend::Codex => "codex",
+            AgentBackend::Pi => "pi",
         }
     }
 }
@@ -841,6 +854,9 @@ fn default_claude_bin() -> String {
 }
 fn default_codex_bin() -> String {
     "codex".to_string()
+}
+fn default_pi_bin() -> String {
+    "pi".to_string()
 }
 fn default_permission_profile() -> String {
     "restricted".to_string()
@@ -914,6 +930,7 @@ mod tests {
             claude_bin: "claude".to_string(),
             codex_bin: "codex".to_string(),
             codex_model: None,
+            pi_bin: "pi".to_string(),
             sessions_dir: root.join("sessions").to_string_lossy().to_string(),
             state_path: root.join("state.json").to_string_lossy().to_string(),
             audit_log_path: root.join("audit.jsonl").to_string_lossy().to_string(),
@@ -923,6 +940,58 @@ mod tests {
             assistant_dir: root.to_string_lossy().to_string(),
             reply_marker: String::new(),
         }
+    }
+
+    #[test]
+    fn pi_parses_and_is_selectable_for_default_routes_and_jobs() {
+        let mut cfg = config();
+        cfg.agent = "pi".to_string();
+        cfg.jobs_agent = Some("pi".to_string());
+        cfg.routes = vec![RouteRule {
+            thread: Some("imessage:chat:pi".to_string()),
+            channel: Some("imessage".to_string()),
+            agent: "pi".to_string(),
+            permission_profile: Some("restricted".to_string()),
+        }];
+
+        assert_eq!(AgentBackend::parse("pi").unwrap(), AgentBackend::Pi);
+        assert_eq!(AgentBackend::Pi.as_str(), "pi");
+        assert_eq!(cfg.agent_backend().unwrap(), AgentBackend::Pi);
+        assert_eq!(cfg.jobs_backend().unwrap(), AgentBackend::Pi);
+        assert_eq!(
+            cfg.route_for_message("imessage", "imessage:chat:pi")
+                .unwrap()
+                .backend,
+            AgentBackend::Pi
+        );
+        assert_eq!(cfg.required_agent_bins().unwrap(), vec!["pi"]);
+    }
+
+    #[test]
+    fn pi_binary_defaults_to_pi_when_loading_toml() {
+        let cfg: Config = toml::from_str("agent = 'pi'").unwrap();
+
+        assert_eq!(cfg.agent_backend().unwrap(), AgentBackend::Pi);
+        assert_eq!(cfg.pi_bin, "pi");
+    }
+
+    #[test]
+    fn pi_binary_is_only_required_when_selected() {
+        let mut cfg = config();
+        assert_eq!(cfg.required_agent_bins().unwrap(), vec!["codex"]);
+
+        cfg.routes.push(RouteRule {
+            thread: None,
+            channel: Some("telegram".to_string()),
+            agent: "pi".to_string(),
+            permission_profile: None,
+        });
+        assert_eq!(cfg.required_agent_bins().unwrap(), vec!["codex"]);
+
+        cfg.jobs_agent = Some("pi".to_string());
+        let mut bins = cfg.required_agent_bins().unwrap();
+        bins.sort_unstable();
+        assert_eq!(bins, vec!["codex", "pi"]);
     }
 
     #[test]

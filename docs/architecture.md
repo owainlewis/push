@@ -37,8 +37,8 @@ own the durable pieces:
 
 ### 2. Runtime Disposable
 
-Agent runtimes are replaceable. Claude Code and Codex are the first adapters.
-More can be added without changing the messaging core.
+Agent runtimes are replaceable. Claude Code, Codex, and Pi are the current
+adapters. More can be added without changing the messaging core.
 
 The gateway should not build:
 
@@ -77,8 +77,10 @@ flowchart LR
     end
     adapter -->|claude -p| claude[Claude Code]
     adapter -->|codex exec| codex[Codex]
+    adapter -->|pi --print| pi[Pi]
     claude --> adapter
     codex --> adapter
+    pi --> adapter
     adapter --> sender[Sender]
     sender -->|osascript| db
     sender -->|sendMessage| tg
@@ -172,6 +174,19 @@ Codex creates its own thread id.
 
 The adapter reads Codex JSONL events to capture `thread.started.thread_id` and
 stores that id for future turns.
+
+### Pi Adapter
+
+Pi creates its own session id and reports it in the first JSON event.
+
+- New conversation: `pi --print --mode json ...`
+- Existing conversation: `pi --print --mode json --session <session_id> ...`
+- Instructions: `--append-system-prompt <SOUL.md + resolved assistant paths + gateway policy>`
+- Work dir: per-thread session directory
+
+The adapter reads the session header and final assistant `message_end` event.
+Pi tool allowlists implement Push permission profiles, but Pi has no native
+filesystem sandbox or permission prompts.
 
 ## State Model
 
