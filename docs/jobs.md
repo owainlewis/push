@@ -1,13 +1,13 @@
 # Jobs and schedules
 
 Jobs make Push useful while you are not in a conversation. Each job is a
-user-owned Markdown runbook in `~/.push/jobs/`. TOML frontmatter defines
-execution policy; the Markdown body is sent verbatim to a fresh backend
-session.
+user-owned Markdown runbook in the configured assistant repository's `jobs/`
+directory. TOML frontmatter defines execution policy; the Markdown body is
+sent verbatim to a fresh backend session.
 
 ## Create a job
 
-Create `~/.push/jobs/repo-review.md`:
+Create `<assistant_root>/jobs/repo-review.md`:
 
 ```markdown
 +++
@@ -22,7 +22,8 @@ useful action. Do not change files or remote state.
 ```
 
 Job names are lowercase ASCII slugs made from letters, digits, and hyphens.
-Files must be regular UTF-8 Markdown files directly inside `jobs_dir`.
+Files must be regular UTF-8 Markdown files directly inside the derived
+`<assistant_root>/jobs` directory.
 Subdirectories and symlinks are rejected.
 
 Frontmatter fields:
@@ -35,8 +36,8 @@ Frontmatter fields:
 | `backend` | no | `claude` or `codex`; defaults to `jobs_agent`, then root `agent` |
 | `triggers` | no | One or more cron trigger tables |
 
-Unknown fields are errors. A job work directory may not overlap Push's config,
-identity, sessions, state, database, audit, jobs, drafts, or lock paths.
+Unknown fields are errors. A job work directory may not overlap the assistant
+root, Push config, sessions, state, database, audit, drafts, or lock paths.
 
 ## Validate and inspect jobs
 
@@ -113,7 +114,7 @@ destination, bounded result, and error details.
 ## Agent-drafted jobs
 
 A `workspace` or `inherit` chat route can propose a new job by writing one
-complete runbook to its identity-specific drafts inbox. Push provides that
+complete runbook to its origin-specific drafts inbox. Push provides that
 opaque path as an additional writable boundary, so different senders, chats,
 and topics cannot claim each other's drafts.
 

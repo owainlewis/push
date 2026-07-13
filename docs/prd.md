@@ -29,6 +29,7 @@ Build the smallest useful personal assistant gateway:
 - Inject user-owned assistant context into each run.
 - Support simple per-thread backend routing.
 - Load one user-owned `SOUL.md` identity file.
+- Create and configure one user-selected assistant repository with `push init`.
 - Keep the binary local and self-contained.
 
 ## Non-Goals
@@ -40,6 +41,7 @@ Build the smallest useful personal assistant gateway:
 - Support group chats.
 - Support proactive messages.
 - Support multiple active backends in the same conversation at the same time.
+- Support assistant IDs, registries, selection, or multiple assistants.
 
 ## Target User
 
@@ -84,6 +86,7 @@ Push takes a narrower bet:
 - `src/gateway.rs`: poll loop, filtering, commands, queues, worker dispatch.
 - `src/history.rs`: canonical SQLite conversations and messages.
 - `src/jobs.rs`: validated runbooks, advisory locking, manual execution, and run ledger.
+- `src/assistant.rs`: safe assistant repository scaffolding and root persistence.
 - `src/approval.rs`: durable bounded questions and normalized answers.
 - `src/agent.rs`: backend boundary.
 - `src/claude.rs`: Claude Code adapter.
@@ -137,8 +140,7 @@ user prompt.
 | `channels` | Optional advanced list of reply channels to poll concurrently; otherwise `channel` is used unchanged. |
 | `primary_delivery` | Optional enabled channel and allowlisted target for proactive output. |
 | `permission_profiles` | Custom names mapped to a common capability. |
-| `job_permission_profiles` | Explicit profile names future jobs may request; defaults to `restricted`. |
-| `jobs_dir` | Installed Markdown runbooks; defaults to `~/.push/jobs`. |
+| `assistant_root` | Canonical root of the one assistant repository. `SOUL.md`, `context/`, and `jobs/` are derived. |
 | `drafts_dir` | Agent-written inactive job proposals; defaults to `~/.push/drafts`. |
 | `jobs_agent` | Optional default job backend; otherwise uses `agent`. |
 | `jobs_max_timeout` | Maximum validated job timeout; defaults to `30m`. |
@@ -160,7 +162,6 @@ user prompt.
 | `audit_log_path` | Local JSONL audit log path. |
 | `audit_log_content` | Whether audit events include message and reply text. |
 | `database_path` | Canonical SQLite history path; defaults to `~/.push/push.db`. |
-| `assistant_dir` | Directory with `SOUL.md`; defaults to `~/.push`. |
 | `reply_marker` | Footer used to skip Push's own replies. |
 
 ## Control Commands
@@ -182,6 +183,11 @@ user prompt.
 - Fresh or lost backend sessions receive bounded recent canonical history;
   resumed sessions receive only the new request.
 - Assistant identity is included in backend runs at instruction priority.
+- `push init [path]` safely creates and Git-initializes the conventional
+  assistant structure, defaults to `./assistant`, and persists one canonical
+  root without overwriting user files.
+- Every backend run receives resolved assistant, context, and jobs locations in
+  gateway-owned instructions.
 - Exact thread routes can choose a non-default backend.
 - Tests cover filtering and backend output parsing.
 

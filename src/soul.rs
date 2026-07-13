@@ -1,18 +1,18 @@
 //! User-owned assistant identity injected into every backend run.
 
-use std::path::Path;
-
 use anyhow::{Context, Result};
 
 const SOUL_FILE: &str = "SOUL.md";
-const INVARIANTS: &str = "The assistant identity file is owned by the user. Do not modify SOUL.md.";
+const POLICY: &str = "Begin with context/README.md when user context is relevant.\nDo not modify SOUL.md or installed jobs directly.\nPropose job changes through Push's approval workflow.";
 
 /// Reads `SOUL.md` from `dir` and appends gateway-owned invariants in memory.
 ///
 /// A missing or empty file produces only the invariants. Other read failures
 /// are returned to the gateway. Push never creates or changes the file.
 pub fn load(dir: &str) -> Result<String> {
-    let path = Path::new(dir).join(SOUL_FILE);
+    let root =
+        std::fs::canonicalize(dir).with_context(|| format!("resolve assistant root {dir}"))?;
+    let path = root.join(SOUL_FILE);
     let soul = match std::fs::read_to_string(&path) {
         Ok(contents) => Some(contents),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -21,9 +21,15 @@ pub fn load(dir: &str) -> Result<String> {
     .map(|contents| contents.trim().to_string())
     .filter(|contents| !contents.is_empty());
 
+    let footer = format!(
+        "Assistant root: {}\nContext: {}\nJobs: {}\n\n{POLICY}",
+        root.display(),
+        root.join("context").display(),
+        root.join("jobs").display()
+    );
     Ok(match soul {
-        Some(soul) => format!("{soul}\n\n{INVARIANTS}"),
-        None => INVARIANTS.to_string(),
+        Some(soul) => format!("{soul}\n\n{footer}"),
+        None => footer,
     })
 }
 
@@ -40,9 +46,13 @@ mod tests {
         std::fs::write(&path, original).unwrap();
 
         let instructions = load(dir.to_str().unwrap()).unwrap();
+        let canonical = std::fs::canonicalize(&dir).unwrap();
 
         assert!(instructions.starts_with("Be calm, direct, and curious."));
-        assert!(instructions.ends_with(INVARIANTS));
+        assert!(instructions.contains(&format!("Assistant root: {}", canonical.display())));
+        assert!(instructions.contains(&format!("Context: {}", canonical.join("context").display())));
+        assert!(instructions.contains(&format!("Jobs: {}", canonical.join("jobs").display())));
+        assert!(instructions.ends_with(POLICY));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -51,7 +61,9 @@ mod tests {
     fn missing_soul_has_predictable_gateway_invariants() {
         let dir = temp_dir("missing-soul");
 
-        assert_eq!(load(dir.to_str().unwrap()).unwrap(), INVARIANTS);
+        let instructions = load(dir.to_str().unwrap()).unwrap();
+        assert!(instructions.starts_with("Assistant root:"));
+        assert!(instructions.ends_with(POLICY));
         assert!(!dir.join(SOUL_FILE).exists());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -64,8 +76,10 @@ mod tests {
 
         let instructions = load(dir.to_str().unwrap()).unwrap();
 
-        assert_eq!(instructions, INVARIANTS);
-        assert!(!instructions.contains("legacy"));
+        assert!(instructions.starts_with("Assistant root:"));
+        assert!(instructions.ends_with(POLICY));
+        assert!(!instructions.contains("legacy user context"));
+        assert!(!instructions.contains("legacy memory"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

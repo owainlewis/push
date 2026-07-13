@@ -32,6 +32,7 @@ Use a Telegram-only config:
 ```toml
 channel = "telegram"
 agent = "codex"
+assistant_root = "~/Code/assistant"
 
 [telegram]
 allow_user_ids = [123456789]
@@ -105,9 +106,10 @@ Protect these files as credentials or private assistant data:
 - `state.json` and the audit log
 - `push.db`
 - the session workspace directory
-- `assistant_dir/SOUL.md`
+- the private `assistant_root` repository, including `SOUL.md`, context, and jobs
 
-Never commit bot tokens, state files, audit logs, session workspaces, or
-assistant identity. Rotate the bot token with BotFather immediately if it is
-exposed. Keep allowlists narrow because an allowed sender can instruct the
-configured agent to use its local tools and credentials.
+The assistant directory is intended to be versioned in its own private Git
+repository. Never put bot tokens, config secrets, state files, audit logs,
+session workspaces, or databases in it. Rotate the bot token with BotFather
+immediately if it is exposed. Keep allowlists narrow because an allowed sender
+can instruct the configured agent to use its local tools and credentials.

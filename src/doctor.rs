@@ -88,12 +88,13 @@ fn check_config(cfg: &config::Config, checks: &mut Vec<Check>) {
     checks.push(Check::pass(
         "config",
         format!(
-            "channels={}, agent={}, permission_profile={}, imessage.self_handles={}, imessage.allow_from={}, telegram.allow_user_ids={}, telegram.allow_chat_ids={}",
+            "channels={}, agent={}, permission_profile={}, assistant_root={}, imessage.self_handles={}, imessage.allow_from={}, telegram.allow_user_ids={}, telegram.allow_chat_ids={}",
             cfg.enabled_channel_kinds()
                 .map(|channels| channels.into_iter().map(|kind| kind.as_str()).collect::<Vec<_>>().join(","))
                 .unwrap_or_else(|_| cfg.channel.clone()),
             cfg.agent,
             cfg.permission_profile,
+            cfg.assistant_root,
             cfg.self_handles.len(),
             cfg.allow_from.len(),
             cfg.telegram_allow_user_ids.len(),
@@ -377,6 +378,22 @@ agent = "bogus"
 
         assert!(err.to_string().contains("doctor found 1 failed check"));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn doctor_rejects_an_inline_token_inside_the_assistant_repository() {
+        let root = temp_dir("doctor-inline-token");
+        let path = root.join("config.toml");
+        std::fs::write(
+            &path,
+            "channel = 'telegram'\nassistant_root = '.'\n[telegram]\nbot_token = 'committed-secret'\nallow_user_ids = [1]\n",
+        )
+        .unwrap();
+
+        let error = doctor(path.to_str().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("doctor found 1 failed check"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

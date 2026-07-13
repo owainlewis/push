@@ -11,9 +11,10 @@ small process on your own machine, message it over iMessage or Telegram, and
 schedule work with plain Markdown runbooks.
 
 It can review repositories before you wake up, watch pull requests, prepare a
-daily brief, or pick up a conversation from your phone. Push owns the durable
-assistant layer: channels, identity, schedules, history, approvals, and result
-delivery. Your coding agent still owns the intelligence and tools.
+daily brief, or pick up a conversation from your phone. You own one portable,
+Git-versioned assistant repository containing identity, context, and jobs. Push
+owns channels, schedules, history, approvals, security, and result delivery.
+Your coding agent owns the intelligence and tools.
 
 [Read the documentation](https://owainlewis.github.io/push/) ·
 [Install Push](https://owainlewis.github.io/push/getting-started/) ·
@@ -29,8 +30,8 @@ delivery. Your coding agent still owns the intelligence and tools.
   Each thread keeps its own backend session and canonical history.
 - **Work that starts without you.** A five-field cron trigger can run a
   Markdown job and send the stored result back to your primary chat.
-- **State you own.** Identity is `SOUL.md`, jobs are Markdown, history is local
-  SQLite, and configuration is TOML.
+- **State you own.** `SOUL.md`, durable context, and installed jobs live in
+  one assistant repository. History is local SQLite and configuration is TOML.
 - **A small local control layer.** Sender allowlists and permission profiles
   constrain chat access and local execution. Backend tools such as Codex MCP
   servers keep the permissions defined in the backend. Telegram uses outbound
@@ -48,8 +49,8 @@ Push is deliberately not another agent loop. Coding agents are already good
 at reading repositories, running tools, and completing technical work. Push
 makes one of those agents persistent, reachable, schedulable, and accountable.
 
-The backend can change. Your assistant identity, conversations, jobs, run
-history, and delivery routes stay with Push.
+The backend can change. Your assistant repository remains portable, while
+Push keeps conversations, run history, schedules, and delivery routes durable.
 
 ## Push and Hermes Agent
 
@@ -75,6 +76,8 @@ and the rest of your day.
 
 - iMessage on macOS and Telegram private chats on macOS or Linux
 - Claude Code and Codex backends, selectable by channel or conversation
+- One Git-versioned assistant repository containing `SOUL.md`, `context/`, and
+  approved `jobs/`
 - Durable conversation history and backend session recovery
 - Named read-only, workspace, and backend-inherited permission profiles
 - Manual and scheduled Markdown jobs with a durable run ledger
@@ -97,8 +100,8 @@ The current release publishes archives for Apple Silicon macOS and x86_64
 Linux. Other Rust-supported architectures can [build from source](docs/getting-started.md#build-from-source).
 
 Then follow the [quickstart](https://owainlewis.github.io/push/getting-started/)
-to choose a channel, configure a backend, run `push doctor`, and keep the
-gateway online.
+to create your assistant repository, choose a channel, configure a backend,
+run `push doctor`, and keep the gateway online.
 
 ## Documentation
 

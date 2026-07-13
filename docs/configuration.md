@@ -12,6 +12,17 @@ Paths beginning with `~` are expanded. Invalid values, unknown fields inside
 provider sections, unsafe path overlap, and removed legacy permission settings
 fail configuration load with an actionable error.
 
+Create the one assistant repository and persist its root before editing the
+rest of the config:
+
+```sh
+push init ~/Code/assistant --config ~/.config/push/config.toml
+```
+
+Push derives `SOUL.md`, `context/`, and `jobs/` from `assistant_root`. At run
+time it appends their resolved absolute locations to the user-owned `SOUL.md`
+instructions in memory. It does not write machine paths into the repository.
+
 Root configuration, route, primary-delivery, and custom-profile tables do not
 yet reject every unknown key. Use the documented names, then run `push doctor`;
 do not assume a silent key changed runtime behavior.
@@ -21,6 +32,7 @@ do not assume a silent key changed runtime behavior.
 ```toml
 channel = "telegram"
 agent = "codex"
+assistant_root = "~/Code/assistant"
 
 [telegram]
 allow_user_ids = [123456789]
@@ -159,7 +171,7 @@ flags. See [permissions and security](security.md) for exact backend mappings.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `assistant_dir` | `~/.push` | Directory containing `SOUL.md` |
+| `assistant_root` | required for new setups | Canonical root of the one assistant repository; `SOUL.md`, `context/`, and `jobs/` are derived |
 | `sessions_dir` | `~/.push/sessions` | Per-thread backend work directories |
 | `state_path` | `~/.push/state.json` | Channel cursors and backend session IDs |
 | `database_path` | `~/.push/push.db` | Canonical conversation, approval, and job history |
@@ -170,22 +182,23 @@ flags. See [permissions and security](security.md) for exact backend mappings.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `jobs_dir` | `~/.push/jobs` | Installed Markdown runbooks |
 | `drafts_dir` | `~/.push/drafts` | Inactive agent-authored proposals |
 | `jobs_agent` | root `agent` | Default jobs backend |
 | `jobs_max_timeout` | `"30m"` | Maximum accepted job timeout |
 | `jobs_run_dir` | `~/.push/run` | Local advisory locks |
 | `jobs_max_workers` | `2` | Concurrent scheduled job workers |
 
-Push validates that state, sessions, assistant, installed jobs, drafts, locks,
-the loaded config file, and job work directories do not overlap in unsafe
-ways.
+Push validates that state, sessions, the assistant root, drafts, locks, the
+loaded config file, and job work directories do not overlap in unsafe ways.
+Runtime state and secrets must stay outside the Git-versioned assistant
+repository.
 
 ## Complete example
 
 ```toml
 channels = ["imessage", "telegram"]
 agent = "codex"
+assistant_root = "~/Code/assistant"
 permission_profile = "restricted"
 poll_interval = "3s"
 run_timeout = "120s"
@@ -214,3 +227,8 @@ permission_profile = "trusted-workspace"
 Legacy flat channel fields remain accepted for migration, but new
 configurations should use `[imessage]` and `[telegram]`. JSON configuration and
 raw backend permission fields are no longer supported.
+
+Legacy `assistant_dir` and `jobs_dir` settings remain compatible only when the
+jobs path is exactly `<assistant_dir>/jobs`. For separate legacy paths, move
+`SOUL.md`, context, and jobs under one directory and replace both settings with
+`assistant_root`.

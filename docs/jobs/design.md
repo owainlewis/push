@@ -6,7 +6,8 @@
 
 ## Summary
 
-Push jobs are user-owned Markdown runbooks stored under `~/.push/jobs/`. A job
+Push jobs are user-owned Markdown runbooks stored under
+`<assistant_root>/jobs/`. A job
 contains one instruction body plus execution policy such as its permission
 profile, timeout, working directory, and backend override.
 Manual and cron starts are triggers attached to the same job rather than
@@ -45,15 +46,16 @@ an agent runtime.
   only a named Push permission profile.
 - Scheduled work can have external side effects, so duplicate execution is more
   dangerous than skipping a missed run.
-- Job files and `SOUL.md` are user-owned inputs. Runtime and ledger state remain
-  Push-owned.
+- Job files, `SOUL.md`, and `context/` belong to the Git-versioned assistant
+  repository. Runtime and ledger state remain Push-owned outside it.
 - Existing installations without a jobs directory continue to start normally.
 
 ## Proposed design
 
 ### Job format and identity
 
-Each job is one UTF-8 file at `~/.push/jobs/<job-name>.md`. The file stem is the
+Each job is one UTF-8 file at
+`<assistant_root>/jobs/<job-name>.md`. The file stem is the
 stable job name and must be a lowercase ASCII slug containing letters, digits,
 and hyphens. Subdirectories, symlinks, duplicate canonical paths, and names
 that differ only by case are rejected. Renaming a file creates a new job
@@ -164,9 +166,10 @@ backend, permission profile, timeout, and canonical work directory. Editing the
 job affects later runs but not an already claimed run.
 
 Each run starts a fresh Claude or Codex session. Push supplies the composed
-`SOUL.md` instructions at instruction priority and the job body as the current
-request. Jobs receive neither backend conversation history nor canonical chat
-history. Their backend session ids are not saved for reuse. The working
+`SOUL.md`, resolved assistant paths, and gateway policy at instruction priority
+and the job body as the current request. Jobs receive neither backend
+conversation history nor canonical chat history. Their backend session ids are
+not saved for reuse. The working
 directory is stable across runs, so filesystem state may persist even though
 conversation state does not.
 
@@ -245,23 +248,25 @@ operator-owned.
 
 ### Agent-authored draft extension
 
-Route agents may write proposals only in an opaque, exact-identity inbox under
-`~/.push/drafts/`, which Push adds as the only extra writable root for contained
+Route agents may write proposals only in an opaque, exact-origin inbox under
+`~/.push/drafts/`, which Push adds as a Push-owned writable root for contained
 workspace profiles. Concurrent channels, senders, chats, and topics therefore
 cannot claim each other's files. Full-access
 routes and jobs are rejected because backend bypass modes cannot prevent direct
-writes to Push-owned files. Job work directories may not overlap Push identity,
-configuration, session, draft, installed-job, lock, audit, or database paths.
+writes to Push-owned files. Job work directories may not overlap the assistant
+root, configuration, session, draft, installed-job, lock, audit, or database
+paths.
 
 After a route run completes, fails, times out, or resumes from a persisted
-outbound reply, Push reconciles unrecorded revisions in that identity's inbox.
+outbound reply, Push reconciles unrecorded revisions in that origin's inbox.
 It validates each full runbook and sends its complete contents to the
 originating allowlisted channel. The
 following `ask_user` question binds Approve and Reject to that channel, sender,
 chat, thread or topic, and exact SHA-256 revision. SQLite stores the exact bytes
 and proposer identity with the question. Approval rereads and revalidates the
 draft and current permission ceiling. A changed revision is invalidated; a
-valid stored revision is staged inside `jobs_dir` and installed with an atomic
+valid stored revision is staged inside the derived assistant `jobs/` directory
+and installed with an atomic
 no-clobber link. Rejection leaves the draft inactive. Proposal and approver
 identities, terminal status, and errors remain durable across restart, while
 duplicate answers cannot repeat installation.

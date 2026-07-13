@@ -4,6 +4,7 @@
 
 mod agent;
 mod approval;
+mod assistant;
 mod audit;
 mod channel;
 mod claude;
@@ -31,6 +32,23 @@ async fn main() -> Result<()> {
 
     let args = Args::parse(std::env::args().skip(1).collect())?;
     match args.command {
+        Command::Init(path) => {
+            let result = assistant::init(&path, &args.config_path)?;
+            println!("Initialized assistant at {}", result.root.display());
+            println!(
+                "Configured assistant_root in {}",
+                result.config_path.display()
+            );
+            if result.git_initialized {
+                println!("Initialized Git repository.");
+            }
+            println!("\nNext:");
+            println!("  $EDITOR {}/SOUL.md", result.root.display());
+            println!("  $EDITOR {}/context/README.md", result.root.display());
+            println!("  push doctor --config {}", result.config_path.display());
+            println!("  push --config {}", result.config_path.display());
+            Ok(())
+        }
         Command::Doctor => doctor::doctor(&args.config_path),
         Command::Job(command) => run_job_command(&args.config_path, command).await,
         Command::Run => {
@@ -51,6 +69,7 @@ struct Args {
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     Run,
+    Init(String),
     Doctor,
     Job(JobCommand),
 }
@@ -86,6 +105,8 @@ impl Args {
         }
         let command = match positional.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
             [] => Command::Run,
+            ["init"] => Command::Init("./assistant".to_string()),
+            ["init", path] => Command::Init((*path).to_string()),
             ["doctor"] => Command::Doctor,
             ["job", "validate"] => Command::Job(JobCommand::Validate),
             ["job", "list"] => Command::Job(JobCommand::List),
@@ -94,7 +115,7 @@ impl Args {
             ["job", "runs"] => Command::Job(JobCommand::Runs(None)),
             ["job", "runs", name] => Command::Job(JobCommand::Runs(Some((*name).to_string()))),
             _ => bail!(
-                "unknown command; expected doctor, job validate, job list, job show <name>, job run <name>, job runs [<name>], or --config <path>"
+                "unknown command; expected init [path], doctor, job validate, job list, job show <name>, job run <name>, job runs [<name>], or --config <path>"
             ),
         };
         Ok(Self {
@@ -282,6 +303,27 @@ mod tests {
     }
 
     #[test]
+    fn parses_init_path_and_default() {
+        assert_eq!(
+            Args::parse(vec!["init".into()]).unwrap().command,
+            Command::Init("./assistant".to_string())
+        );
+        assert_eq!(
+            Args::parse(vec![
+                "init".into(),
+                "~/Code/assistant".into(),
+                "--config".into(),
+                "custom.toml".into(),
+            ])
+            .unwrap(),
+            Args {
+                command: Command::Init("~/Code/assistant".to_string()),
+                config_path: "custom.toml".to_string(),
+            }
+        );
+    }
+
+    #[test]
     fn invalid_jobs_are_non_fatal_during_gateway_startup() {
         let jobs_dir = temp_dir("invalid-startup-jobs");
         std::fs::write(jobs_dir.join("invalid.md"), "not a runbook").unwrap();
@@ -331,7 +373,7 @@ mod tests {
         assert_eq!(
             cfg.jobs_dir,
             Path::new(&std::env::var("HOME").unwrap())
-                .join(".push/jobs")
+                .join("Code/assistant/jobs")
                 .to_string_lossy()
         );
         assert_eq!(
@@ -341,28 +383,197 @@ mod tests {
                 .to_string_lossy()
         );
         assert_eq!(
-            cfg.assistant_dir,
+            cfg.assistant_root,
             Path::new(&std::env::var("HOME").unwrap())
-                .join(".push")
+                .join("Code/assistant")
                 .to_string_lossy()
         );
+        assert_eq!(cfg.assistant_dir, cfg.assistant_root);
     }
 
     #[test]
-    fn explicit_assistant_dir_override_is_preserved() {
-        let path = temp_path("assistant-dir-config");
+    fn assistant_root_is_canonical_and_derives_identity_context_and_jobs() {
+        let root = temp_dir("assistant-root-config");
+        std::fs::create_dir(root.join("context")).unwrap();
+        let path = temp_path("assistant-root-config-file");
         std::fs::write(
             &path,
-            r#"self_handles = ["me@icloud.com"]
-assistant_dir = "/srv/push-assistant"
-"#,
+            format!(
+                "self_handles = [\"me@icloud.com\"]\nassistant_root = {:?}\n",
+                root
+            ),
         )
         .unwrap();
 
         let cfg = Config::load(path.to_str().unwrap()).unwrap();
 
-        assert_eq!(cfg.assistant_dir, "/srv/push-assistant");
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        assert_eq!(Path::new(&cfg.assistant_root), canonical);
+        assert_eq!(cfg.assistant_dir, cfg.assistant_root);
+        assert_eq!(Path::new(&cfg.jobs_dir), canonical.join("jobs"));
+        assert_eq!(
+            cfg.backend_context_dir().unwrap().unwrap(),
+            canonical.join("context")
+        );
         let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn compatible_legacy_assistant_and_jobs_paths_still_load() {
+        let root = temp_dir("legacy-assistant-config");
+        let path = temp_path("legacy-assistant-config-file");
+        std::fs::write(
+            &path,
+            format!(
+                "self_handles = [\"me@icloud.com\"]\nassistant_dir = {:?}\njobs_dir = {:?}\n",
+                root,
+                root.join("jobs")
+            ),
+        )
+        .unwrap();
+
+        let cfg = Config::load(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(
+            Path::new(&cfg.assistant_root),
+            std::fs::canonicalize(&root).unwrap()
+        );
+        assert_eq!(
+            Path::new(&cfg.jobs_dir),
+            std::fs::canonicalize(&root).unwrap().join("jobs")
+        );
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_layout_with_inline_token_remains_compatible() {
+        let root = temp_dir("legacy-assistant-inline-token");
+        let path = root.join("config.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "channel = 'telegram'\nassistant_dir = {:?}\njobs_dir = {:?}\n[telegram]\nbot_token = 'legacy-secret'\nallow_user_ids = [1]\n",
+                root,
+                root.join("jobs")
+            ),
+        )
+        .unwrap();
+
+        let cfg = Config::load(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(cfg.telegram_bot_token.as_deref(), Some("legacy-secret"));
+        assert_eq!(Path::new(&cfg.assistant_root), root.canonicalize().unwrap());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn divergent_legacy_paths_report_actionable_migration() {
+        let root = temp_dir("divergent-legacy-assistant");
+        let jobs = temp_dir("divergent-legacy-jobs");
+        let path = temp_path("divergent-legacy-config");
+        std::fs::write(
+            &path,
+            format!(
+                "self_handles = [\"me@icloud.com\"]\nassistant_dir = {:?}\njobs_dir = {:?}\n",
+                root, jobs
+            ),
+        )
+        .unwrap();
+
+        let error = Config::load(path.to_str().unwrap()).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("do not form one assistant repository"));
+        assert!(error.to_string().contains("assistant_root"));
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(jobs);
+    }
+
+    #[test]
+    fn relative_assistant_root_resolves_from_config_directory() {
+        let root = temp_dir("relative-assistant-root");
+        let path = root.join("config.toml");
+        std::fs::write(
+            &path,
+            "self_handles = [\"me@icloud.com\"]\nassistant_root = \".\"\n",
+        )
+        .unwrap();
+
+        let cfg = Config::load(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(
+            Path::new(&cfg.assistant_root),
+            std::fs::canonicalize(&root).unwrap()
+        );
+        assert_eq!(
+            Path::new(&cfg.jobs_dir),
+            std::fs::canonicalize(&root).unwrap().join("jobs")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn new_and_legacy_assistant_keys_cannot_be_mixed() {
+        let root = temp_dir("mixed-assistant-config");
+        let path = temp_path("mixed-assistant-config-file");
+        std::fs::write(
+            &path,
+            format!(
+                "self_handles = [\"me@icloud.com\"]\nassistant_root = {:?}\nassistant_dir = {:?}\n",
+                root, root
+            ),
+        )
+        .unwrap();
+
+        let error = Config::load(path.to_str().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("replaces legacy"));
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn explicit_assistant_root_rejects_runtime_state_inside_repository() {
+        let root = temp_dir("assistant-runtime-boundary");
+        let path = temp_path("assistant-runtime-boundary-config");
+        std::fs::write(
+            &path,
+            format!(
+                "self_handles = [\"me@icloud.com\"]\nassistant_root = {:?}\ndatabase_path = {:?}\n",
+                root,
+                root.join("push.db")
+            ),
+        )
+        .unwrap();
+
+        let error = Config::load(path.to_str().unwrap()).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("database_path must stay outside assistant_root"));
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn config_load_rejects_an_inline_token_added_inside_the_assistant() {
+        let root = temp_dir("assistant-inline-token");
+        let path = root.join("config.toml");
+        std::fs::write(
+            &path,
+            "channel = 'telegram'\nassistant_root = '.'\n[telegram]\nbot_token = 'committed-secret'\nallow_user_ids = [1]\n",
+        )
+        .unwrap();
+
+        let error = Config::load(path.to_str().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("inline Telegram token"));
+        assert!(error.to_string().contains("telegram.bot_token_env"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -380,7 +591,7 @@ name = "push"
 
         let error = Config::load(path.to_str().unwrap()).unwrap_err();
 
-        assert!(error.to_string().contains("assistant_dir/SOUL.md"));
+        assert!(error.to_string().contains("assistant_root/SOUL.md"));
         let _ = std::fs::remove_file(path);
     }
 

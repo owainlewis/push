@@ -43,6 +43,10 @@ pub struct Config {
     pub permission_profile: String,
     #[serde(default)]
     pub permission_profiles: HashMap<String, PermissionProfileConfig>,
+    /// Canonical root of the single user-owned assistant repository.
+    #[serde(default)]
+    pub assistant_root: String,
+    /// Derived from `assistant_root`. Parsed only for legacy migration.
     #[serde(default = "default_jobs_dir")]
     pub jobs_dir: String,
     #[serde(default = "default_drafts_dir")]
@@ -71,6 +75,7 @@ pub struct Config {
     pub database_path: String,
     #[serde(default)]
     pub audit_log_content: bool,
+    /// Derived from `assistant_root`. Parsed only for legacy migration.
     #[serde(default = "default_assistant_dir")]
     pub assistant_dir: String,
     #[serde(default = "default_reply_marker")]
@@ -90,7 +95,7 @@ impl Config {
             .context("config must be a TOML table")?;
         if root.contains_key("assistant") {
             bail!(
-                "structured [assistant] settings are no longer supported; move assistant identity into assistant_dir/SOUL.md"
+                "structured [assistant] settings are no longer supported; move assistant identity into assistant_root/SOUL.md"
             );
         }
         for legacy in [
@@ -116,6 +121,14 @@ impl Config {
                 "job_permission_profiles is no longer supported; jobs run with the backend's own permission configuration, so remove this key"
             );
         }
+        let has_assistant_root = root.contains_key("assistant_root");
+        let has_legacy_assistant_dir = root.contains_key("assistant_dir");
+        let has_legacy_jobs_dir = root.contains_key("jobs_dir");
+        if has_assistant_root && (has_legacy_assistant_dir || has_legacy_jobs_dir) {
+            bail!(
+                "assistant_root replaces legacy assistant_dir and jobs_dir; remove the legacy keys after moving SOUL.md, context, and jobs under assistant_root"
+            );
+        }
         flatten_provider_section(
             root,
             "imessage",
@@ -136,18 +149,79 @@ impl Config {
             ],
         )?;
         let mut c: Config = value.try_into().context("parse TOML config")?;
+        let config_path =
+            std::fs::canonicalize(path).with_context(|| format!("resolve config {path}"))?;
         c.db_path = expand_home(&c.db_path);
         c.sessions_dir = expand_home(&c.sessions_dir);
         c.state_path = expand_home(&c.state_path);
         c.audit_log_path = expand_home(&c.audit_log_path);
         c.database_path = expand_home(&c.database_path);
-        c.assistant_dir = expand_home(&c.assistant_dir);
-        c.jobs_dir = expand_home(&c.jobs_dir);
+        let assistant_root = if has_assistant_root {
+            resolve_assistant_root(&c.assistant_root, &config_path)?
+        } else {
+            let legacy_root = resolve_assistant_root(&c.assistant_dir, &config_path)?;
+            let legacy_jobs = resolved_absolute("jobs_dir", Path::new(&expand_home(&c.jobs_dir)))?;
+            let derived_jobs = legacy_root.join("jobs");
+            if legacy_jobs != derived_jobs {
+                bail!(
+                    "legacy assistant_dir ({}) and jobs_dir ({}) do not form one assistant repository. Move SOUL.md, context, and jobs under one directory, then replace both settings with assistant_root = \"/path/to/assistant\"",
+                    legacy_root.display(),
+                    legacy_jobs.display()
+                );
+            }
+            legacy_root
+        };
+        if has_assistant_root {
+            validate_inline_token_location(
+                &config_path,
+                &assistant_root,
+                c.telegram_bot_token.as_deref(),
+            )?;
+        }
+        c.assistant_root = assistant_root.to_string_lossy().to_string();
+        c.assistant_dir = c.assistant_root.clone();
+        c.jobs_dir = assistant_root.join("jobs").to_string_lossy().to_string();
         c.drafts_dir = expand_home(&c.drafts_dir);
         c.jobs_run_dir = expand_home(&c.jobs_run_dir);
+        if has_assistant_root {
+            validate_runtime_outside_assistant(&c)?;
+        }
         c.validate()?;
-        c.config_path = validate_config_path(path, &c)?;
+        c.config_path = validate_resolved_config_path(config_path, &c)?;
         Ok(c)
+    }
+
+    /// Returns the assistant context directory only when it is a real
+    /// directory directly beneath the canonical assistant root. This keeps a
+    /// repository symlink from widening an agent backend's writable boundary.
+    pub fn backend_context_dir(&self) -> Result<Option<PathBuf>> {
+        let root = std::fs::canonicalize(&self.assistant_root)
+            .with_context(|| format!("resolve assistant_root {}", self.assistant_root))?;
+        let context = root.join("context");
+        let metadata = match std::fs::symlink_metadata(&context) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("inspect assistant context {}", context.display()));
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            bail!(
+                "assistant context {} must be a real directory, not a symlink or file",
+                context.display()
+            );
+        }
+        let resolved = std::fs::canonicalize(&context)
+            .with_context(|| format!("resolve assistant context {}", context.display()))?;
+        if resolved.parent() != Some(root.as_path()) {
+            bail!(
+                "assistant context {} must stay directly beneath assistant_root {}",
+                resolved.display(),
+                root.display()
+            );
+        }
+        Ok(Some(resolved))
     }
 
     pub fn poll_interval_dur(&self) -> Result<Duration> {
@@ -238,7 +312,7 @@ impl Config {
     pub fn validate_job_workdir(&self, workdir: &Path) -> Result<()> {
         let workdir = resolved_absolute("job workdir", workdir)?;
         let protected_paths = [
-            ("assistant_dir", self.assistant_dir.as_str()),
+            ("assistant_root", self.assistant_root.as_str()),
             ("sessions_dir", self.sessions_dir.as_str()),
             ("jobs_dir", self.jobs_dir.as_str()),
             ("drafts_dir", self.drafts_dir.as_str()),
@@ -419,7 +493,7 @@ fn validate_protected_paths(cfg: &Config) -> Result<()> {
     let jobs = resolved_absolute("jobs_dir", Path::new(&cfg.jobs_dir))?;
     let drafts = resolved_absolute("drafts_dir", Path::new(&cfg.drafts_dir))?;
     let run = resolved_absolute("jobs_run_dir", Path::new(&cfg.jobs_run_dir))?;
-    let assistant = resolved_absolute("assistant_dir", Path::new(&cfg.assistant_dir))?;
+    let assistant = resolved_absolute("assistant_root", Path::new(&cfg.assistant_root))?;
     if paths_overlap(&jobs, &drafts) {
         bail!("jobs_dir and drafts_dir must not overlap");
     }
@@ -433,10 +507,10 @@ fn validate_protected_paths(cfg: &Config) -> Result<()> {
         }
     }
     if assistant.starts_with(&sessions) {
-        bail!("assistant_dir must not be inside sessions_dir");
+        bail!("assistant_root must not be inside sessions_dir");
     }
     if assistant.starts_with(&drafts) {
-        bail!("assistant_dir must not be inside drafts_dir");
+        bail!("assistant_root must not be inside drafts_dir");
     }
     for (label, value) in [
         ("state_path", cfg.state_path.as_str()),
@@ -454,8 +528,54 @@ fn validate_protected_paths(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+fn validate_runtime_outside_assistant(cfg: &Config) -> Result<()> {
+    let assistant = resolved_absolute("assistant_root", Path::new(&cfg.assistant_root))?;
+    for (label, value) in [
+        ("sessions_dir", cfg.sessions_dir.as_str()),
+        ("drafts_dir", cfg.drafts_dir.as_str()),
+        ("jobs_run_dir", cfg.jobs_run_dir.as_str()),
+    ] {
+        let path = resolved_absolute(label, Path::new(value))?;
+        if paths_overlap(&assistant, &path) {
+            bail!("{label} must stay outside assistant_root");
+        }
+    }
+    for (label, value) in [
+        ("state_path", cfg.state_path.as_str()),
+        ("database_path", cfg.database_path.as_str()),
+        ("audit_log_path", cfg.audit_log_path.as_str()),
+    ] {
+        let path = resolved_absolute(label, Path::new(value))?;
+        if path.starts_with(&assistant) {
+            bail!("{label} must stay outside assistant_root");
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_inline_token_location(
+    config_path: &Path,
+    assistant_root: &Path,
+    token: Option<&str>,
+) -> Result<()> {
+    if token.is_some_and(|token| !token.trim().is_empty())
+        && config_path.starts_with(assistant_root)
+    {
+        bail!(
+            "config {} contains an inline Telegram token inside the Git-versioned assistant repository. Move the config outside the assistant or use telegram.bot_token_env.",
+            config_path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn validate_config_path(path: &str, cfg: &Config) -> Result<String> {
     let config = std::fs::canonicalize(path).with_context(|| format!("resolve config {path}"))?;
+    validate_resolved_config_path(config, cfg)
+}
+
+fn validate_resolved_config_path(config: PathBuf, cfg: &Config) -> Result<String> {
     let sessions = resolved_absolute("sessions_dir", Path::new(&cfg.sessions_dir))?;
     let drafts = resolved_absolute("drafts_dir", Path::new(&cfg.drafts_dir))?;
     if config.starts_with(&sessions) {
@@ -465,6 +585,23 @@ fn validate_config_path(path: &str, cfg: &Config) -> Result<String> {
         bail!("config file must not be inside drafts_dir");
     }
     Ok(config.to_string_lossy().to_string())
+}
+
+fn resolve_assistant_root(value: &str, config_path: &Path) -> Result<PathBuf> {
+    let expanded = expand_home(value);
+    if expanded.trim().is_empty() {
+        bail!("assistant_root cannot be empty");
+    }
+    let configured = Path::new(&expanded);
+    let candidate = if configured.is_absolute() {
+        configured.to_path_buf()
+    } else {
+        config_path
+            .parent()
+            .context("config path has no parent directory")?
+            .join(configured)
+    };
+    resolved_absolute("assistant_root", &candidate)
 }
 
 fn normalized_absolute(label: &str, path: &Path) -> Result<PathBuf> {
@@ -767,6 +904,7 @@ mod tests {
             routes: Vec::new(),
             permission_profile: "workspace".to_string(),
             permission_profiles: HashMap::new(),
+            assistant_root: root.to_string_lossy().to_string(),
             jobs_dir: root.join("jobs").to_string_lossy().to_string(),
             drafts_dir: root.join("drafts").to_string_lossy().to_string(),
             jobs_agent: None,
@@ -808,20 +946,20 @@ mod tests {
             .contains("must not overlap"));
 
         let mut cfg = config();
-        cfg.assistant_dir = format!("{}/identity", cfg.sessions_dir);
+        cfg.assistant_root = format!("{}/identity", cfg.sessions_dir);
         assert!(cfg
             .validate()
             .unwrap_err()
             .to_string()
-            .contains("assistant_dir must not be inside sessions_dir"));
+            .contains("assistant_root must not be inside sessions_dir"));
 
         let mut cfg = config();
-        cfg.assistant_dir = format!("{}/identity", cfg.drafts_dir);
+        cfg.assistant_root = format!("{}/identity", cfg.drafts_dir);
         assert!(cfg
             .validate()
             .unwrap_err()
             .to_string()
-            .contains("assistant_dir must not be inside drafts_dir"));
+            .contains("assistant_root must not be inside drafts_dir"));
 
         let cfg = config();
         std::fs::create_dir_all(&cfg.sessions_dir).unwrap();
@@ -846,5 +984,24 @@ mod tests {
         assert!(cfg.validate_job_workdir(&sibling).is_ok());
         let _ = std::fs::remove_dir_all(workdir);
         let _ = std::fs::remove_dir_all(sibling);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backend_context_rejects_a_symlink_outside_the_assistant() {
+        use std::os::unix::fs::symlink;
+
+        let mut cfg = config();
+        let assistant = crate::test_support::temp_dir("config-context-assistant");
+        let outside = crate::test_support::temp_dir("config-context-outside");
+        symlink(&outside, assistant.join("context")).unwrap();
+        cfg.assistant_root = assistant.to_string_lossy().to_string();
+        cfg.assistant_dir = cfg.assistant_root.clone();
+
+        let error = cfg.backend_context_dir().unwrap_err();
+
+        assert!(error.to_string().contains("not a symlink"));
+        let _ = std::fs::remove_dir_all(assistant);
+        let _ = std::fs::remove_dir_all(outside);
     }
 }
