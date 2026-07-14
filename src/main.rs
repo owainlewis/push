@@ -413,10 +413,12 @@ mod tests {
         assert!(cfg.primary_delivery.is_none());
         assert_eq!(cfg.agent, "codex");
         assert_eq!(cfg.telegram_bot_token_env, "TELEGRAM_BOT_TOKEN");
+        assert_eq!(
+            cfg.telegram_bot_token.as_deref(),
+            Some("replace-with-the-token-from-BotFather")
+        );
         assert_eq!(cfg.telegram_allow_user_ids, [123456789]);
         assert!(cfg.telegram_allow_chat_ids.is_empty());
-        assert_eq!(cfg.permission_profile, "restricted");
-        assert!(cfg.permission_profiles.is_empty());
         assert_eq!(cfg.jobs_agent, None);
         assert_eq!(cfg.jobs_max_timeout, "30m");
         assert_eq!(cfg.jobs_max_workers, 2);
@@ -738,7 +740,7 @@ disallowed_tools = ["Edit"]
 
         let error = Config::load(path.to_str().unwrap()).unwrap_err();
 
-        assert!(error.to_string().contains("named permission_profile"));
+        assert!(error.to_string().contains("selected agent"));
         let _ = std::fs::remove_file(path);
     }
 
@@ -755,12 +757,12 @@ tools = ["Read", "Grep"]
 
         let error = Config::load(path.to_str().unwrap()).unwrap_err();
 
-        assert!(error.to_string().contains("named permission_profile"));
+        assert!(error.to_string().contains("selected agent"));
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn inherit_profile_is_selectable_for_default_and_routes() {
+    fn removed_permission_profiles_have_an_actionable_error() {
         let path = temp_path("inherit-profile-config");
         std::fs::write(
             &path,
@@ -778,27 +780,14 @@ permission_profile = "trusted"
         )
         .unwrap();
 
-        let cfg = Config::load(path.to_str().unwrap()).unwrap();
+        let error = Config::load(path.to_str().unwrap()).unwrap_err();
 
-        assert_eq!(
-            cfg.route_for_message("imessage", "imessage:dm:someone")
-                .unwrap()
-                .permission
-                .capability,
-            config::PermissionCapability::Inherit
-        );
-        assert_eq!(
-            cfg.route_for_message("imessage", "imessage:self:me@icloud.com")
-                .unwrap()
-                .permission
-                .capability,
-            config::PermissionCapability::Inherit
-        );
+        assert!(error.to_string().contains("selected agent"));
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn built_in_inherit_profile_cannot_be_redefined() {
+    fn removed_permission_profile_tables_have_an_actionable_error() {
         let path = temp_path("inherit-redefined-config");
         std::fs::write(
             &path,
@@ -812,7 +801,7 @@ capability = "read-only"
 
         let error = Config::load(path.to_str().unwrap()).unwrap_err();
 
-        assert!(error.to_string().contains("cannot be redefined"));
+        assert!(error.to_string().contains("selected agent"));
         let _ = std::fs::remove_file(path);
     }
 
@@ -915,25 +904,21 @@ allow_user_ids = [7]
                 thread: None,
                 channel: Some("telegram".to_string()),
                 agent: "codex".to_string(),
-                permission_profile: Some("workspace".to_string()),
             },
             config::RouteRule {
                 thread: Some("telegram:dm:7".to_string()),
                 channel: None,
                 agent: "claude".to_string(),
-                permission_profile: None,
             },
             config::RouteRule {
                 thread: Some("telegram:dm:7:topic:99".to_string()),
                 channel: None,
                 agent: "codex".to_string(),
-                permission_profile: None,
             },
             config::RouteRule {
                 thread: Some("self:me@icloud.com".to_string()),
                 channel: None,
                 agent: "codex".to_string(),
-                permission_profile: None,
             },
         ];
 
@@ -948,13 +933,6 @@ allow_user_ids = [7]
                 .unwrap()
                 .backend,
             config::AgentBackend::Codex
-        );
-        assert_eq!(
-            cfg.route_for_message("telegram", "telegram:dm:8")
-                .unwrap()
-                .permission
-                .capability,
-            config::PermissionCapability::Workspace
         );
         assert_eq!(
             cfg.route_for_message("telegram", "telegram:dm:7:topic:99")
@@ -977,7 +955,7 @@ allow_user_ids = [7]
     }
 
     #[test]
-    fn unknown_route_permission_profile_fails_config_load() {
+    fn removed_route_permission_profile_has_an_actionable_error() {
         let path = temp_path("unknown-route-permission");
         std::fs::write(
             &path,
@@ -993,9 +971,7 @@ permission_profile = "missing"
 
         let error = Config::load(path.to_str().unwrap()).unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("invalid permission profile for route"));
+        assert!(error.to_string().contains("selected agent"));
         let _ = std::fs::remove_file(path);
     }
 }

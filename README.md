@@ -33,10 +33,9 @@ Your coding agent owns the intelligence and tools.
   Markdown job and send the stored result back to your primary chat.
 - **State you own.** `SOUL.md`, durable context, and installed jobs live in
   one assistant repository. History is local SQLite and configuration is TOML.
-- **A small local control layer.** Sender allowlists and permission profiles
-  constrain chat access and local execution. Backend tools such as Codex MCP
-  servers keep the permissions defined in the backend. Telegram uses outbound
-  long polling and opens no port.
+- **A small local control layer.** Sender allowlists constrain chat access.
+  Agent permissions, tools, and MCP servers stay in the agent configuration.
+  Telegram uses outbound long polling and opens no port.
 
 ## The model
 
@@ -80,7 +79,7 @@ and the rest of your day.
 - One Git-versioned assistant repository containing `SOUL.md`, `context/`, and
   approved `jobs/`
 - Durable conversation history and backend session recovery
-- Named read-only, workspace, and backend-inherited permission profiles
+- Agent-owned permissions with no gateway sandbox or tool overrides
 - Manual and scheduled Markdown jobs with a durable run ledger
 - Agent-drafted jobs that require approval of the exact revision in chat
 - Local structured audit logs with message content redacted by default
@@ -107,9 +106,8 @@ run `push doctor`, and keep the gateway online.
 To use [Pi](https://pi.dev/), install it, complete provider authentication for
 the same service user that runs Push, and set `agent = "pi"`. `pi_bin` defaults
 to `pi`. Push stores Pi's reported session ID and resumes that exact session on
-later turns; `/clear` starts a new one. Pi has tool allowlists but no native
-sandbox or permission prompts, so read the documented permission limits before
-allowing writes or shell access.
+later turns; `/clear` starts a new one. Push passes no tool override to Pi, so
+review Pi's own configuration before allowing unattended access.
 
 ## Documentation
 

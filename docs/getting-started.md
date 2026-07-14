@@ -93,13 +93,8 @@ the repository.
     assistant_root = "~/Code/assistant"
 
     [telegram]
+    bot_token = "token-from-BotFather"
     allow_user_ids = [123456789]
-    ```
-
-    Export the token in the same environment that starts Push:
-
-    ```sh
-    export TELEGRAM_BOT_TOKEN='token-from-BotFather'
     ```
 
     Read the [Telegram guide](telegram.md) for token storage, allowlisting,
@@ -146,12 +141,10 @@ Try:
 
 > Summarize `/absolute/path/to/my-project/README.md`. Do not change anything.
 
-Replace the example path with a file the service user can read. The default
-`restricted` profile makes local filesystem and process access read-only, but
-Codex MCP servers keep the capabilities from your Codex configuration. Broader
-local access is an explicit configuration choice. Read
-[permissions and security](security.md) before enabling writes or inheriting
-backend permissions.
+Replace the example path with a file the service user can read. Push does not
+override the agent's sandbox, approval mode, or tool list. The selected agent's
+configuration decides what the request can do. Read [permissions and
+security](security.md) before running the gateway unattended.
 
 ## 6. Keep it online
 
