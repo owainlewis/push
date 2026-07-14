@@ -22,8 +22,8 @@ const TYPING_REFRESH: Duration = Duration::from_secs(4);
 pub(super) const DELIVERY_ATTEMPTS: usize = 3;
 pub(super) const SESSION_SETUP_FAILURE: &str =
     "Push could not prepare this conversation. Check the local logs, then resend.";
-pub(super) const SANDBOX_SETUP_FAILURE: &str =
-    "Push could not create its session workspace. Check the local logs, then resend.";
+pub(super) const DRAFT_SETUP_FAILURE: &str =
+    "Push could not prepare its draft workspace. Check the local logs, then resend.";
 
 /// Processes one thread's jobs strictly in order, exiting when the queue closes.
 pub(super) async fn run(ctx: Ctx, mut rx: mpsc::Receiver<Job>) {
@@ -56,7 +56,7 @@ pub(super) async fn handle(ctx: &Ctx, job: Job) {
                     "recover outbound",
                 );
             } else {
-                complete_setup_failure(ctx, &job, SANDBOX_SETUP_FAILURE).await;
+                complete_setup_failure(ctx, &job, DRAFT_SETUP_FAILURE).await;
             }
             return;
         }
@@ -149,24 +149,26 @@ pub(super) async fn handle(ctx: &Ctx, job: Job) {
         }
     };
 
-    let work_dir = sandbox(&ctx.sessions_dir, &job.thread);
-    if let Err(e) = std::fs::create_dir_all(&work_dir) {
-        error!("[{}] sandbox error: {e}", job.thread);
-        audit(
-            ctx,
-            ctx.audit.failed(
-                "backend_setup_failed",
-                job.row_id,
-                &job.thread,
-                Some(job.backend),
-                e.to_string(),
-            ),
-        );
-        complete_setup_failure(ctx, &job, SANDBOX_SETUP_FAILURE).await;
-        return;
-    }
+    let work_dir = match std::fs::canonicalize(&ctx.assistant_dir) {
+        Ok(path) => path.to_string_lossy().to_string(),
+        Err(error) => {
+            error!("[{}] assistant workspace error: {error}", job.thread);
+            audit(
+                ctx,
+                ctx.audit.failed(
+                    "backend_setup_failed",
+                    job.row_id,
+                    &job.thread,
+                    Some(job.backend),
+                    error.to_string(),
+                ),
+            );
+            complete_setup_failure(ctx, &job, SESSION_SETUP_FAILURE).await;
+            return;
+        }
+    };
 
-    let mut instructions = match soul::load(&ctx.assistant_dir) {
+    let mut instructions = match soul::load(&work_dir) {
         Ok(instructions) => instructions,
         Err(error) => {
             error!("[{}] assistant identity error: {error}", job.thread);
@@ -832,11 +834,6 @@ fn short(msg: &str) -> String {
     }
 }
 
-pub(super) fn sandbox(sessions_dir: &str, thread: &str) -> String {
-    let directory_key = thread.strip_prefix("imessage:").unwrap_or(thread);
-    format!("{sessions_dir}/{}", sanitize(directory_key))
-}
-
 fn rehydration_prompt(ctx: &Ctx, job: &Job) -> Result<RehydrationPrompt> {
     let messages = ctx.history.lock().unwrap().recent_messages_before(
         ctx.channel.id(),
@@ -861,14 +858,4 @@ fn backend_request<'a>(
         instructions,
         prompt,
     }
-}
-
-/// Turns a thread key into a filesystem-safe directory name.
-fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => c,
-            _ => '_',
-        })
-        .collect()
 }

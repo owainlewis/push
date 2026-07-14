@@ -1,6 +1,6 @@
 use super::worker::{
-    handle, present_drafts, run_with_periodic_activity, sandbox, DELIVERY_ATTEMPTS,
-    SANDBOX_SETUP_FAILURE, SESSION_SETUP_FAILURE,
+    handle, present_drafts, run_with_periodic_activity, DELIVERY_ATTEMPTS, DRAFT_SETUP_FAILURE,
+    SESSION_SETUP_FAILURE,
 };
 use super::*;
 use crate::agent::{FakeRunCall, FakeRunner};
@@ -146,7 +146,7 @@ fn temp_path(name: &str) -> PathBuf {
 fn setup_failure_ctx(
     store: Arc<Mutex<Store>>,
     ack: Arc<Mutex<AckState>>,
-    sessions_dir: String,
+    assistant_dir: String,
 ) -> Ctx {
     let mut runners = HashMap::new();
     runners.insert(
@@ -164,8 +164,8 @@ fn setup_failure_ctx(
     Ctx {
         cfg: test_config(
             &temp_path("setup-failure-state").to_string_lossy(),
-            &sessions_dir,
-            "",
+            &temp_path("setup-failure-sessions").to_string_lossy(),
+            &assistant_dir,
         ),
         store,
         history: Arc::new(Mutex::new(history)),
@@ -174,8 +174,7 @@ fn setup_failure_ctx(
         channel: filter(),
         run_timeout: Duration::from_secs(1),
         reply_marker: String::new(),
-        sessions_dir,
-        assistant_dir: String::new(),
+        assistant_dir,
         audit: Arc::new(AuditLog::new(
             temp_path("setup-failure-audit")
                 .to_string_lossy()
@@ -341,18 +340,6 @@ fn group_chat_dropped_even_from_allowlisted_sender() {
 }
 
 #[test]
-fn imessage_keeps_legacy_sandbox_path_while_telegram_is_qualified() {
-    assert_eq!(
-        sandbox("/sessions", "imessage:dm:+15551234567"),
-        "/sessions/dm__15551234567"
-    );
-    assert_eq!(
-        sandbox("/sessions", "telegram:dm:15551234567"),
-        "/sessions/telegram_dm_15551234567"
-    );
-}
-
-#[test]
 fn ack_does_not_advance_past_in_flight_row() {
     let mut ack = AckState::default();
     ack.in_flight.insert(10);
@@ -440,39 +427,6 @@ async fn session_lookup_failure_completes_in_flight_row() {
 }
 
 #[tokio::test]
-async fn sandbox_setup_failure_completes_in_flight_row_and_advances_cursor() {
-    let state_path = temp_state_path();
-    let store = Arc::new(Mutex::new(Store::open(&state_path).unwrap()));
-    let sessions_blocker = temp_path("sessions-blocker");
-    std::fs::write(&sessions_blocker, "not a directory").unwrap();
-    let ack = Arc::new(Mutex::new(AckState::default()));
-    {
-        let mut ack = ack.lock().unwrap();
-        ack.in_flight.insert(10);
-        ack.completed.insert(11);
-    }
-    let ctx = setup_failure_ctx(
-        store.clone(),
-        ack.clone(),
-        sessions_blocker.to_string_lossy().to_string(),
-    );
-
-    handle(&ctx, setup_failure_job(10)).await;
-
-    assert_eq!(
-        ctx.setup_failure_replies.lock().unwrap().as_slice(),
-        [SANDBOX_SETUP_FAILURE]
-    );
-    assert_eq!(store.lock().unwrap().last_row(), 11);
-    let ack = ack.lock().unwrap();
-    assert!(ack.in_flight.is_empty());
-    assert!(ack.completed.is_empty());
-
-    let _ = std::fs::remove_file(state_path);
-    let _ = std::fs::remove_file(sessions_blocker);
-}
-
-#[tokio::test]
 async fn draft_boundary_failure_completes_in_flight_row_and_advances_cursor() {
     let state_path = temp_state_path();
     let store = Arc::new(Mutex::new(Store::open(&state_path).unwrap()));
@@ -496,7 +450,7 @@ async fn draft_boundary_failure_completes_in_flight_row_and_advances_cursor() {
 
     assert_eq!(
         ctx.setup_failure_replies.lock().unwrap().as_slice(),
-        [SANDBOX_SETUP_FAILURE]
+        [DRAFT_SETUP_FAILURE]
     );
     assert_eq!(store.lock().unwrap().last_row(), 11);
     let ack = ack.lock().unwrap();
@@ -625,9 +579,16 @@ async fn fake_channel_e2e_replies_once_ignores_unallowlisted_and_reuses_session(
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].session_id, "");
         assert!(calls[0].is_new);
+        assert_eq!(
+            calls[0].work_dir,
+            std::fs::canonicalize(&assistant_dir)
+                .unwrap()
+                .to_string_lossy()
+        );
         assert_eq!(calls[0].prompt, "first");
         assert_eq!(calls[1].session_id, "fake-session");
         assert!(!calls[1].is_new);
+        assert_eq!(calls[1].work_dir, calls[0].work_dir);
         assert_eq!(calls[1].prompt, "second");
         for call in calls.iter() {
             assert!(call.instructions.starts_with("Be useful."));

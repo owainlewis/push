@@ -231,8 +231,9 @@ execution:
 - `push job runs [<name>]`
 
 Push is the only writer to the run ledger. The CLI owns the manual run it
-claims, and the gateway owns scheduled runs. Installed job files remain
-operator-owned.
+claims, and the gateway owns scheduled runs. Push installs draft jobs only
+after approval, but an agent with assistant-root write access can change
+installed job files outside that workflow.
 
 ### Agent-authored draft extension
 

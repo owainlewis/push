@@ -23,26 +23,23 @@ Use absolute paths in service files. The service user needs:
 - write access to `state_path`
 - write access to `audit_log_path`
 - write access to `database_path`
-- write access to `sessions_dir`
-- read access to `assistant_root/SOUL.md`, `assistant_root/context/`, and
-  `assistant_root/jobs/`
-- access to `assistant_root/context/` as allowed by the selected agent, and
-  write access to `assistant_root/jobs/` only for approved job installation
+- filesystem access to `assistant_root` as allowed by the selected agent
+- write access to `assistant_root/jobs/` for Push to install approved drafts;
+  agent write access can also change installed jobs outside that workflow
 - access to the selected `claude`, `codex`, or `pi` executable on `PATH`
 - backend login, tokens, settings, MCP config, and project credentials
 - for iMessage on macOS, Full Disk Access and `osascript`
 - for Telegram, a token in the private config and network access to
   `api.telegram.org`
 
-`state_path` stores independent cursors for each channel. `sessions_dir` stores
-per-thread backend work directories, and `state.json` stores backend session
-ids. `database_path` stores the canonical conversation journal. Keep these
-paths on durable storage. Restarting the service resumes after
-the last completed row and reuses existing backend sessions when the backend for
-that thread has not changed.
+`state_path` stores independent cursors for each channel and backend session
+ids. `database_path` stores the canonical conversation journal. Chat agents run
+from `assistant_root`. Keep these paths on durable storage. Restarting the
+service resumes after the last completed row and reuses existing backend
+sessions when the backend for that thread has not changed.
 
 Keep `assistant_root` in its own Git repository. Keep config secrets, state,
-sessions, databases, drafts, logs, locks, and service credentials outside it.
+databases, drafts, logs, locks, and service credentials outside it.
 
 ## macOS launchd
 
