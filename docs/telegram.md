@@ -98,11 +98,10 @@ Protect these files as credentials or private assistant data:
 - the bot token and configuration
 - `state.json` and the audit log
 - `push.db`
-- the session workspace directory
 - the private `assistant_root` repository, including `SOUL.md`, context, and jobs
 
 The assistant directory is intended to be versioned in its own private Git
-repository. Never put bot tokens, config secrets, state files, audit logs,
-session workspaces, or databases in it. Rotate the bot token with BotFather
+repository. Never put bot tokens, config secrets, state files, audit logs, or
+databases in it. Rotate the bot token with BotFather
 immediately if it is exposed. Keep allowlists narrow because an allowed sender
 can instruct the configured agent to use its local tools and credentials.

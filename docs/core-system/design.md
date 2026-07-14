@@ -90,7 +90,9 @@ Codex receives it as developer instructions. Push never writes resolved machine 
 into `SOUL.md` and does not inject all context files into every prompt. The
 backend decides which files to inspect. Conversation instructions include the
 absolute `context/` path. The agent's own configuration decides access;
-`SOUL.md` and installed jobs remain protected by Push's workflow rules and OS permissions.
+Push does not create a separate filesystem boundary around `SOUL.md` or
+installed jobs. An agent with write access to the assistant root can change
+them directly, outside Push's draft approval workflow.
 
 Push owns the footer so customising `SOUL.md` cannot remove repository
 locations or ownership rules. Runtime sessions, drafts, databases, audit logs,
@@ -215,8 +217,8 @@ only when real usage identifies the failure mode.
 - A future reconciler may preserve an incorrect or injected claim. Keep memory
   small, derived, inspectable, replaceable, and lower priority than `SOUL.md`.
 - An inherited backend configuration may still grant broad filesystem access.
-  Keep `SOUL.md` and installed jobs protected by policy and the existing route
-  restrictions, and reserve normal assistant edits for `context/`.
+  Restrict assistant-root writes in the backend configuration when `SOUL.md`
+  and installed jobs must only change through an operator-controlled path.
 
 ## Rollout
 

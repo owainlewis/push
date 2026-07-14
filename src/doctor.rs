@@ -55,12 +55,6 @@ fn run_checks(cfg: &config::Config) -> CheckReport {
         &cfg.state_path,
         &mut checks,
     );
-    check_writable_dir(
-        "sessions directory",
-        "sessions_dir",
-        Path::new(&cfg.sessions_dir),
-        &mut checks,
-    );
     check_drafts_dir(cfg, &mut checks);
     check_parent_dir(
         "audit log directory",
@@ -565,7 +559,6 @@ claude_tools = []
         let db_path = temp_path("chat-db");
         std::fs::write(&db_path, "").unwrap();
         let state_path = temp_path("state-dir").join("state.json");
-        let sessions_dir = temp_dir("sessions-dir");
         let mut cfg = test_config();
         cfg.db_path = db_path.to_string_lossy().to_string();
         cfg.state_path = state_path.to_string_lossy().to_string();
@@ -577,8 +570,6 @@ claude_tools = []
             .with_extension("push.db")
             .to_string_lossy()
             .to_string();
-        cfg.sessions_dir = sessions_dir.to_string_lossy().to_string();
-
         let report = run_checks(&cfg);
 
         assert!(report
@@ -587,9 +578,6 @@ claude_tools = []
             .any(|check| check.name == "config" && matches!(check.status, CheckStatus::Pass)));
         assert!(report.checks.iter().any(|check| {
             check.name == "state directory" && matches!(check.status, CheckStatus::Pass)
-        }));
-        assert!(report.checks.iter().any(|check| {
-            check.name == "sessions directory" && matches!(check.status, CheckStatus::Pass)
         }));
         assert!(report.checks.iter().any(|check| {
             check.name == "audit log directory" && matches!(check.status, CheckStatus::Pass)
@@ -605,7 +593,6 @@ claude_tools = []
         let _ = std::fs::remove_file(state_path);
         let _ = std::fs::remove_file(cfg.audit_log_path);
         let _ = std::fs::remove_file(cfg.database_path);
-        let _ = std::fs::remove_dir_all(sessions_dir);
     }
 
     #[test]

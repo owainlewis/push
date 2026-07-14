@@ -160,7 +160,7 @@ Claude Code lets Push choose the session id.
 - New conversation: `claude -p --session-id <uuid>`
 - Existing conversation: `claude -p --resume <uuid>`
 - Instructions: `--append-system-prompt <SOUL.md + resolved assistant paths + gateway policy>`
-- Work dir: per-thread sandbox dir
+- Work dir: `assistant_root`
 
 ### Codex Adapter
 
@@ -169,7 +169,7 @@ Codex creates its own thread id.
 - New conversation: `codex exec --json ...`
 - Existing conversation: `codex exec resume <thread_id> ...`
 - Instructions: `-c developer_instructions=<SOUL.md + resolved assistant paths + gateway policy>`
-- Work dir: per-thread sandbox dir on the first run
+- Work dir: `assistant_root`, including resumed runs
 
 The adapter reads Codex JSONL events to capture `thread.started.thread_id` and
 stores that id for future turns.
@@ -181,7 +181,7 @@ Pi creates its own session id and reports it in the first JSON event.
 - New conversation: `pi --print --mode json ...`
 - Existing conversation: `pi --print --mode json --session <session_id> ...`
 - Instructions: `--append-system-prompt <SOUL.md + resolved assistant paths + gateway policy>`
-- Work dir: per-thread session directory
+- Work dir: `assistant_root`
 
 The adapter reads the session header and final assistant `message_end` event.
 Push passes no tool override to Pi. Pi has no native filesystem sandbox or
@@ -250,8 +250,9 @@ crash boundary. SQLite history does not replace `state.json` cursors or backend
 session IDs in this phase.
 
 The same database stores immutable job-run claims and bounded terminal results.
-Markdown runbooks remain operator-owned files under `<assistant_root>/jobs`. A manual CLI
-start rereads and validates the exact file, acquires a non-blocking per-job lock,
+Markdown runbooks live under `<assistant_root>/jobs`; their write boundary is
+set by the selected agent's configuration. A manual CLI start rereads and
+validates the exact file, acquires a non-blocking per-job lock,
 then records and claims the run in one immediate SQLite transaction before
 spawning a fresh backend session. The CLI holds the lock through result
 persistence. Only a process that acquired the released lock may fail a stale
@@ -271,7 +272,10 @@ expired terminal state, so later cancellation cannot overwrite the timeout.
 
 Agent-written job proposals live separately under origin-specific inboxes in
 `drafts_dir`. Push creates the exact inbox and includes its path in the route's
-instructions. The selected agent's configuration decides whether it is writable. Push snapshots
+instructions. The selected agent's configuration decides whether it and the
+assistant root are writable. Push's approval flow governs drafts it installs;
+it does not prevent a write-enabled agent from changing installed jobs
+directly. Push snapshots
 and validates a changed regular file, stores its exact bytes, hash, proposer,
 and bound approval question in SQLite, then sends the full proposal to the
 originating channel. Reconciliation also runs after backend failure or timeout

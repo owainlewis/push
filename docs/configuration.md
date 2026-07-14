@@ -176,7 +176,7 @@ the selected agent and review [permissions and security](security.md).
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `assistant_root` | required for new setups | Canonical root of the one assistant repository; `SOUL.md`, `context/`, and `jobs/` are derived |
-| `sessions_dir` | `~/.push/sessions` | Per-thread backend work directories |
+| `sessions_dir` | `~/.push/sessions` | Legacy compatibility setting; chat work directories use `assistant_root` |
 | `state_path` | `~/.push/state.json` | Channel cursors and backend session IDs |
 | `database_path` | `~/.push/push.db` | Canonical conversation, approval, and job history |
 | `audit_log_path` | `~/.push/audit.jsonl` | Structured local audit log |

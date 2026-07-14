@@ -157,7 +157,7 @@ user prompt.
 | `codex_bin` | Codex binary. |
 | `codex_model` | Optional Codex model override. |
 | `pi_bin` | Pi coding agent binary. |
-| `sessions_dir` | Per-thread working dirs. |
+| `sessions_dir` | Legacy compatibility setting. |
 | `state_path` | JSON state path. |
 | `audit_log_path` | Local JSONL audit log path. |
 | `audit_log_content` | Whether audit events include message and reply text. |
