@@ -42,9 +42,9 @@ root, Push config, sessions, state, database, audit, drafts, or lock paths.
 ## Validate and inspect jobs
 
 ```sh
-push job validate --config ~/.config/push/config.toml
-push job list --config ~/.config/push/config.toml
-push job show repo-review --config ~/.config/push/config.toml
+push job validate
+push job list
+push job show repo-review
 ```
 
 Validation reports every valid and invalid file. An invalid job is disabled
@@ -53,8 +53,8 @@ individually and does not stop messaging or other valid jobs.
 ## Run a job manually
 
 ```sh
-push job run repo-review --config ~/.config/push/config.toml
-push job runs repo-review --config ~/.config/push/config.toml
+push job run repo-review
+push job runs repo-review
 ```
 
 A manual run executes in the invoking CLI process and prints its result there.

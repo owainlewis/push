@@ -25,13 +25,13 @@ pub fn doctor(config_path: &str) -> Result<()> {
     let cfg = match config::Config::load(config_path) {
         Ok(cfg) => cfg,
         Err(e) => {
+            let message = crate::missing_config_message(config_path).unwrap_or_else(|| {
+                format!(
+                    "cannot load {config_path}: {e}. Create the file from config.toml.example or fix the invalid value."
+                )
+            });
             let report = CheckReport {
-                checks: vec![Check::fail(
-                    "config",
-                    format!(
-                        "cannot load {config_path}: {e}. Create the file from config.toml.example or fix the invalid value."
-                    ),
-                )],
+                checks: vec![Check::fail("config", message)],
             };
             print!("{report}");
             bail!("doctor found 1 failed check");

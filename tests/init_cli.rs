@@ -5,9 +5,14 @@ use uuid::Uuid;
 #[test]
 fn init_without_path_creates_assistant_in_current_directory() {
     let root = temp_dir("default");
+    let home = root.join("home");
+    let workdir = root.join("workdir");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workdir).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_push"))
         .arg("init")
-        .current_dir(&root)
+        .current_dir(&workdir)
+        .env("HOME", &home)
         .output()
         .unwrap();
 
@@ -16,12 +21,14 @@ fn init_without_path_creates_assistant_in_current_directory() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let assistant = root.join("assistant");
+    let assistant = workdir.join("assistant");
     assert!(assistant.join("SOUL.md").is_file());
     assert!(assistant.join("context/README.md").is_file());
     assert!(assistant.join("jobs").is_dir());
     assert!(assistant.join(".git").exists());
-    let config = std::fs::read_to_string(root.join("config.toml")).unwrap();
+    let config_path = home.join(".push/config.toml");
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    assert!(!workdir.join("config.toml").exists());
     assert!(config.contains(
         &assistant
             .canonicalize()
@@ -31,6 +38,7 @@ fn init_without_path_creates_assistant_in_current_directory() {
     ));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("push doctor"));
+    assert!(!stdout.contains("push doctor --config"));
     assert!(stdout.contains("SOUL.md"));
     let _ = std::fs::remove_dir_all(root);
 }
@@ -69,18 +77,77 @@ fn init_expands_home_in_requested_path() {
 #[test]
 fn run_without_default_config_reports_first_run_guidance() {
     let root = temp_dir("missing-default-config");
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_push"))
         .current_dir(&root)
+        .env("HOME", &home)
         .output()
         .unwrap();
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("configuration not found at config.toml"));
-    assert!(stderr.contains("push init --config config.toml"));
+    assert!(stderr.contains("configuration not found at ~/.push/config.toml"));
+    assert!(stderr.contains("Create it with:\n  push init"));
+    assert!(!stderr.contains("push init --config"));
     assert!(stderr.contains("Then configure a channel"));
     assert!(!stderr.contains("Caused by:"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn run_reads_existing_default_config_from_home() {
+    let root = temp_dir("existing-default-config");
+    let home = root.join("home");
+    let config_dir = home.join(".push");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("config.toml"), "invalid = [").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_push"))
+        .current_dir(&root)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("parse TOML"));
+    assert!(!stderr.contains("configuration not found"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn doctor_without_default_config_reports_init_guidance() {
+    assert_missing_default_config_guidance(&["doctor"]);
+}
+
+#[test]
+fn job_without_default_config_reports_init_guidance() {
+    assert_missing_default_config_guidance(&["job", "list"]);
+}
+
+fn assert_missing_default_config_guidance(args: &[&str]) {
+    let root = temp_dir("missing-default-config-command");
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_push"))
+        .args(args)
+        .current_dir(&root)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(combined.contains("configuration not found at ~/.push/config.toml"));
+    assert!(combined.contains("Create it with:\n  push init"));
+    assert!(!combined.contains("config.toml.example"));
     let _ = std::fs::remove_dir_all(root);
 }
 

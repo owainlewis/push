@@ -1,11 +1,11 @@
 # Configuration
 
-Push reads TOML from `config.toml` by default. Pass `--config <path>` to every
-gateway, doctor, or job command when the file lives elsewhere.
+Push reads TOML from `~/.push/config.toml` by default. Pass `--config <path>`
+to use a different file for a gateway, doctor, init, or job command.
 
 ```sh
-push doctor --config ~/.config/push/config.toml
-push --config ~/.config/push/config.toml
+push doctor
+push
 ```
 
 Paths beginning with `~` are expanded. Invalid values, unknown fields inside
@@ -16,7 +16,7 @@ Create the one assistant repository and persist its root before editing the
 rest of the config:
 
 ```sh
-push init ~/Code/assistant --config ~/.config/push/config.toml
+push init ~/Code/assistant
 ```
 
 Push derives `SOUL.md`, `context/`, and `jobs/` from `assistant_root`. At run

@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/push --config %h/.config/push/config.toml
+ExecStart=%h/.local/bin/push --config %h/.push/config.toml
 WorkingDirectory=%h/.push
 Restart=on-failure
 RestartSec=10
