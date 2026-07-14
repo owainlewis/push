@@ -53,7 +53,6 @@ struct Ctx {
     channel: Channel,
     run_timeout: Duration,
     reply_marker: String,
-    sessions_dir: String,
     assistant_dir: String,
     audit: Arc<AuditLog>,
     #[cfg(test)]
@@ -340,7 +339,6 @@ impl Gateway {
             channel: channel.clone(),
             run_timeout: cfg.run_timeout_dur()?,
             reply_marker: cfg.reply_marker.clone(),
-            sessions_dir: cfg.sessions_dir.clone(),
             assistant_dir: cfg.assistant_dir.clone(),
             audit,
             #[cfg(test)]

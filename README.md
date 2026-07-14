@@ -81,12 +81,14 @@ and the rest of your day.
 - Durable conversation history and backend session recovery
 - Agent-owned permissions with no gateway sandbox or tool overrides
 - Manual and scheduled Markdown jobs with a durable run ledger
-- Agent-drafted jobs that require approval of the exact revision in chat
+- An agent-drafted job workflow that approves the exact revision in chat
 - Local structured audit logs with message content redacted by default
 
 Push is early software. Its scope is intentionally smaller than a general
 agent platform, and its security depends on a tight sender allowlist plus the
-permissions you give your backend.
+permissions you give your backend. Push does not override agent permissions, so
+write access to the assistant repository can also change `SOUL.md` or installed
+jobs outside the draft approval workflow.
 
 ## Start here
 
