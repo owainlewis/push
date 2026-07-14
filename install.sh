@@ -40,7 +40,17 @@ case "$os:$arch" in
 esac
 
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+staged=""
+cleanup() {
+  rm -rf "$tmp"
+  if [ -n "$staged" ]; then
+    rm -f "$staged"
+  fi
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 api="https://api.github.com/repos/$repo/releases/latest"
 asset_url="$(
@@ -80,14 +90,24 @@ echo "Verified SHA-256 checksum"
 tar -xzf "$tmp/push.tar.gz" -C "$tmp"
 
 mkdir -p "$bin_dir"
-find "$tmp" -type f -name push -perm -111 -exec cp {} "$bin_dir/push" \;
-chmod +x "$bin_dir/push"
+source="$(find "$tmp" -type f -name push -perm -111 | head -n 1)"
+if [ -z "$source" ]; then
+  echo "push install: release archive does not contain an executable" >&2
+  exit 1
+fi
+
+staged="$(mktemp "$bin_dir/.push.install.XXXXXX")"
+cp "$source" "$staged"
+chmod 755 "$staged"
 
 if [ "$os" = "Darwin" ] && command -v xattr >/dev/null 2>&1; then
-  if xattr -p com.apple.provenance "$bin_dir/push" >/dev/null 2>&1; then
-    xattr -d com.apple.provenance "$bin_dir/push"
+  if xattr -p com.apple.provenance "$staged" >/dev/null 2>&1; then
+    xattr -d com.apple.provenance "$staged"
   fi
 fi
+
+mv -f "$staged" "$bin_dir/push"
+staged=""
 
 echo "Installed push to $bin_dir/push"
 case ":$PATH:" in
