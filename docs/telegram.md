@@ -9,8 +9,8 @@ server port. Telegram documents the polling contract in the official
 
 1. Open a private chat with Telegram's official `@BotFather` account.
 2. Send `/newbot` and follow the prompts.
-3. Store the bot token in a service environment variable. Do not paste it into
-   source control, issue comments, commands that enter shell history, or logs.
+3. Store the bot token in `~/.push/config.toml`. Keep that file private and do
+   not commit it, paste it into issue comments, or print it in logs.
 4. Send one private message to the new bot.
 5. Find your stable numeric user and chat ids from a trusted Bot API
    `getUpdates` response or a trusted id lookup bot. Do not allowlist a Telegram
@@ -21,12 +21,6 @@ Telegram does not allow `getUpdates` while a webhook is active. The first Push
 start discards pending updates, so send a new message after the gateway reports
 that it is running.
 
-Export the token in the environment that starts Push:
-
-```sh
-export TELEGRAM_BOT_TOKEN='replace-with-the-token-from-BotFather'
-```
-
 Use a Telegram-only config:
 
 ```toml
@@ -35,6 +29,7 @@ agent = "codex"
 assistant_root = "~/Code/assistant"
 
 [telegram]
+bot_token = "replace-with-the-token-from-BotFather"
 allow_user_ids = [123456789]
 
 [[routes]]
@@ -42,11 +37,9 @@ thread = "telegram:dm:123456789"
 agent = "claude"
 ```
 
-The token environment variable defaults to `TELEGRAM_BOT_TOKEN`. Set
-`telegram.bot_token_env` only when you need a different variable name.
-`telegram.bot_token` is supported for constrained deployments, but the
-environment-variable form is safer because it keeps the credential out of the
-config file. Push never prints the token. Run:
+`push init` creates a new config with owner-only mode `0600` on Unix. An
+environment variable remains supported through `telegram.bot_token_env`, which
+defaults to `TELEGRAM_BOT_TOKEN`. Push never prints the token. Run:
 
 ```sh
 push doctor --config /absolute/path/to/config.toml

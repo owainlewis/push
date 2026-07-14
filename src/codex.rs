@@ -9,7 +9,6 @@ use tokio::process::Command;
 use uuid::Uuid;
 
 use crate::agent::{Request, RunError, RunOutput};
-use crate::config::PermissionCapability;
 
 /// Runner invokes `codex exec` in non-interactive mode.
 pub struct Runner {
@@ -82,10 +81,6 @@ impl Runner {
 
     fn command(&self, req: &Request<'_>, out_path: &Path) -> Command {
         let mut cmd = Command::new(&self.bin);
-        cmd.arg("--ask-for-approval").arg("never");
-        if let Some(sandbox) = sandbox(req.permission) {
-            cmd.arg("--sandbox").arg(sandbox);
-        }
         if !req.instructions.trim().is_empty() {
             cmd.arg("-c")
                 .arg(developer_instructions(req.instructions.trim()));
@@ -96,22 +91,14 @@ impl Runner {
                 .arg("--skip-git-repo-check")
                 .arg("-C")
                 .arg(req.work_dir)
-                .arg("--add-dir")
-                .arg(req.work_dir)
                 .arg("-o")
                 .arg(out_path);
-            for path in req.additional_dirs {
-                cmd.arg("--add-dir").arg(path);
-            }
             if let Some(model) = self.model.as_deref() {
                 cmd.arg("-m").arg(model);
             }
             cmd.arg(req.prompt);
         } else {
             cmd.arg("exec");
-            for path in req.additional_dirs {
-                cmd.arg("--add-dir").arg(path);
-            }
             cmd.arg("resume")
                 .arg("--json")
                 .arg("--skip-git-repo-check")
@@ -132,16 +119,6 @@ fn missing_resume_error(message: &str) -> bool {
     message
         .to_ascii_lowercase()
         .contains("no rollout found for thread id")
-}
-
-fn sandbox(capability: PermissionCapability) -> Option<&'static str> {
-    match capability {
-        PermissionCapability::ReadOnly => Some("read-only"),
-        PermissionCapability::Workspace => Some("workspace-write"),
-        // No --sandbox flag: the operator's own Codex configuration decides.
-        PermissionCapability::Inherit => None,
-        PermissionCapability::FullAccess => Some("danger-full-access"),
-    }
 }
 
 fn developer_instructions(instructions: &str) -> String {
@@ -248,9 +225,7 @@ mod tests {
                     session_id: "",
                     is_new: true,
                     work_dir: work_dir.to_str().unwrap(),
-                    additional_dirs: &[],
                     instructions: "assistant identity",
-                    permission: PermissionCapability::Workspace,
                     prompt: "hello",
                 },
                 Duration::from_secs(5),
@@ -261,12 +236,12 @@ mod tests {
         assert_eq!(out.reply, "codex reply");
         assert_eq!(out.session_id, Some("codex-thread".to_string()));
         let args = read_args(&args_path);
-        assert_arg_pair(&args, "--ask-for-approval", "never");
-        assert_arg_pair(&args, "--sandbox", "workspace-write");
+        assert!(!args.contains(&"--ask-for-approval".to_string()));
+        assert!(!args.contains(&"--sandbox".to_string()));
         assert_arg_present(&args, "exec");
         assert_arg_present(&args, "--json");
         assert_arg_pair(&args, "-C", work_dir.to_str().unwrap());
-        assert_arg_pair(&args, "--add-dir", work_dir.to_str().unwrap());
+        assert!(!args.contains(&"--add-dir".to_string()));
         assert_arg_pair(&args, "-c", &developer_instructions("assistant identity"));
         assert_eq!(args.last().unwrap(), "hello");
     }
@@ -275,8 +250,6 @@ mod tests {
     async fn runs_resumed_session_with_resume_command() {
         let args_path = temp_path("codex-resume-args");
         let work_dir = temp_dir("codex-resume-work");
-        let context_dir = temp_dir("codex-resume-context");
-        let drafts_dir = temp_dir("codex-resume-drafts");
         let script = codex_success_script(&args_path, "resumed reply", None);
         let cli = FakeCli::new("codex", &script);
         let runner = runner(cli.bin());
@@ -287,9 +260,7 @@ mod tests {
                     session_id: "existing-thread",
                     is_new: false,
                     work_dir: work_dir.to_str().unwrap(),
-                    additional_dirs: &[context_dir.to_str().unwrap(), drafts_dir.to_str().unwrap()],
                     instructions: "assistant identity",
-                    permission: PermissionCapability::ReadOnly,
                     prompt: "continue",
                 },
                 Duration::from_secs(5),
@@ -300,19 +271,9 @@ mod tests {
         assert_eq!(out.reply, "resumed reply");
         assert_eq!(out.session_id, None);
         let args = read_args(&args_path);
-        assert_arg_sequence(
-            &args,
-            &[
-                "exec",
-                "--add-dir",
-                context_dir.to_str().unwrap(),
-                "--add-dir",
-                drafts_dir.to_str().unwrap(),
-                "resume",
-            ],
-        );
+        assert_arg_sequence(&args, &["exec", "resume"]);
+        assert!(!args.contains(&"--add-dir".to_string()));
         assert_arg_present(&args, "existing-thread");
-        assert_arg_pair(&args, "--sandbox", "read-only");
         assert_arg_pair(&args, "-c", &developer_instructions("assistant identity"));
         assert_eq!(args.last().unwrap(), "continue");
         assert!(!args.contains(&"-C".to_string()));
@@ -333,9 +294,7 @@ mod tests {
                     session_id: "missing",
                     is_new: false,
                     work_dir: work_dir.to_str().unwrap(),
-                    additional_dirs: &[],
                     instructions: "",
-                    permission: PermissionCapability::ReadOnly,
                     prompt: "continue",
                 },
                 Duration::from_secs(5),
@@ -395,9 +354,7 @@ mod tests {
             session_id: "",
             is_new: true,
             work_dir,
-            additional_dirs: &[],
             instructions: "",
-            permission: PermissionCapability::ReadOnly,
             prompt: "hello",
         }
     }
@@ -543,23 +500,8 @@ mod tests {
             is_new,
             work_dir,
             instructions: String::new(),
-            permission: PermissionCapability::ReadOnly,
             prompt: "hello".to_string(),
         }
-    }
-
-    #[test]
-    fn translates_all_permission_capabilities() {
-        assert_eq!(sandbox(PermissionCapability::ReadOnly), Some("read-only"));
-        assert_eq!(
-            sandbox(PermissionCapability::Workspace),
-            Some("workspace-write")
-        );
-        assert_eq!(sandbox(PermissionCapability::Inherit), None);
-        assert_eq!(
-            sandbox(PermissionCapability::FullAccess),
-            Some("danger-full-access")
-        );
     }
 
     #[test]

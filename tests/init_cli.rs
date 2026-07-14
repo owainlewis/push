@@ -33,7 +33,7 @@ fn init_without_path_creates_assistant_in_current_directory() {
     assert!(config.contains("agent = \"codex\""));
     assert!(config.contains("[telegram]"));
     assert!(config.contains("allow_user_ids = []"));
-    assert!(config.contains("TELEGRAM_BOT_TOKEN"));
+    assert!(config.contains("bot_token = \"\""));
     assert!(config.contains(
         &assistant
             .canonicalize()
@@ -41,6 +41,18 @@ fn init_without_path_creates_assistant_in_current_directory() {
             .to_string_lossy()
             .to_string()
     ));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&config_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Review or configure the channel and its allowlist:"));
     assert!(stdout.contains("push doctor"));

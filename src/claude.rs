@@ -6,7 +6,6 @@ use serde::Deserialize;
 use tokio::process::Command;
 
 use crate::agent::{Request, RunError, RunOutput};
-use crate::config::PermissionCapability;
 use crate::util::non_empty_session_id;
 
 /// Runner invokes the `claude` binary in print mode.
@@ -45,18 +44,10 @@ impl Runner {
 
     fn command(&self, req: &Request<'_>) -> Command {
         let mut cmd = Command::new(&self.bin);
-        let controls = controls(req.permission);
         cmd.arg("-p")
             .arg(req.prompt)
             .arg("--output-format")
             .arg("json");
-        if let Some(mode) = controls.permission_mode {
-            cmd.arg("--permission-mode").arg(mode);
-        }
-        cmd.arg("--add-dir").arg(req.work_dir);
-        for path in req.additional_dirs {
-            cmd.arg("--add-dir").arg(path);
-        }
         if req.is_new {
             cmd.arg("--session-id").arg(req.session_id);
         } else {
@@ -64,16 +55,6 @@ impl Runner {
         }
         if !req.instructions.trim().is_empty() {
             cmd.arg("--append-system-prompt").arg(req.instructions);
-        }
-        if let Some(tools) = controls.tools {
-            cmd.arg("--tools");
-            cmd.args(tools);
-        }
-        for tool in controls.allowed_tools {
-            cmd.arg("--allowed-tools").arg(tool);
-        }
-        for tool in controls.disallowed_tools {
-            cmd.arg("--disallowed-tools").arg(tool);
         }
         cmd.current_dir(req.work_dir);
         cmd.kill_on_drop(true);
@@ -129,50 +110,6 @@ fn missing_resume_error(message: &str) -> bool {
         .contains("no conversation found with session id")
 }
 
-struct Controls {
-    permission_mode: Option<&'static str>,
-    tools: Option<&'static [&'static str]>,
-    allowed_tools: &'static [&'static str],
-    disallowed_tools: &'static [&'static str],
-}
-
-const READ_ONLY_TOOLS: &[&str] = &["Read", "Grep", "Glob"];
-const WORKSPACE_TOOLS: &[&str] = &["Read", "Grep", "Glob", "Edit", "Write", "NotebookEdit"];
-const NO_TOOLS: &[&str] = &[];
-const DENY_SHELL_AND_WRITES: &[&str] = &["Bash", "Edit", "Write", "NotebookEdit"];
-const DENY_SHELL: &[&str] = &["Bash"];
-
-fn controls(capability: PermissionCapability) -> Controls {
-    match capability {
-        PermissionCapability::ReadOnly => Controls {
-            permission_mode: Some("dontAsk"),
-            tools: Some(READ_ONLY_TOOLS),
-            allowed_tools: READ_ONLY_TOOLS,
-            disallowed_tools: DENY_SHELL_AND_WRITES,
-        },
-        PermissionCapability::Workspace => Controls {
-            permission_mode: Some("dontAsk"),
-            tools: Some(WORKSPACE_TOOLS),
-            allowed_tools: WORKSPACE_TOOLS,
-            disallowed_tools: DENY_SHELL,
-        },
-        // No mode and no tool lists: the operator's own Claude Code settings
-        // decide what is allowed, exactly as in an interactive session.
-        PermissionCapability::Inherit => Controls {
-            permission_mode: None,
-            tools: None,
-            allowed_tools: NO_TOOLS,
-            disallowed_tools: NO_TOOLS,
-        },
-        PermissionCapability::FullAccess => Controls {
-            permission_mode: Some("bypassPermissions"),
-            tools: None,
-            allowed_tools: NO_TOOLS,
-            disallowed_tools: NO_TOOLS,
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,32 +144,6 @@ mod tests {
             non_empty_session_id(" claude-session "),
             Some("claude-session")
         );
-    }
-
-    #[test]
-    fn translates_all_permission_capabilities() {
-        let read_only = controls(PermissionCapability::ReadOnly);
-        assert_eq!(read_only.permission_mode, Some("dontAsk"));
-        assert_eq!(read_only.tools, Some(READ_ONLY_TOOLS));
-        assert!(read_only.disallowed_tools.contains(&"Bash"));
-        assert!(read_only.disallowed_tools.contains(&"Edit"));
-
-        let workspace = controls(PermissionCapability::Workspace);
-        assert_eq!(workspace.permission_mode, Some("dontAsk"));
-        assert_eq!(workspace.tools, Some(WORKSPACE_TOOLS));
-        assert!(workspace.allowed_tools.contains(&"Edit"));
-        assert!(workspace.disallowed_tools.contains(&"Bash"));
-
-        let inherit = controls(PermissionCapability::Inherit);
-        assert_eq!(inherit.permission_mode, None);
-        assert_eq!(inherit.tools, None);
-        assert!(inherit.allowed_tools.is_empty());
-        assert!(inherit.disallowed_tools.is_empty());
-
-        let full = controls(PermissionCapability::FullAccess);
-        assert_eq!(full.permission_mode, Some("bypassPermissions"));
-        assert_eq!(full.tools, None);
-        assert!(full.disallowed_tools.is_empty());
     }
 
     #[test]
@@ -272,9 +183,7 @@ mod tests {
                     session_id: "push-session",
                     is_new: true,
                     work_dir: work_dir.to_str().unwrap(),
-                    additional_dirs: &[],
                     instructions: "assistant identity",
-                    permission: PermissionCapability::ReadOnly,
                     prompt: "hello",
                 },
                 Duration::from_secs(5),
@@ -286,15 +195,19 @@ mod tests {
         assert_eq!(out.session_id, Some("claude-returned".to_string()));
         let args = read_args(&args_path);
         assert_arg_pair(&args, "--session-id", "push-session");
-        assert_arg_pair(&args, "--permission-mode", "dontAsk");
         assert_arg_pair(&args, "--append-system-prompt", "assistant identity");
         assert_arg_pair(&args, "-p", "hello");
-        assert_arg_pair(&args, "--tools", "Read");
-        assert_arg_pair(&args, "--allowed-tools", "Read");
-        assert_arg_pair(&args, "--disallowed-tools", "Bash");
-        assert!(args.contains(&"Grep".to_string()));
-        assert!(args.contains(&"Glob".to_string()));
-        assert!(args.contains(&"Edit".to_string()));
+        for flag in [
+            "--permission-mode",
+            "--tools",
+            "--allowed-tools",
+            "--disallowed-tools",
+        ] {
+            assert!(
+                !args.contains(&flag.to_string()),
+                "unexpected {flag} in {args:?}"
+            );
+        }
         assert!(!args.contains(&"--resume".to_string()));
     }
 
@@ -302,8 +215,6 @@ mod tests {
     async fn runs_resumed_session_with_resume_flag() {
         let args_path = temp_path("claude-resume-args");
         let work_dir = temp_dir("claude-resume-work");
-        let context_dir = temp_dir("claude-resume-context");
-        let drafts_dir = temp_dir("claude-resume-drafts");
         let script = format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nprintf '%s\\n' '{{\"result\":\"resumed\",\"session_id\":\"claude-returned\"}}'\n",
             sh_arg(&args_path)
@@ -317,9 +228,7 @@ mod tests {
                     session_id: "existing-session",
                     is_new: false,
                     work_dir: work_dir.to_str().unwrap(),
-                    additional_dirs: &[context_dir.to_str().unwrap(), drafts_dir.to_str().unwrap()],
                     instructions: "assistant identity",
-                    permission: PermissionCapability::Workspace,
                     prompt: "continue",
                 },
                 Duration::from_secs(5),
@@ -332,17 +241,8 @@ mod tests {
         assert_arg_pair(&args, "--resume", "existing-session");
         assert!(!args.contains(&"--session-id".to_string()));
         assert_arg_pair(&args, "--append-system-prompt", "assistant identity");
-        assert!(args
-            .windows(2)
-            .any(|pair| { pair == ["--add-dir", drafts_dir.to_str().unwrap()] }));
-        assert!(args
-            .windows(2)
-            .any(|pair| { pair == ["--add-dir", context_dir.to_str().unwrap()] }));
+        assert!(!args.contains(&"--add-dir".to_string()));
         assert_arg_pair(&args, "-p", "continue");
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["--allowed-tools", "Edit"]));
-        assert_arg_pair(&args, "--disallowed-tools", "Bash");
     }
 
     #[tokio::test]
@@ -360,9 +260,7 @@ mod tests {
                     session_id: "missing",
                     is_new: false,
                     work_dir: work_dir.to_str().unwrap(),
-                    additional_dirs: &[],
                     instructions: "",
-                    permission: PermissionCapability::ReadOnly,
                     prompt: "continue",
                 },
                 Duration::from_secs(5),
@@ -418,9 +316,7 @@ mod tests {
             session_id: "session",
             is_new: true,
             work_dir,
-            additional_dirs: &[],
             instructions: "",
-            permission: PermissionCapability::ReadOnly,
             prompt: "hello",
         }
     }
@@ -520,7 +416,6 @@ mod tests {
             is_new,
             work_dir,
             instructions: String::new(),
-            permission: PermissionCapability::ReadOnly,
             prompt: "hello".to_string(),
         }
     }

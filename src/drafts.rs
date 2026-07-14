@@ -411,7 +411,6 @@ fn hash(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     use crate::approval::{AnswerOrigin, AnswerOutcome, Choice, Question};
     use crate::config::Config;
@@ -436,8 +435,6 @@ mod tests {
                 telegram_allow_chat_ids: Vec::new(),
                 agent: "codex".to_string(),
                 routes: Vec::new(),
-                permission_profile: "workspace".to_string(),
-                permission_profiles: HashMap::new(),
                 assistant_root: root.to_string_lossy().to_string(),
                 jobs_dir: root.join("jobs").to_string_lossy().to_string(),
                 drafts_dir: root.join("drafts").to_string_lossy().to_string(),

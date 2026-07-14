@@ -16,7 +16,7 @@ use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::agent::{Request, RunError, Runner};
-use crate::config::{AgentBackend, Config, PermissionCapability};
+use crate::config::{AgentBackend, Config};
 use crate::util::{expand_home, now_ms, restrict_permissions, same_file};
 use crate::{history::History, soul};
 
@@ -715,7 +715,7 @@ impl Ledger {
                 queued_at_ms,
                 state,
                 job.backend.as_str(),
-                "inherit",
+                "agent",
                 duration_ms(job.timeout),
                 job.workdir.to_string_lossy(),
                 error,
@@ -948,7 +948,7 @@ fn insert_run(
             now,
             state,
             job.backend.as_str(),
-            "inherit",
+            "agent",
             duration_ms(job.timeout),
             job.workdir.to_string_lossy(),
             error,
@@ -1184,27 +1184,17 @@ async fn execute(cfg: &Config, job: &Job) -> std::result::Result<String, Executi
     let runner = Runner::for_backend(job.backend, cfg);
     let session_id = runner.initial_session_id();
     let workdir = job.workdir.to_string_lossy().to_string();
-    let context_dir = cfg
-        .backend_context_dir()
+    cfg.backend_context_dir()
         .map_err(|error| ExecutionError::Failed(format!("prepare assistant context: {error}")))?;
-    let additional_dirs = context_dir
-        .as_deref()
-        .and_then(Path::to_str)
-        .into_iter()
-        .collect::<Vec<_>>();
-    // Installed jobs are readable through the absolute path in `instructions`,
-    // but are intentionally not added as a backend workspace.
     let request = Request {
         session_id: &session_id,
         is_new: true,
         work_dir: &workdir,
-        additional_dirs: &additional_dirs,
         instructions: &instructions,
-        permission: PermissionCapability::Inherit,
         prompt: &job.body,
     };
     tracing::info!(
-        "job {} starting: backend={} permission=inherit workdir={} timeout={}",
+        "job {} starting: backend={} workdir={} timeout={}",
         job.name,
         job.backend.as_str(),
         workdir,

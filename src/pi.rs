@@ -8,7 +8,6 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::agent::{Request, RunError, RunOutput};
-use crate::config::PermissionCapability;
 
 /// Runner invokes `pi` in non-interactive JSON event mode.
 pub struct Runner {
@@ -87,9 +86,6 @@ impl Runner {
         if !req.instructions.trim().is_empty() {
             cmd.arg("--append-system-prompt")
                 .arg(req.instructions.trim());
-        }
-        if let Some(tools) = tools(req.permission) {
-            cmd.arg("--tools").arg(tools);
         }
         if !req.is_new {
             cmd.arg("--session").arg(req.session_id);
@@ -179,19 +175,6 @@ fn missing_resume_error(message: &str) -> bool {
         .contains("no session found matching")
 }
 
-const READ_ONLY_TOOLS: &str = "read,grep,find,ls";
-const WORKSPACE_TOOLS: &str = "read,edit,write,grep,find,ls";
-const FULL_ACCESS_TOOLS: &str = "read,bash,edit,write,grep,find,ls";
-
-fn tools(capability: PermissionCapability) -> Option<&'static str> {
-    match capability {
-        PermissionCapability::ReadOnly => Some(READ_ONLY_TOOLS),
-        PermissionCapability::Workspace => Some(WORKSPACE_TOOLS),
-        PermissionCapability::Inherit => None,
-        PermissionCapability::FullAccess => Some(FULL_ACCESS_TOOLS),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,9 +219,7 @@ mod tests {
                     session_id: "",
                     is_new: true,
                     work_dir: work_dir.to_str().unwrap(),
-                    additional_dirs: &[],
                     instructions: "SOUL instructions",
-                    permission: PermissionCapability::Workspace,
                     prompt: "user message",
                 },
                 Duration::from_secs(5),
@@ -251,7 +232,7 @@ mod tests {
         let args = read_args(&args_path);
         assert_arg_pair(&args, "--mode", "json");
         assert_arg_pair(&args, "--append-system-prompt", "SOUL instructions");
-        assert_arg_pair(&args, "--tools", WORKSPACE_TOOLS);
+        assert!(!args.contains(&"--tools".to_string()));
         assert!(!args.contains(&"--session".to_string()));
         assert_eq!(read_prompt(&args_path), "user message");
         assert!(!args.contains(&"user message".to_string()));
@@ -299,9 +280,7 @@ mod tests {
                     session_id: "pi-session",
                     is_new: false,
                     work_dir: work_dir.to_str().unwrap(),
-                    additional_dirs: &[],
                     instructions: "SOUL instructions",
-                    permission: PermissionCapability::ReadOnly,
                     prompt: "continue",
                 },
                 Duration::from_secs(5),
@@ -313,7 +292,7 @@ mod tests {
         assert_eq!(output.session_id, None);
         let args = read_args(&args_path);
         assert_arg_pair(&args, "--session", "pi-session");
-        assert_arg_pair(&args, "--tools", READ_ONLY_TOOLS);
+        assert!(!args.contains(&"--tools".to_string()));
     }
 
     #[tokio::test]
@@ -425,21 +404,6 @@ mod tests {
         assert_eq!(output.reply, "recovered");
     }
 
-    #[test]
-    fn maps_all_permission_profiles_conservatively() {
-        assert_eq!(tools(PermissionCapability::ReadOnly), Some(READ_ONLY_TOOLS));
-        assert_eq!(
-            tools(PermissionCapability::Workspace),
-            Some(WORKSPACE_TOOLS)
-        );
-        assert_eq!(tools(PermissionCapability::Inherit), None);
-        assert_eq!(
-            tools(PermissionCapability::FullAccess),
-            Some(FULL_ACCESS_TOOLS)
-        );
-        assert!(!WORKSPACE_TOOLS.split(',').any(|tool| tool == "bash"));
-    }
-
     fn success_script(args_path: &std::path::Path, session: &str, reply: &str) -> String {
         format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\ncat > {}.stdin\nprintf '%s\\n' '{{\"type\":\"session\",\"id\":\"{session}\"}}'\nprintf '%s\\n' '{{\"type\":\"message_end\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{reply}\"}}],\"stopReason\":\"stop\"}}}}'\n",
@@ -453,9 +417,7 @@ mod tests {
             session_id: if is_new { "" } else { "existing-session" },
             is_new,
             work_dir,
-            additional_dirs: &[],
             instructions: "",
-            permission: PermissionCapability::ReadOnly,
             prompt: "hello",
         }
     }
@@ -544,7 +506,6 @@ mod tests {
             is_new,
             work_dir,
             instructions: String::new(),
-            permission: PermissionCapability::ReadOnly,
             prompt: "hello".to_string(),
         }
     }
