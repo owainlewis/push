@@ -65,6 +65,10 @@ EOF
 
 cat > "$fake_bin/xattr" <<'EOF'
 #!/bin/sh
+if [ "${XATTR_SIGNAL_PARENT:-}" = "1" ] && [ "$1" = "-p" ]; then
+  kill -TERM "$PPID"
+  exit 0
+fi
 printf '%s\n' "$*" >> "$XATTR_LOG"
 EOF
 
@@ -84,6 +88,7 @@ run_installer() {
   FIXTURE_ARCHIVE="$fixture_dir/push.tar.gz" \
   FIXTURE_CHECKSUM="$checksum" \
   XATTR_LOG="$xattr_log" \
+  XATTR_SIGNAL_PARENT="${XATTR_SIGNAL_PARENT:-}" \
   BIN_DIR="$bin_dir" \
   PATH="$fake_bin:$PATH" \
     sh "$repo_root/install.sh"
@@ -91,22 +96,47 @@ run_installer() {
 
 macos_bin="$test_root/macos-bin"
 macos_xattr="$test_root/macos-xattr.log"
+mkdir -p "$macos_bin"
+printf 'blocked old binary\n' > "$macos_bin/push"
+chmod +x "$macos_bin/push"
+old_inode="$(ls -di "$macos_bin/push" | awk '{ print $1 }')"
 run_installer \
   Darwin arm64 aarch64-apple-darwin \
   "$fixture_dir/push.tar.gz.sha256" "$macos_bin" "$macos_xattr"
 test -x "$macos_bin/push"
-grep -F -- "-d com.apple.provenance $macos_bin/push" "$macos_xattr"
+new_inode="$(ls -di "$macos_bin/push" | awk '{ print $1 }')"
+test "$new_inode" != "$old_inode"
+grep -F -- "-d com.apple.provenance $macos_bin/.push.install." "$macos_xattr"
+test -z "$(find "$macos_bin" -name '.push.install.*' -print -quit)"
 
 bad_bin="$test_root/bad-bin"
 bad_xattr="$test_root/bad-xattr.log"
+mkdir -p "$bad_bin"
+printf 'working old binary\n' > "$bad_bin/push"
+chmod +x "$bad_bin/push"
 if run_installer \
   Darwin arm64 aarch64-apple-darwin \
   "$fixture_dir/bad.sha256" "$bad_bin" "$bad_xattr"; then
   echo "installer accepted a mismatched checksum" >&2
   exit 1
 fi
-test ! -e "$bad_bin/push"
+grep -F 'working old binary' "$bad_bin/push"
 test ! -e "$bad_xattr"
+
+interrupt_bin="$test_root/interrupt-bin"
+interrupt_xattr="$test_root/interrupt-xattr.log"
+mkdir -p "$interrupt_bin"
+printf 'working old binary\n' > "$interrupt_bin/push"
+chmod +x "$interrupt_bin/push"
+set +e
+XATTR_SIGNAL_PARENT=1 run_installer \
+  Darwin arm64 aarch64-apple-darwin \
+  "$fixture_dir/push.tar.gz.sha256" "$interrupt_bin" "$interrupt_xattr"
+interrupt_status=$?
+set -e
+test "$interrupt_status" -eq 143
+grep -F 'working old binary' "$interrupt_bin/push"
+test -z "$(find "$interrupt_bin" -name '.push.install.*' -print -quit)"
 
 linux_bin="$test_root/linux-bin"
 linux_xattr="$test_root/linux-xattr.log"
