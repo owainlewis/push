@@ -53,11 +53,35 @@ async fn main() -> Result<()> {
         Command::Doctor => doctor::doctor(&args.config_path),
         Command::Job(command) => run_job_command(&args.config_path, command).await,
         Command::Run => {
-            let cfg = config::Config::load(&args.config_path).context("config")?;
+            let cfg = load_run_config(&args.config_path)?;
             doctor::preflight(&cfg).context("preflight")?;
             report_invalid_jobs(&cfg)?;
             gateway::GatewayGroup::new(cfg).context("init")?.run().await
         }
+    }
+}
+
+fn load_run_config(path: &str) -> Result<config::Config> {
+    if matches!(
+        std::fs::symlink_metadata(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    ) {
+        let path_arg = shell_quote(path);
+        bail!(
+            "configuration not found at {path}\n\nCreate it with:\n  push init --config {path_arg}\n\nThen configure a channel and run `push doctor --config {path_arg}`."
+        );
+    }
+    config::Config::load(path).context("config")
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&byte))
+    {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }
 
