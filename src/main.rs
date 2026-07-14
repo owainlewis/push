@@ -46,14 +46,18 @@ async fn main() -> Result<()> {
                 println!("Initialized Git repository.");
             }
             println!("\nNext:");
-            println!("  $EDITOR {}/SOUL.md", result.root.display());
-            println!("  $EDITOR {}/context/README.md", result.root.display());
+            println!("  Review or configure the channel and its allowlist:");
+            println!("    $EDITOR {}", result.config_path.display());
+            println!("  Customize the assistant:");
+            println!("    $EDITOR {}/SOUL.md", result.root.display());
+            println!("    $EDITOR {}/context/README.md", result.root.display());
+            println!("  Validate and run:");
             if args.config_path == DEFAULT_CONFIG_PATH {
-                println!("  push doctor");
-                println!("  push");
+                println!("    push doctor");
+                println!("    push");
             } else {
-                println!("  push doctor --config {}", result.config_path.display());
-                println!("  push --config {}", result.config_path.display());
+                println!("    push doctor --config {}", result.config_path.display());
+                println!("    push --config {}", result.config_path.display());
             }
             Ok(())
         }
@@ -72,7 +76,8 @@ fn load_run_config(path: &str) -> Result<config::Config> {
     if let Some(message) = missing_config_message(path) {
         bail!(message);
     }
-    config::Config::load(path).context("config")
+    let expanded_path = util::expand_home(path);
+    config::Config::load(path).with_context(|| format!("load config {expanded_path}"))
 }
 
 fn missing_config_message(path: &str) -> Option<String> {

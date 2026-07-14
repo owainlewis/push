@@ -19,9 +19,12 @@ rest of the config:
 push init ~/Code/assistant
 ```
 
-Push derives `SOUL.md`, `context/`, and `jobs/` from `assistant_root`. At run
-time it appends their resolved absolute locations to the user-owned `SOUL.md`
-instructions in memory. It does not write machine paths into the repository.
+For a new file, init writes a Telegram and Codex starting point with an empty
+`telegram.allow_user_ids` list. Replace it with your numeric Telegram user ID
+before running Push. Push derives `SOUL.md`, `context/`, and `jobs/` from
+`assistant_root`. At run time it appends their resolved absolute locations to
+the user-owned `SOUL.md` instructions in memory. It does not write machine
+paths into the repository.
 
 Root configuration, route, primary-delivery, and custom-profile tables do not
 yet reject every unknown key. Use the documented names, then run `push doctor`;
