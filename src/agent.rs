@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
-use crate::config::{AgentBackend, Config, PermissionCapability};
+use crate::config::{AgentBackend, Config};
 use crate::{claude, codex, pi};
 
 /// One headless agent turn.
@@ -13,9 +13,7 @@ pub struct Request<'a> {
     pub session_id: &'a str,
     pub is_new: bool,
     pub work_dir: &'a str,
-    pub additional_dirs: &'a [&'a str],
     pub instructions: &'a str,
-    pub permission: PermissionCapability,
     pub prompt: &'a str,
 }
 
@@ -141,9 +139,7 @@ pub struct FakeRunCall {
     pub session_id: String,
     pub is_new: bool,
     pub prompt: String,
-    pub permission: PermissionCapability,
     pub instructions: String,
-    pub additional_dirs: Vec<String>,
 }
 
 #[cfg(test)]
@@ -153,13 +149,7 @@ impl FakeRunner {
             session_id: req.session_id.to_string(),
             is_new: req.is_new,
             prompt: req.prompt.to_string(),
-            permission: req.permission,
             instructions: req.instructions.to_string(),
-            additional_dirs: req
-                .additional_dirs
-                .iter()
-                .map(|path| (*path).to_string())
-                .collect(),
         });
         if !req.is_new
             && self

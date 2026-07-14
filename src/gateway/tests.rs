@@ -196,10 +196,6 @@ fn setup_failure_job(row_id: i64) -> Job {
         thread: "imessage:self:me".to_string(),
         target: "me@icloud.com".to_string(),
         backend: AgentBackend::Claude,
-        permission: PermissionProfile {
-            name: "restricted".to_string(),
-            capability: crate::config::PermissionCapability::ReadOnly,
-        },
         approval_origin: AnswerOrigin {
             channel: "imessage".to_string(),
             thread_key: "imessage:self:me".to_string(),
@@ -494,8 +490,7 @@ async fn draft_boundary_failure_completes_in_flight_row_and_advances_cursor() {
         temp_path("sessions").to_string_lossy().to_string(),
     );
     ctx.cfg.drafts_dir = drafts_blocker.to_string_lossy().to_string();
-    let mut job = setup_failure_job(10);
-    job.permission.capability = crate::config::PermissionCapability::Workspace;
+    let job = setup_failure_job(10);
 
     handle(&ctx, job).await;
 
@@ -531,8 +526,7 @@ async fn draft_boundary_failure_delivers_existing_outbound_without_misreporting_
         .unwrap()
         .record_outbound(1, OutboundOrigin::Backend, Some("claude"), "stored reply")
         .unwrap();
-    let mut job = setup_failure_job(10);
-    job.permission.capability = crate::config::PermissionCapability::Workspace;
+    let job = setup_failure_job(10);
 
     handle(&ctx, job).await;
 
@@ -598,7 +592,6 @@ async fn fake_channel_e2e_replies_once_ignores_unallowlisted_and_reuses_session(
         thread: Some("imessage:dm:+15551234567".to_string()),
         channel: None,
         agent: "codex".to_string(),
-        permission_profile: Some("workspace".to_string()),
     }];
     let mut gateway = Gateway::new(cfg).unwrap();
     gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
@@ -637,10 +630,6 @@ async fn fake_channel_e2e_replies_once_ignores_unallowlisted_and_reuses_session(
         assert!(!calls[1].is_new);
         assert_eq!(calls[1].prompt, "second");
         for call in calls.iter() {
-            assert_eq!(
-                call.permission,
-                crate::config::PermissionCapability::Workspace
-            );
             assert!(call.instructions.starts_with("Be useful."));
             assert!(call.instructions.contains(&format!(
                 "Assistant root: {}",
@@ -658,15 +647,6 @@ async fn fake_channel_e2e_replies_once_ignores_unallowlisted_and_reuses_session(
                     .unwrap()
                     .display()
             )));
-            assert!(call.additional_dirs.contains(
-                &std::fs::canonicalize(assistant_dir.join("context"))
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string()
-            ));
-            assert!(!call
-                .additional_dirs
-                .contains(&assistant_dir.join("jobs").to_string_lossy().to_string()));
         }
     }
     let events = audit_events(&audit_path);
@@ -1097,7 +1077,6 @@ async fn backend_switch_and_clear_start_fresh_sessions_with_history() {
         thread: Some("imessage:dm:+15551234567".to_string()),
         channel: None,
         agent: "claude".to_string(),
-        permission_profile: None,
     }];
     run_messages(
         &mut gateway,
@@ -1762,12 +1741,11 @@ async fn route_agent_draft_requires_bound_approval_before_atomic_install() {
     let workdir = temp_path("draft-e2e-workdir");
     std::fs::create_dir_all(&assistant_dir).unwrap();
     std::fs::create_dir_all(&workdir).unwrap();
-    let mut cfg = test_config(
+    let cfg = test_config(
         &state_path,
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
     );
-    cfg.permission_profile = "workspace".to_string();
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mut gateway = Gateway::new(cfg.clone()).unwrap();
     let inbound = message(
@@ -1845,12 +1823,11 @@ async fn concurrent_origins_present_only_their_isolated_drafts() {
     let workdir = temp_path("draft-concurrent-workdir");
     std::fs::create_dir_all(&assistant_dir).unwrap();
     std::fs::create_dir_all(&workdir).unwrap();
-    let mut cfg = test_config(
+    let cfg = test_config(
         &state_path,
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
     );
-    cfg.permission_profile = "workspace".to_string();
     let gateway = Gateway::new(cfg.clone()).unwrap();
     let first_origin = AnswerOrigin {
         channel: "imessage".to_string(),
@@ -1918,12 +1895,11 @@ async fn failed_run_and_recovered_outbound_still_reconcile_origin_drafts() {
     let workdir = temp_path("draft-failure-workdir");
     std::fs::create_dir_all(&assistant_dir).unwrap();
     std::fs::create_dir_all(&workdir).unwrap();
-    let mut cfg = test_config(
+    let cfg = test_config(
         &state_path,
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
     );
-    cfg.permission_profile = "workspace".to_string();
     let mut gateway = Gateway::new(cfg.clone()).unwrap();
     let failed_message = message(1, "+15551234567", "+15551234567", false, "draft then fail");
     let (thread, _) = gateway.channel.accept(&failed_message).unwrap();
@@ -2008,12 +1984,11 @@ async fn failed_draft_delivery_retries_after_restart_before_expiry() {
     let workdir = temp_path("draft-delivery-workdir");
     std::fs::create_dir_all(&assistant_dir).unwrap();
     std::fs::create_dir_all(&workdir).unwrap();
-    let mut cfg = test_config(
+    let cfg = test_config(
         &state_path,
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
     );
-    cfg.permission_profile = "workspace".to_string();
     let origin = AnswerOrigin {
         channel: "imessage".to_string(),
         thread_key: "imessage:dm:15551234567".to_string(),
@@ -2064,10 +2039,6 @@ fn draft_test_job(row_id: i64, target: &str, origin: AnswerOrigin) -> Job {
         thread: origin.thread_key.clone(),
         target: target.to_string(),
         backend: AgentBackend::Codex,
-        permission: PermissionProfile {
-            name: "workspace".to_string(),
-            capability: crate::config::PermissionCapability::Workspace,
-        },
         approval_origin: origin,
         text: "draft".to_string(),
     }
@@ -2089,8 +2060,6 @@ fn test_config(state_path: &str, sessions_dir: &str, assistant_dir: &str) -> Con
         telegram_allow_chat_ids: Vec::new(),
         agent: "codex".to_string(),
         routes: Vec::new(),
-        permission_profile: "restricted".to_string(),
-        permission_profiles: HashMap::new(),
         assistant_root: assistant_dir.to_string(),
         jobs_dir: format!("{state_path}.jobs"),
         drafts_dir: format!("{state_path}.drafts"),

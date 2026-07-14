@@ -9,7 +9,7 @@ push
 ```
 
 Paths beginning with `~` are expanded. Invalid values, unknown fields inside
-provider sections, unsafe path overlap, and removed legacy permission settings
+provider sections, unsafe path overlap, and removed gateway permission settings
 fail configuration load with an actionable error.
 
 Create the one assistant repository and persist its root before editing the
@@ -19,14 +19,14 @@ rest of the config:
 push init ~/Code/assistant
 ```
 
-For a new file, init writes a Telegram and Codex starting point with an empty
-`telegram.allow_user_ids` list. Replace it with your numeric Telegram user ID
-before running Push. Push derives `SOUL.md`, `context/`, and `jobs/` from
+For a new file, init writes a private, owner-only Telegram and Codex starting
+point with empty `telegram.bot_token` and `telegram.allow_user_ids` values.
+Fill both in before running Push. Push derives `SOUL.md`, `context/`, and `jobs/` from
 `assistant_root`. At run time it appends their resolved absolute locations to
 the user-owned `SOUL.md` instructions in memory. It does not write machine
 paths into the repository.
 
-Root configuration, route, primary-delivery, and custom-profile tables do not
+Root configuration, route, and primary-delivery tables do not
 yet reject every unknown key. Use the documented names, then run `push doctor`;
 do not assume a silent key changed runtime behavior.
 
@@ -38,12 +38,13 @@ agent = "codex"
 assistant_root = "~/Code/assistant"
 
 [telegram]
+bot_token = "token-from-BotFather"
 allow_user_ids = [123456789]
 ```
 
 `channel` is the easiest single-provider setup. `agent` is `claude`, `codex`,
-or `pi`. Chat uses the built-in `restricted` permission profile unless you
-select another profile.
+or `pi`. Push does not set sandbox, approval, permission-mode, or tool flags.
+Configure those in the selected agent.
 
 ### Pi setup
 
@@ -80,14 +81,15 @@ enabled. See the [iMessage guide](channels/imessage.md).
 
 ```toml
 [telegram]
-bot_token_env = "TELEGRAM_BOT_TOKEN"
+bot_token = "token-from-BotFather"
 allow_user_ids = [123456789]
 allow_chat_ids = []
 ```
 
-At least one stable numeric user or chat ID is required. Prefer the token
-environment variable over `bot_token` in the file. See the [Telegram
-guide](telegram.md).
+At least one stable numeric user or chat ID is required. Keep the config file
+private. `push init` creates new config files with mode `0600` on Unix. The
+`bot_token_env` setting remains available when an environment variable is a
+better fit. See the [Telegram guide](telegram.md).
 
 ### Run both providers
 
@@ -101,6 +103,7 @@ agent = "codex"
 self_handles = ["you@icloud.com"]
 
 [telegram]
+bot_token = "token-from-BotFather"
 allow_user_ids = [123456789]
 
 [primary_delivery]
@@ -118,21 +121,16 @@ Telegram topic targets use `"<chat-id>:<topic-id>"`.
 
 ## Routing
 
-Routes can override the backend and permission profile for a channel or exact
-thread:
+Routes can override the backend for a channel or exact thread:
 
 ```toml
-permission_profile = "restricted"
-
 [[routes]]
 channel = "telegram"
 agent = "codex"
-permission_profile = "restricted"
 
 [[routes]]
 thread = "telegram:dm:123456789"
 agent = "claude"
-permission_profile = "workspace"
 ```
 
 Precedence is:
@@ -140,7 +138,7 @@ Precedence is:
 1. exact thread or topic route
 2. parent Telegram private-chat route for a topic
 3. channel route
-4. root `agent` and `permission_profile`
+4. root `agent`
 
 Thread keys are:
 
@@ -149,26 +147,12 @@ Thread keys are:
 - `telegram:dm:<chat-id>`
 - `telegram:dm:<chat-id>:topic:<topic-id>`
 
-## Permission profiles
+## Agent permissions
 
-Built-in profiles are `restricted`, `workspace`, `inherit`, and
-`full-access`. `full-access` is deliberately rejected for chat routes because
-its backend bypass mode cannot protect Push-owned files.
-
-Create a named alias when the name explains intent:
-
-```toml
-[permission_profiles.research]
-capability = "read-only"
-
-[[routes]]
-channel = "telegram"
-agent = "codex"
-permission_profile = "research"
-```
-
-Custom profiles select only a capability. They cannot inject raw backend
-flags. See [permissions and security](security.md) for exact backend mappings.
+Permissions belong to the agent, not the gateway. Push invokes Claude Code,
+Codex, and Pi without overriding their sandbox, approval mode, or tool lists.
+This keeps interactive and gateway behavior aligned. Configure permissions in
+the selected agent and review [permissions and security](security.md).
 
 ## Settings reference
 
@@ -179,7 +163,6 @@ flags. See [permissions and security](security.md) for exact backend mappings.
 | `channel` | `"imessage"` | Single enabled provider when `channels` is empty |
 | `channels` | `[]` | Concurrent enabled providers |
 | `agent` | `"claude"` | Default backend |
-| `permission_profile` | `"restricted"` | Default chat permission profile |
 | `poll_interval` | `"3s"` | Delay between channel polls |
 | `run_timeout` | `"120s"` | Maximum chat backend run time |
 | `claude_bin` | `"claude"` | Claude Code executable |
@@ -220,7 +203,6 @@ repository.
 channels = ["imessage", "telegram"]
 agent = "codex"
 assistant_root = "~/Code/assistant"
-permission_profile = "restricted"
 poll_interval = "3s"
 run_timeout = "120s"
 
@@ -229,25 +211,22 @@ self_handles = ["you@icloud.com"]
 allow_from = []
 
 [telegram]
-bot_token_env = "TELEGRAM_BOT_TOKEN"
+bot_token = "token-from-BotFather"
 allow_user_ids = [123456789]
 
 [primary_delivery]
 channel = "telegram"
 target = "123456789"
 
-[permission_profiles.trusted-workspace]
-capability = "workspace"
-
 [[routes]]
 thread = "telegram:dm:123456789"
 agent = "claude"
-permission_profile = "trusted-workspace"
 ```
 
 Legacy flat channel fields remain accepted for migration, but new
 configurations should use `[imessage]` and `[telegram]`. JSON configuration and
-raw backend permission fields are no longer supported.
+gateway permission fields are no longer supported. Configure permissions in
+the selected agent instead.
 
 Legacy `assistant_dir` and `jobs_dir` settings remain compatible only when the
 jobs path is exactly `<assistant_dir>/jobs`. For separate legacy paths, move

@@ -33,7 +33,6 @@ pub(super) async fn run(ctx: Ctx, mut rx: mpsc::Receiver<Job>) {
 }
 
 pub(super) async fn handle(ctx: &Ctx, job: Job) {
-    use crate::config::PermissionCapability;
     let existing_outbound = match ctx.history.lock().unwrap().outbound_for(job.inbound_id) {
         Ok(outbound) => outbound,
         Err(error) => {
@@ -41,34 +40,26 @@ pub(super) async fn handle(ctx: &Ctx, job: Job) {
             return;
         }
     };
-    // Threads whose capability allows writes get the draft boundary, so they
-    // can propose recurring jobs for approval.
-    let can_write = matches!(
-        job.permission.capability,
-        PermissionCapability::Workspace | PermissionCapability::Inherit
-    );
-    let draft_directory = if can_write {
-        match crate::drafts::origin_directory(&ctx.cfg, &job.approval_origin) {
-            Ok(directory) => Some(directory),
-            Err(error) => {
-                error!("[{}] draft boundary error: {error:#}", job.thread);
-                if let Some(outbound) = &existing_outbound {
-                    report_delivery(
-                        ctx,
-                        &job,
-                        deliver_stored(ctx, &job, outbound).await,
-                        &outbound.content,
-                        "recovered_outbound",
-                        "recover outbound",
-                    );
-                } else {
-                    complete_setup_failure(ctx, &job, SANDBOX_SETUP_FAILURE).await;
-                }
-                return;
+    // Push exposes the draft boundary. The selected agent's own configuration
+    // decides whether it may write there.
+    let draft_directory = match crate::drafts::origin_directory(&ctx.cfg, &job.approval_origin) {
+        Ok(directory) => Some(directory),
+        Err(error) => {
+            error!("[{}] draft boundary error: {error:#}", job.thread);
+            if let Some(outbound) = &existing_outbound {
+                report_delivery(
+                    ctx,
+                    &job,
+                    deliver_stored(ctx, &job, outbound).await,
+                    &outbound.content,
+                    "recovered_outbound",
+                    "recover outbound",
+                );
+            } else {
+                complete_setup_failure(ctx, &job, SANDBOX_SETUP_FAILURE).await;
             }
+            return;
         }
-    } else {
-        None
     };
     if let Some(outbound) = existing_outbound {
         if let Some(directory) = &draft_directory {
@@ -194,37 +185,24 @@ pub(super) async fn handle(ctx: &Ctx, job: Job) {
         }
     };
     let draft_write_dir = draft_directory.as_ref().and_then(|path| path.to_str());
-    let context_dir = match ctx.cfg.backend_context_dir() {
-        Ok(context_dir) => context_dir,
-        Err(error) => {
-            error!("[{}] assistant context error: {error:#}", job.thread);
-            audit(
-                ctx,
-                ctx.audit.failed(
-                    "backend_setup_failed",
-                    job.row_id,
-                    &job.thread,
-                    Some(job.backend),
-                    error.to_string(),
-                ),
-            );
-            complete_setup_failure(ctx, &job, SESSION_SETUP_FAILURE).await;
-            return;
-        }
-    };
-    let context_access_dir = context_dir.as_deref().and_then(Path::to_str);
-    // The footer exposes jobs by absolute path for reads. Do not add jobs here:
-    // backend --add-dir flags can make a path writable under workspace modes.
-    let mut additional_dirs = Vec::with_capacity(2);
-    if let Some(context_access_dir) = context_access_dir {
-        additional_dirs.push(context_access_dir);
-    }
-    if let Some(draft_write_dir) = draft_write_dir {
-        additional_dirs.push(draft_write_dir);
+    if let Err(error) = ctx.cfg.backend_context_dir() {
+        error!("[{}] assistant context error: {error:#}", job.thread);
+        audit(
+            ctx,
+            ctx.audit.failed(
+                "backend_setup_failed",
+                job.row_id,
+                &job.thread,
+                Some(job.backend),
+                error.to_string(),
+            ),
+        );
+        complete_setup_failure(ctx, &job, SESSION_SETUP_FAILURE).await;
+        return;
     }
     if let Some(draft_write_dir) = draft_write_dir {
         instructions.push_str(&format!(
-            "\n\nTo propose a recurring job, write one complete validated Markdown runbook to {}/<lowercase-slug>.md. This drafts directory is the only Push-owned path you may write. The user-owned context directory may also be editable when the selected permission profile allows it. A draft remains inactive until the allowlisted user approves its exact revision. Never write to the installed jobs directory, Push configuration, or Push state.",
+            "\n\nTo propose a recurring job, write one complete validated Markdown runbook to {}/<lowercase-slug>.md. This drafts directory is the only Push-owned path you may write. Your agent configuration decides whether the user-owned context directory is editable. A draft remains inactive until the allowlisted user approves its exact revision. Never write to the installed jobs directory, Push configuration, or Push state.",
             draft_write_dir
         ));
     }
@@ -275,15 +253,7 @@ pub(super) async fn handle(ctx: &Ctx, job: Job) {
         );
         let mut result = runner
             .run(
-                backend_request(
-                    &session_id,
-                    is_new,
-                    &work_dir,
-                    &additional_dirs,
-                    &instructions,
-                    job.permission.capability,
-                    prompt,
-                ),
+                backend_request(&session_id, is_new, &work_dir, &instructions, prompt),
                 ctx.run_timeout,
             )
             .await;
@@ -299,9 +269,7 @@ pub(super) async fn handle(ctx: &Ctx, job: Job) {
                                 &session_id,
                                 false,
                                 &work_dir,
-                                &additional_dirs,
                                 &instructions,
-                                job.permission.capability,
                                 &job.text,
                             ),
                             ctx.run_timeout,
@@ -359,15 +327,7 @@ pub(super) async fn handle(ctx: &Ctx, job: Job) {
                 .map_or(job.text.as_str(), |prompt| prompt.text.as_str());
             result = runner
                 .run(
-                    backend_request(
-                        &session_id,
-                        true,
-                        &work_dir,
-                        &additional_dirs,
-                        &instructions,
-                        job.permission.capability,
-                        prompt,
-                    ),
+                    backend_request(&session_id, true, &work_dir, &instructions, prompt),
                     ctx.run_timeout,
                 )
                 .await;
@@ -891,18 +851,14 @@ fn backend_request<'a>(
     session_id: &'a str,
     is_new: bool,
     work_dir: &'a str,
-    additional_dirs: &'a [&'a str],
     instructions: &'a str,
-    permission: crate::config::PermissionCapability,
     prompt: &'a str,
 ) -> Request<'a> {
     Request {
         session_id,
         is_new,
         work_dir,
-        additional_dirs,
         instructions,
-        permission,
         prompt,
     }
 }

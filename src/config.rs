@@ -1,6 +1,6 @@
 //! Gateway configuration loaded from a TOML file.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
@@ -39,10 +39,6 @@ pub struct Config {
     pub agent: String,
     #[serde(default)]
     pub routes: Vec<RouteRule>,
-    #[serde(default = "default_permission_profile")]
-    pub permission_profile: String,
-    #[serde(default)]
-    pub permission_profiles: HashMap<String, PermissionProfileConfig>,
     /// Canonical root of the single user-owned assistant repository.
     #[serde(default)]
     pub assistant_root: String,
@@ -102,6 +98,28 @@ impl Config {
                 "structured [assistant] settings are no longer supported; move assistant identity into assistant_root/SOUL.md"
             );
         }
+        for removed in ["permission_profile", "permission_profiles"] {
+            if root.contains_key(removed) {
+                bail!(
+                    "{removed} is no longer supported; configure permissions in the selected agent and remove this key from Push config"
+                );
+            }
+        }
+        if root
+            .get("routes")
+            .and_then(toml::Value::as_array)
+            .is_some_and(|routes| {
+                routes.iter().any(|route| {
+                    route
+                        .as_table()
+                        .is_some_and(|route| route.contains_key("permission_profile"))
+                })
+            })
+        {
+            bail!(
+                "route permission_profile is no longer supported; configure permissions in the selected agent and remove this key from Push config"
+            );
+        }
         for legacy in [
             "permission_mode",
             "tools",
@@ -116,7 +134,7 @@ impl Config {
         ] {
             if root.contains_key(legacy) {
                 bail!(
-                    "legacy permission setting {legacy:?} is no longer supported; select a named permission_profile instead"
+                    "legacy permission setting {legacy:?} is no longer supported; configure permissions in the selected agent and remove this key from Push config"
                 );
             }
         }
@@ -296,7 +314,6 @@ impl Config {
         }
         Ok(RouteSelection {
             backend: self.agent_backend()?,
-            permission: self.resolve_permission_profile(&self.permission_profile)?,
         })
     }
 
@@ -343,31 +360,8 @@ impl Config {
     }
 
     fn resolve_route(&self, route: &RouteRule) -> Result<RouteSelection> {
-        let profile = route
-            .permission_profile
-            .as_deref()
-            .unwrap_or(&self.permission_profile);
         Ok(RouteSelection {
             backend: AgentBackend::parse(&route.agent)?,
-            permission: self.resolve_permission_profile(profile)?,
-        })
-    }
-
-    fn resolve_permission_profile(&self, name: &str) -> Result<PermissionProfile> {
-        let capability = match name {
-            "restricted" => PermissionCapability::ReadOnly,
-            "workspace" => PermissionCapability::Workspace,
-            "inherit" => PermissionCapability::Inherit,
-            "full-access" => PermissionCapability::FullAccess,
-            custom => self
-                .permission_profiles
-                .get(custom)
-                .with_context(|| format!("unknown permission profile {custom:?}"))?
-                .capability()?,
-        };
-        Ok(PermissionProfile {
-            name: name.to_string(),
-            capability,
         })
     }
 
@@ -444,24 +438,6 @@ impl Config {
         if self.jobs_max_workers == 0 {
             bail!("jobs_max_workers must be positive");
         }
-        let default_profile = self
-            .resolve_permission_profile(&self.permission_profile)
-            .context("invalid default permission profile")?;
-        reject_uncontained_route_profile(&default_profile)?;
-        for (name, profile) in &self.permission_profiles {
-            if name.trim().is_empty() {
-                bail!("permission profile names cannot be empty");
-            }
-            if matches!(
-                name.as_str(),
-                "restricted" | "workspace" | "inherit" | "full-access"
-            ) {
-                bail!("built-in permission profile {name:?} cannot be redefined");
-            }
-            profile
-                .capability()
-                .with_context(|| format!("invalid permission profile {name:?}"))?;
-        }
         for route in &self.routes {
             AgentBackend::parse(&route.agent)
                 .with_context(|| format!("invalid route agent for {route:?}"))?;
@@ -474,30 +450,12 @@ impl Config {
             if let Some(channel) = &route.channel {
                 ChannelKind::parse(channel).context("invalid route channel")?;
             }
-            let profile = route
-                .permission_profile
-                .as_deref()
-                .unwrap_or(&self.permission_profile);
-            let profile = self
-                .resolve_permission_profile(profile)
-                .with_context(|| format!("invalid permission profile for route {route:?}"))?;
-            reject_uncontained_route_profile(&profile)?;
         }
         validate_protected_paths(self)?;
         self.poll_interval_dur()?;
         self.run_timeout_dur()?;
         Ok(())
     }
-}
-
-fn reject_uncontained_route_profile(profile: &PermissionProfile) -> Result<()> {
-    if profile.capability == PermissionCapability::FullAccess {
-        bail!(
-            "route permission profile {:?} uses full-access, which cannot prevent direct writes to Push jobs or state",
-            profile.name
-        );
-    }
-    Ok(())
 }
 
 fn validate_protected_paths(cfg: &Config) -> Result<()> {
@@ -692,8 +650,6 @@ pub struct RouteRule {
     #[serde(default)]
     pub channel: Option<String>,
     pub agent: String,
-    #[serde(default)]
-    pub permission_profile: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
@@ -705,49 +661,6 @@ pub struct PrimaryDeliveryConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteSelection {
     pub backend: AgentBackend,
-    pub permission: PermissionProfile,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct PermissionProfileConfig {
-    pub capability: String,
-}
-
-impl PermissionProfileConfig {
-    fn capability(&self) -> Result<PermissionCapability> {
-        PermissionCapability::parse(&self.capability)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PermissionProfile {
-    pub name: String,
-    pub capability: PermissionCapability,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PermissionCapability {
-    ReadOnly,
-    Workspace,
-    /// Defer to the backend's own permission configuration. Push passes no
-    /// permission mode, tool lists, or sandbox flags; the operator's backend
-    /// settings decide what the agent may do. Jobs always run with this.
-    Inherit,
-    FullAccess,
-}
-
-impl PermissionCapability {
-    pub fn parse(value: &str) -> Result<Self> {
-        match value {
-            "read-only" => Ok(Self::ReadOnly),
-            "workspace" => Ok(Self::Workspace),
-            "inherit" => Ok(Self::Inherit),
-            "full-access" => Ok(Self::FullAccess),
-            other => bail!(
-                "invalid permission capability {other:?}; expected read-only, workspace, inherit, or full-access"
-            ),
-        }
-    }
 }
 
 impl RouteRule {
@@ -860,9 +773,6 @@ fn default_codex_bin() -> String {
 fn default_pi_bin() -> String {
     "pi".to_string()
 }
-fn default_permission_profile() -> String {
-    "restricted".to_string()
-}
 fn default_jobs_dir() -> String {
     "~/.push/jobs".to_string()
 }
@@ -920,8 +830,6 @@ mod tests {
             telegram_allow_chat_ids: Vec::new(),
             agent: "codex".to_string(),
             routes: Vec::new(),
-            permission_profile: "workspace".to_string(),
-            permission_profiles: HashMap::new(),
             assistant_root: root.to_string_lossy().to_string(),
             jobs_dir: root.join("jobs").to_string_lossy().to_string(),
             drafts_dir: root.join("drafts").to_string_lossy().to_string(),
@@ -953,7 +861,6 @@ mod tests {
             thread: Some("imessage:chat:pi".to_string()),
             channel: Some("imessage".to_string()),
             agent: "pi".to_string(),
-            permission_profile: Some("restricted".to_string()),
         }];
 
         assert_eq!(AgentBackend::parse("pi").unwrap(), AgentBackend::Pi);
@@ -986,7 +893,6 @@ mod tests {
             thread: None,
             channel: Some("telegram".to_string()),
             agent: "pi".to_string(),
-            permission_profile: None,
         });
         assert_eq!(cfg.required_agent_bins().unwrap(), vec!["codex"]);
 
@@ -1001,14 +907,6 @@ mod tests {
         let mut cfg = config();
         assert!(cfg.validate().is_ok());
 
-        cfg.permission_profile = "full-access".to_string();
-        assert!(cfg
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("full-access"));
-
-        cfg.permission_profile = "workspace".to_string();
         cfg.drafts_dir = format!("{}/drafts", cfg.jobs_dir);
         assert!(cfg
             .validate()

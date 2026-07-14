@@ -88,12 +88,11 @@ fn check_config(cfg: &config::Config, checks: &mut Vec<Check>) {
     checks.push(Check::pass(
         "config",
         format!(
-            "channels={}, agent={}, permission_profile={}, assistant_root={}, imessage.self_handles={}, imessage.allow_from={}, telegram.allow_user_ids={}, telegram.allow_chat_ids={}",
+            "channels={}, agent={}, assistant_root={}, imessage.self_handles={}, imessage.allow_from={}, telegram.allow_user_ids={}, telegram.allow_chat_ids={}",
             cfg.enabled_channel_kinds()
                 .map(|channels| channels.into_iter().map(|kind| kind.as_str()).collect::<Vec<_>>().join(","))
                 .unwrap_or_else(|_| cfg.channel.clone()),
             cfg.agent,
-            cfg.permission_profile,
             cfg.assistant_root,
             cfg.self_handles.len(),
             cfg.allow_from.len(),
@@ -506,7 +505,6 @@ claude_tools = []
             thread: None,
             channel: Some("imessage".to_string()),
             agent: "claude".to_string(),
-            permission_profile: None,
         }];
         let mut checks = Vec::new();
 

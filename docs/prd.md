@@ -136,10 +136,8 @@ user prompt.
 |---|---|
 | `agent` | `claude`, `codex`, or `pi`. |
 | `routes` | Exact thread to backend overrides. |
-| `permission_profile` | Default named profile; defaults to `restricted`. |
 | `channels` | Optional advanced list of reply channels to poll concurrently; otherwise `channel` is used unchanged. |
 | `primary_delivery` | Optional enabled channel and allowlisted target for proactive output. |
-| `permission_profiles` | Custom names mapped to a common capability. |
 | `assistant_root` | Canonical root of the one assistant repository. `SOUL.md`, `context/`, and `jobs/` are derived. |
 | `drafts_dir` | Agent-written inactive job proposals; defaults to `~/.push/drafts`. |
 | `jobs_agent` | Optional default job backend; otherwise uses `agent`. |
@@ -151,6 +149,7 @@ user prompt.
 | `run_timeout` | Max backend run time. |
 | `imessage.self_handles` | User's own iMessage handles. |
 | `imessage.allow_from` | Other allowed senders. |
+| `telegram.bot_token` | Telegram bot token stored in the private config. |
 | `telegram.bot_token_env` | Environment variable containing the bot token. |
 | `telegram.allow_user_ids` | Allowed private-chat sender IDs. |
 | `telegram.allow_chat_ids` | Allowed private chat IDs. |
@@ -180,7 +179,7 @@ user prompt.
 - Claude backend can create and resume a session.
 - Codex backend can create a session, store the Codex thread id, and resume it.
 - Pi backend can create a session, store the Pi session id, and resume it.
-- Workspace routes can propose a validated job draft, but only an exact-revision
+- Agents with write access can propose a validated job draft, but only an exact-revision
   approval from the bound allowlisted identity can install it.
 - Fresh or lost backend sessions receive bounded recent canonical history;
   resumed sessions receive only the new request.
@@ -198,7 +197,7 @@ user prompt.
 - A crash during an in-flight run retries that message on restart, which can
   duplicate backend work but avoids silently losing the message.
 - Codex resume behavior depends on the Codex CLI session store.
-- Full-access profiles are powerful local execution modes.
+- Permissive agent settings are powerful local execution modes.
 - iMessage database shape can change across macOS versions.
 
 ## Next Scope

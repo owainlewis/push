@@ -99,7 +99,7 @@ skipped; repeated local times run once at their first instant.
 ## Execution and delivery guarantees
 
 - Every run uses a fresh backend session, without chat history.
-- Jobs always inherit the backend's own permission configuration.
+- Jobs use the selected agent's own permission configuration.
 - Push does not retry failed or timed-out backend execution because the agent
   may have completed external side effects before failing.
 - Success, failure, timeout, overlap, and delivery state are stored separately.
@@ -113,10 +113,10 @@ destination, bounded result, and error details.
 
 ## Agent-drafted jobs
 
-A `workspace` or `inherit` chat route can propose a new job by writing one
-complete runbook to its origin-specific drafts inbox. Push provides that
-opaque path as an additional writable boundary, so different senders, chats,
-and topics cannot claim each other's drafts.
+An agent with write access can propose a new job by writing one complete
+runbook to its origin-specific drafts inbox. Push creates the opaque inbox and
+includes its path in the instructions. The agent configuration controls access,
+and different senders, chats, and topics cannot claim each other's drafts.
 
 Push validates the filename, complete contents, work directory, timeout,
 backend, trigger, symlink status, and protected paths before presenting the
@@ -130,6 +130,6 @@ job. Rejection leaves the proposal inactive.
 
 !!! warning
 
-    Jobs use backend-inherited permissions, not chat permission profiles. A
-    headless backend cannot ask for approval interactively, so configure its
+    Jobs use the selected agent's own permissions. A headless backend may not
+    ask for approval interactively, so configure its
     unattended permissions carefully and keep job work directories narrow.

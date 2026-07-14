@@ -44,8 +44,7 @@ matched after formatting is removed. Email addresses are matched without case
 sensitivity.
 
 Treat every allowed handle as an operator of the configured backend. A sender
-can ask the agent to use any capability allowed by the selected permission
-profile.
+can ask the agent to use any capability allowed by that agent's configuration.
 
 ## What Push ignores
 
@@ -68,11 +67,9 @@ Self-chat keys use `imessage:self:<handle>`. Allowed direct-message keys use
 [[routes]]
 thread = "imessage:self:you@icloud.com"
 agent = "claude"
-permission_profile = "workspace"
 ```
 
-See [configuration](../configuration.md#routing) for precedence and permission
-selection.
+See [configuration](../configuration.md#routing) for route precedence.
 
 ## Restart behavior
 

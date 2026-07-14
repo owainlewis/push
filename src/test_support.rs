@@ -3,7 +3,6 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::agent::{Request, RunError, RunOutput};
-use crate::config::PermissionCapability;
 
 pub struct FakeCli {
     root: PathBuf,
@@ -58,8 +57,6 @@ pub fn test_config() -> crate::config::Config {
         telegram_allow_chat_ids: Vec::new(),
         agent: "codex".to_string(),
         routes: Vec::new(),
-        permission_profile: "restricted".to_string(),
-        permission_profiles: std::collections::HashMap::new(),
         assistant_root: "/fake/assistant".to_string(),
         jobs_dir: "/fake/jobs".to_string(),
         drafts_dir: "/fake/drafts".to_string(),
@@ -117,7 +114,6 @@ pub struct ContractRequest {
     pub is_new: bool,
     pub work_dir: PathBuf,
     pub instructions: String,
-    pub permission: PermissionCapability,
     pub prompt: String,
 }
 
@@ -127,9 +123,7 @@ impl ContractRequest {
             session_id: &self.session_id,
             is_new: self.is_new,
             work_dir: self.work_dir.to_str().unwrap(),
-            additional_dirs: &[],
             instructions: &self.instructions,
-            permission: self.permission,
             prompt: &self.prompt,
         }
     }

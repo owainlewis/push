@@ -47,11 +47,13 @@ Store durable facts and working context here when they should be available acros
 Good examples include preferences, active projects, people, recurring processes, and reference notes. Keep secrets out of this repository. Start with small, focused Markdown files and update or remove stale information.
 "#;
 
-const DEFAULT_CONFIG: &str = r#"# Telegram quick start. Export TELEGRAM_BOT_TOKEN before running Push.
+const DEFAULT_CONFIG: &str = r#"# Telegram quick start.
 channel = "telegram"
 agent = "codex"
 
 [telegram]
+# Paste the token from BotFather here.
+bot_token = ""
 # Replace this with your numeric Telegram user ID.
 allow_user_ids = []
 "#;
@@ -463,6 +465,10 @@ fn write_config(config_path: &Path, contents: &[u8]) -> Result<()> {
             fs::set_permissions(&temporary, metadata.permissions()).with_context(|| {
                 format!("preserve config permissions for {}", destination.display())
             })?;
+        } else {
+            crate::util::restrict_permissions(&temporary, false).with_context(|| {
+                format!("restrict config permissions for {}", destination.display())
+            })?;
         }
         file.write_all(contents)
             .with_context(|| format!("write temporary config {}", temporary.display()))?;
@@ -591,7 +597,7 @@ mod tests {
         let config = parent.join("push.toml");
         fs::write(
             &config,
-            "channel = 'imessage'\nself_handles = ['me@example.com']\npermission_profile = 'custom'\n\n[permission_profiles.custom]\ncapability = 'read-only'\n",
+            "channel = 'imessage'\nself_handles = ['me@example.com']\n\n[telegram]\nbot_token = 'secret'\n",
         )
         .unwrap();
 
@@ -603,9 +609,7 @@ mod tests {
             value.get("assistant_root").and_then(toml::Value::as_str),
             Some(result.root.to_str().unwrap())
         );
-        assert!(value["permission_profiles"]["custom"]
-            .get("assistant_root")
-            .is_none());
+        assert!(value["telegram"].get("assistant_root").is_none());
         assert_eq!(
             crate::config::Config::load(config.to_str().unwrap())
                 .unwrap()
