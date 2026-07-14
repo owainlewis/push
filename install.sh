@@ -14,6 +14,17 @@ need() {
 need curl
 need tar
 
+sha256() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{ print $1 }'
+  else
+    echo "push install: missing required command: shasum or sha256sum" >&2
+    exit 1
+  fi
+}
+
 os="$(uname -s)"
 arch="$(uname -m)"
 
@@ -45,11 +56,38 @@ fi
 
 echo "Downloading $asset_url"
 curl -fsSL "$asset_url" -o "$tmp/push.tar.gz"
+curl -fsSL "${asset_url}.sha256" -o "$tmp/push.tar.gz.sha256"
+
+expected="$(awk 'NR == 1 { print $1 }' "$tmp/push.tar.gz.sha256" | tr '[:upper:]' '[:lower:]')"
+case "$expected" in
+  *[!0-9a-f]*|'')
+    echo "push install: release checksum is malformed" >&2
+    exit 1
+    ;;
+esac
+if [ "${#expected}" -ne 64 ]; then
+  echo "push install: release checksum is malformed" >&2
+  exit 1
+fi
+
+actual="$(sha256 "$tmp/push.tar.gz")"
+if [ "$actual" != "$expected" ]; then
+  echo "push install: release checksum verification failed" >&2
+  exit 1
+fi
+
+echo "Verified SHA-256 checksum"
 tar -xzf "$tmp/push.tar.gz" -C "$tmp"
 
 mkdir -p "$bin_dir"
 find "$tmp" -type f -name push -perm -111 -exec cp {} "$bin_dir/push" \;
 chmod +x "$bin_dir/push"
+
+if [ "$os" = "Darwin" ] && command -v xattr >/dev/null 2>&1; then
+  if xattr -p com.apple.provenance "$bin_dir/push" >/dev/null 2>&1; then
+    xattr -d com.apple.provenance "$bin_dir/push"
+  fi
+fi
 
 echo "Installed push to $bin_dir/push"
 case ":$PATH:" in
