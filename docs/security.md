@@ -8,7 +8,7 @@ security boundary rather than a convenience setting.
 
 An accepted sender is an operator of the configured backend. They may be able
 to read files, edit repositories, run commands, call MCP servers, or use local
-credentials, depending on the route's permission profile and backend settings.
+credentials, depending on the selected agent's settings.
 
 Keep these allowlists narrow:
 
@@ -19,52 +19,28 @@ Use stable numeric Telegram IDs. Usernames are mutable and are not accepted as
 security identities. Treat a lost phone, shared messaging account, or
 compromised allowed sender as access to the assistant.
 
-## Chat permission profiles
+## Agent permissions
 
-| Profile | Claude Code | Codex | Pi | Intended use |
-| --- | --- | --- | --- | --- |
-| `restricted` | Read, Grep, and Glob; Bash and write tools denied | read-only sandbox, approvals disabled | `read,grep,find,ls` allowlist | Default inspection and conversation |
-| `workspace` | Read and file-edit tools; Bash omitted | workspace-write sandbox, approvals disabled | `read,edit,write,grep,find,ls` allowlist; no Bash | Repository edits and job drafts |
-| `inherit` | No Push mode or tool filters | No Push sandbox override | No Push tool allowlist | Defer to the operator's backend configuration |
-| `full-access` | Backend bypass mode | Backend bypass mode | Explicit allowlist including Bash | Rejected for unattended chat routes |
+Push does not pass sandbox, approval-policy, permission-mode, or tool-list
+overrides to Claude Code, Codex, or Pi. The selected agent's own configuration
+is the sole permission source for chats and jobs.
 
-Claude Code does not expose a Codex-equivalent filesystem sandbox. Its
-`workspace` mapping allows file tools but deliberately omits shell access.
-Pi also has no native sandbox or permission prompts. Its tool allowlist can
-remove mutating tools or Bash, but it cannot confine file tools to the session
-workspace. `workspace` prevents direct shell access but Pi's read, edit, and
-write tools can still address paths allowed by the operating-system user.
-`inherit` may enable built-in or extension tools from Pi's configuration.
-`full-access` explicitly enables all built-in tools, including unrestricted
-Bash, and therefore remains unsuitable for unattended chat routes.
+This makes Push behave like the agent you already configured, but it also means
+every agent-approved capability may be one accepted message away. Review the
+agent's tools, MCP servers, filesystem access, shell access, and unattended
+approval behavior before running Push as a service. Pi has no native filesystem
+sandbox or interactive permission prompt, so its configured tools deserve
+particular care.
 
-These profiles control the local filesystem and process capabilities that Push
-passes to the backend. They do not rewrite the backend's own integration
-configuration. In particular, Codex MCP servers remain available with whatever
-read or write capabilities their configuration grants. Audit or disable those
-servers before treating a `restricted` or `workspace` route as safe for an
-untrusted request.
-
-`inherit` can be the right choice when the backend already has a carefully
-designed unattended policy. It can also make every backend-approved tool one
-text message away. A headless run cannot pause for an interactive approval.
-
-Custom profiles only alias a capability:
-
-```toml
-[permission_profiles.repo-editor]
-capability = "workspace"
-```
-
-Push rejects raw backend permission flags in TOML so a route cannot
-quietly bypass the shared local policy model.
+Push rejects old `permission_profile`, `permission_profiles`, and raw backend
+permission fields with a migration error. Remove those keys and configure the
+selected agent instead.
 
 ## Job permissions
 
-Jobs always inherit the backend's own permission configuration. They do not
-select a Push permission profile. Push compensates by requiring a fixed,
-existing work directory and rejecting overlap with Push-owned files, including
-the loaded config file.
+Jobs use the selected agent's own permission configuration. Push requires a
+fixed, existing work directory and rejects overlap with Push-owned files,
+including the loaded config file.
 
 Do not place secrets in a job body. Make them available through the backend or
 service environment using the narrowest policy that works.
@@ -114,10 +90,10 @@ IDs, file paths, and backend errors. Protect and rotate it like a service log.
 ## Deployment checklist
 
 - allow only identities you control
-- start with `restricted`
+- configure the selected agent for unattended use
 - run `push doctor` as the service user
 - keep backend credentials out of TOML and logs
 - use absolute config paths in service files
 - keep Push state and job work directories separate
 - inspect agent-authored jobs before approving them
-- review the audit log after routing or permission changes
+- review the audit log after routing or agent permission changes

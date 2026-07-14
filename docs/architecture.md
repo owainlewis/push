@@ -133,7 +133,6 @@ Request {
     session_id,
     is_new,
     work_dir,
-    additional_dirs,
     instructions,
     prompt,
 }
@@ -185,8 +184,8 @@ Pi creates its own session id and reports it in the first JSON event.
 - Work dir: per-thread session directory
 
 The adapter reads the session header and final assistant `message_end` event.
-Pi tool allowlists implement Push permission profiles, but Pi has no native
-filesystem sandbox or permission prompts.
+Push passes no tool override to Pi. Pi has no native filesystem sandbox or
+interactive permission prompts, so its own configuration is the boundary.
 
 ## State Model
 
@@ -271,15 +270,14 @@ state and consume an answered value once; crossing the expiry first records an
 expired terminal state, so later cancellation cannot overwrite the timeout.
 
 Agent-written job proposals live separately under origin-specific inboxes in
-`drafts_dir`. Route backends receive only their exact inbox as an additional
-writable root under contained permission profiles; full-access routes are
-rejected because they cannot enforce that boundary. Push snapshots
+`drafts_dir`. Push creates the exact inbox and includes its path in the route's
+instructions. The selected agent's configuration decides whether it is writable. Push snapshots
 and validates a changed regular file, stores its exact bytes, hash, proposer,
 and bound approval question in SQLite, then sends the full proposal to the
 originating channel. Reconciliation also runs after backend failure or timeout
 and before replaying a persisted outbound reply, so a crash cannot orphan an
 unrecorded revision. Approval rechecks the path, symlink status, revision, job
-schema, protected work directory, and configured permission ceiling. A valid
+schema and protected work directory. A valid
 stored revision is staged inside the derived assistant `jobs/` directory and
 installed with an atomic
 no-clobber link. Rejection and revision mismatch never activate the draft, and
@@ -305,9 +303,8 @@ assistant, context, and jobs paths. The footer directs the backend to begin
 with `context/README.md` when useful, protect `SOUL.md` and installed jobs, and
 use the job draft approval flow. Push does not write the footer to the
 repository or inject all context files into each prompt. The selected backend
-and permission profile decide what to inspect. Conversation runs receive
-`context/` as an additional workspace; installed jobs are not added as a
-writable root.
+and its configuration decide what to inspect. Instructions include the absolute
+`context/` path; Push does not add it as a writable root.
 
 Sessions, databases, drafts, audit logs, delivery state, locks, config secrets,
 and other runtime state stay outside the Git-versioned assistant repository.
@@ -328,15 +325,9 @@ the trust boundary. iMessage uses `imessage.self_handles` and
 `imessage.allow_from`; Telegram uses stable numeric `telegram.allow_user_ids`
 and `telegram.allow_chat_ids`.
 
-Routes select a named Push permission profile. `restricted` is the default.
-Push rejects `full-access` for routes because backend bypass modes cannot
-protect Push-owned files. Claude receives a fixed tool allowlist and denies
-Bash; Codex receives `read-only` or `workspace-write`. Claude does not provide
-a Codex-equivalent filesystem sandbox, so its `workspace` mapping permits file
-tools but deliberately omits shell access. Custom profiles select a capability,
-not raw backend flags. Jobs always inherit the backend's own permission
-configuration and must use a work directory that does not overlap Push-owned
-state or configuration.
+Push does not override sandbox, approval, permission-mode, or tool-list settings.
+Chats and jobs use the selected agent's own configuration and must use work
+directories that do not overlap Push-owned state or configuration.
 
 ## Extension Points
 

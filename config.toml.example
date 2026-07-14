@@ -1,4 +1,4 @@
-# Telegram quick start. The bot token comes from TELEGRAM_BOT_TOKEN.
+# Telegram quick start.
 channel = "telegram"
 agent = "codex"
 assistant_root = "~/Code/assistant"
@@ -7,11 +7,8 @@ assistant_root = "~/Code/assistant"
 # agent = "pi"
 # pi_bin = "pi"
 
-# Chat is read-only by default. Uncomment to defer entirely to your own
-# backend settings (Claude Code allow rules, Codex sandbox, or Pi tool config),
-# including shell.
-# permission_profile = "inherit"
-
 [telegram]
+# Paste the token from BotFather here. Keep this file private.
+bot_token = "replace-with-the-token-from-BotFather"
 # Replace this once with your numeric Telegram user ID.
 allow_user_ids = [123456789]

@@ -8,8 +8,8 @@
 
 Push jobs are user-owned Markdown runbooks stored under
 `<assistant_root>/jobs/`. A job
-contains one instruction body plus execution policy such as its permission
-profile, timeout, working directory, and backend override.
+contains one instruction body plus execution policy such as its timeout,
+working directory, and backend override.
 Manual and cron starts are triggers attached to the same job rather than
 different job types. Every run uses a fresh backend session. Once the scheduler
 ships, it uses the same SQLite claim and execution path as manual runs,
@@ -20,9 +20,8 @@ an agent runtime.
 
 - Keep jobs readable, reviewable, and editable without a database UI.
 - Use one execution path for manual and scheduled runs.
-- Require permissions, timeouts, and working directories to be explicit and
-  validated before execution.
-- Prevent jobs from exceeding the operator-configured permission ceiling.
+- Require timeouts and working directories to be explicit and validated before
+  execution.
 - Make scheduling safe across restarts, overlap, timezones, and delivery
   failures.
 - Preserve Push's existing polling-only architecture and backend boundary.
@@ -42,8 +41,8 @@ an agent runtime.
 - Push has one long-running gateway process with no inbound server port.
   Commands may run as short-lived local processes against the same SQLite
   store.
-- Claude Code, Codex, and Pi have different permission controls, but a job selects
-  only a named Push permission profile.
+- Claude Code, Codex, and Pi own their permission controls. Push passes no
+  permission or tool overrides.
 - Scheduled work can have external side effects, so duplicate execution is more
   dangerous than skipping a missed run.
 - Job files, `SOUL.md`, and `context/` belong to the Git-versioned assistant
@@ -65,7 +64,6 @@ The file uses TOML frontmatter between `+++` delimiters followed by a non-empty
 Markdown instruction body. Version 1 supports these fields:
 
 - `version`: required and equal to `1`.
-- `permission_profile`: required named profile from Push configuration.
 - `timeout`: required positive duration, capped by the configured job maximum.
 - `workdir`: required fixed directory, expanded and canonicalised at validation.
 - `backend`: optional `claude`, `codex`, or `pi` override; otherwise use the configured
@@ -81,7 +79,6 @@ Manual-only example:
 ```markdown
 +++
 version = 1
-permission_profile = "research-readonly"
 timeout = "10m"
 workdir = "~/Code"
 backend = "codex"
@@ -97,7 +94,6 @@ Scheduled example:
 ```markdown
 +++
 version = 1
-permission_profile = "calendar-readonly"
 timeout = "5m"
 workdir = "~/.push/workspaces/morning-agenda"
 
@@ -137,32 +133,24 @@ without stopping unrelated messaging or jobs. Every manual or scheduled claim
 rereads and validates the exact file bytes, then records their snapshot hash.
 A scheduled occurrence is cancelled if its trigger no longer exists in that
 validated snapshot. Immediately before spawning a backend, Push resolves the
-work directory again and rechecks it against the permission profile so a path
-replacement is likely to be detected. This path-based check does not eliminate
-a replacement race between validation and child startup; backend sandboxing
-and OS permissions remain the enforcement boundary.
-
-The selected permission profile must exist and be included in the configured
-set of profiles allowed for jobs. This allow-set is the capability ceiling: a
-job may select one approved name but cannot define permissions, backend flags,
-or a new profile. Push resolves the profile to backend controls only after the
-job passes validation. The timeout must not exceed the configured jobs maximum,
-and the canonical work directory must meet the restrictions of the permission
-profile.
+work directory again so a path replacement is likely to be detected. This
+path-based check does not eliminate a replacement race between validation and
+child startup; the agent's configuration and OS permissions remain the
+enforcement boundary. The timeout must not exceed the configured jobs maximum.
 
 Notification behavior follows the trigger rather than job metadata. A manual
 run prints its result to the invoking terminal and does not send a message. A
 scheduled run sends its success, failure, or timeout result to the configured
 primary destination. If no primary destination is valid, scheduled triggers
 remain disabled with an actionable error while the job remains manually
-runnable. Secrets are referenced through the selected profile or process
-environment policy, never embedded as special job fields.
+runnable. Secrets are referenced through the agent or process environment
+policy, never embedded as special job fields.
 
 ### Execution
 
 Manual and cron triggers create the same immutable run request containing a
 snapshot hash of the validated job, trigger information, scheduled time,
-backend, permission profile, timeout, and canonical work directory. Editing the
+backend, timeout, and canonical work directory. Editing the
 job affects later runs but not an already claimed run.
 
 Each run starts a fresh Claude Code, Codex, or Pi session. Push supplies the composed
@@ -205,7 +193,7 @@ logical fields are:
 
 - run id, job name, job snapshot hash, trigger kind/id, and claim owner kind;
 - scheduled, queued, started, and finished timestamps;
-- backend, permission profile, timeout, canonical work directory, and resolved
+- backend, timeout, canonical work directory, and resolved
   notification destination when applicable;
 - lifecycle state and a bounded result or error reference;
 - delivery state, attempt count, last attempt time, and delivery error.
@@ -249,11 +237,10 @@ operator-owned.
 ### Agent-authored draft extension
 
 Route agents may write proposals only in an opaque, exact-origin inbox under
-`~/.push/drafts/`, which Push adds as a Push-owned writable root for contained
-workspace profiles. Concurrent channels, senders, chats, and topics therefore
-cannot claim each other's files. Full-access
-routes and jobs are rejected because backend bypass modes cannot prevent direct
-writes to Push-owned files. Job work directories may not overlap the assistant
+`~/.push/drafts/`. Push creates the inbox and includes its path in the
+instructions. The agent's own configuration decides whether it is writable.
+Concurrent channels, senders, chats, and topics therefore cannot claim each other's files. Job work
+directories may not overlap the assistant
 root, configuration, session, draft, installed-job, lock, audit, or database
 paths.
 
@@ -264,7 +251,7 @@ originating allowlisted channel. The
 following `ask_user` question binds Approve and Reject to that channel, sender,
 chat, thread or topic, and exact SHA-256 revision. SQLite stores the exact bytes
 and proposer identity with the question. Approval rereads and revalidates the
-draft and current permission ceiling. A changed revision is invalidated; a
+draft. A changed revision is invalidated; a
 valid stored revision is staged inside the derived assistant `jobs/` directory
 and installed with an atomic
 no-clobber link. Rejection leaves the draft inactive. Proposal and approver
@@ -316,11 +303,11 @@ fewer moving parts.
 
 ## Risks
 
-- A permissive profile can still grant broad machine access. Named profiles,
-  the job allow-set, fixed work directories, and startup validation limit this
-  risk but do not make arbitrary agent execution safe.
+- A permissive agent configuration can grant broad machine access. Fixed work
+  directories and startup validation limit this risk but do not make arbitrary
+  agent execution safe.
 - A job body or file in its work directory may contain untrusted instructions.
-  The permission profile remains the enforcement boundary; `SOUL.md` and the
+  The agent configuration remains the enforcement boundary; `SOUL.md` and the
   job body stay at distinct instruction levels.
 - A local process with permission to replace the work directory can race the
   final path check. The first version treats this as a residual local-user risk

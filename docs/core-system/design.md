@@ -7,7 +7,7 @@
 ## Summary
 
 Push is a local personal-assistant gateway. It owns channels, conversation
-history, routing, permissions, scheduling, approvals, and delivery while
+history, routing, scheduling, approvals, and delivery while
 delegating reasoning and tool use to disposable agent runtimes such as Claude
 Code and Codex. The durable assistant is one user-owned Git repository with
 `SOUL.md`, `context/`, and `jobs/`. Push stores the canonical conversation
@@ -29,8 +29,7 @@ history in SQLite outside that repository.
 - Generate or reconcile `MEMORY.md` in the first implementation.
 - Inject an entire conversation transcript into every request.
 - Build embeddings, semantic retrieval, or a general knowledge system.
-- Build a new filesystem sandbox. Push uses the existing named permission
-  profiles and each backend's filesystem controls.
+- Build a new filesystem sandbox. Push defers to each agent's own controls.
 - Build a custom agent loop, tool runner, plugin system, or MCP layer in Push.
 - Build assistant registries, IDs, selection, or multi-assistant commands.
 - Define autonomous memory write-back here.
@@ -89,9 +88,9 @@ Propose job changes through Push's approval workflow.
 Claude Code and Pi receive the composed text as appended system instructions.
 Codex receives it as developer instructions. Push never writes resolved machine paths
 into `SOUL.md` and does not inject all context files into every prompt. The
-backend decides which files to inspect. Conversation routes receive `context/`
-as an additional workspace subject to their permission profile; `SOUL.md` and
-installed jobs remain protected by the existing sandbox and approval boundary.
+backend decides which files to inspect. Conversation instructions include the
+absolute `context/` path. The agent's own configuration decides access;
+`SOUL.md` and installed jobs remain protected by Push's workflow rules and OS permissions.
 
 Push owns the footer so customising `SOUL.md` cannot remove repository
 locations or ownership rules. Runtime sessions, drafts, databases, audit logs,
@@ -169,7 +168,7 @@ backend session id. The request separates:
 - instructions: composed `SOUL.md`, resolved assistant paths, and gateway-owned policy;
 - current message: the user's request;
 - conversation identity and backend session state;
-- working directory, timeout, and permissions.
+- working directory and timeout.
 
 Conversation history storage happens around this boundary and is independent
 of the selected backend. Agent tools, skills, MCP servers, model choice, and

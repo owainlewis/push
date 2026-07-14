@@ -20,7 +20,7 @@ use crate::agent::Runner;
 use crate::approval::{AnswerOrigin, AnswerOutcome};
 use crate::audit::{AuditEvent, AuditLog};
 use crate::channel::{Channel, RawMessage};
-use crate::config::{AgentBackend, ChannelKind, Config, PermissionProfile, PrimaryDeliveryConfig};
+use crate::config::{AgentBackend, ChannelKind, Config, PrimaryDeliveryConfig};
 use crate::history::{History, OutboundOrigin};
 use crate::jobs;
 use crate::store::Store;
@@ -38,7 +38,6 @@ struct Job {
     thread: String,
     target: String,
     backend: AgentBackend,
-    permission: PermissionProfile,
     approval_origin: AnswerOrigin,
     text: String,
 }
@@ -595,7 +594,6 @@ impl Gateway {
                     thread,
                     target,
                     backend,
-                    permission: route.permission,
                     approval_origin,
                     text: m.text.trim().to_string(),
                 };

@@ -26,13 +26,13 @@ Use absolute paths in service files. The service user needs:
 - write access to `sessions_dir`
 - read access to `assistant_root/SOUL.md`, `assistant_root/context/`, and
   `assistant_root/jobs/`
-- write access to `assistant_root/context/` for workspace or inherited routes,
-  and to `assistant_root/jobs/` only for approved job installation
+- access to `assistant_root/context/` as allowed by the selected agent, and
+  write access to `assistant_root/jobs/` only for approved job installation
 - access to the selected `claude`, `codex`, or `pi` executable on `PATH`
 - backend login, tokens, settings, MCP config, and project credentials
 - for iMessage on macOS, Full Disk Access and `osascript`
-- for Telegram, `TELEGRAM_BOT_TOKEN` in the service environment and network
-  access to `api.telegram.org`
+- for Telegram, a token in the private config and network access to
+  `api.telegram.org`
 
 `state_path` stores independent cursors for each channel. `sessions_dir` stores
 per-thread backend work directories, and `state.json` stores backend session
@@ -139,7 +139,6 @@ WorkingDirectory=%h/.push
 Restart=on-failure
 RestartSec=10
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-EnvironmentFile=%h/.config/push/telegram.env
 
 [Install]
 WantedBy=default.target
@@ -154,9 +153,8 @@ systemctl --user status push.service
 journalctl --user -u push.service -f
 ```
 
-Create `~/.config/push/telegram.env` with mode `0600` and a single
-`TELEGRAM_BOT_TOKEN=...` entry. Do not commit this file or print it in service
-logs.
+Keep `~/.push/config.toml` at mode `0600` because it contains the Telegram bot
+token. Do not commit this file or print it in service logs.
 
 For a user service that survives logout, enable lingering:
 
@@ -184,8 +182,9 @@ from delivery attempts.
 ## Drafted Jobs
 
 The service prepares `drafts_dir` and the derived assistant `jobs/` directory
-with owner-only permissions. A workspace route may write proposals only to its
-origin-specific drafts inbox, but they remain inactive until the exact revision
+with owner-only permissions. Push exposes only the route's origin-specific
+drafts inbox, and the agent's configuration decides whether it may write there.
+Proposals remain inactive until the exact revision
 is approved from its originating allowlisted channel identity. Pending
 questions survive service restart.
 
@@ -206,11 +205,9 @@ is completed.
 
 Managed services run without a person watching the terminal. An allowed sender
 can instruct the configured backend to use its tools, subject to your backend
-settings. Keep `imessage.allow_from` narrow and use the least-powerful named
-permission profile that works. The default `restricted` profile omits shell and
-write tools. Push rejects `full-access` for unattended routes because it cannot
-enforce the drafted-job boundary. Jobs inherit backend permissions and are
-kept away from Push-owned paths by work-directory validation.
+settings. Keep `imessage.allow_from` narrow and configure each selected agent
+for unattended use. Push passes no sandbox, approval, or tool overrides. Jobs
+are kept away from Push-owned paths by work-directory validation.
 
 Store config files, state files, audit logs, backend credentials, and service
 logs with permissions appropriate for the service user. Logs may contain

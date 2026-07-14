@@ -99,7 +99,7 @@ input:
   resolved assistant, context, and jobs locations
   conversation/session id if one exists
   working directory
-  timeout and permission config
+  timeout
 
 output:
   final reply
