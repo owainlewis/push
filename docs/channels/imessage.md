@@ -93,7 +93,7 @@ Grant Full Disk Access to the exact terminal or service host, restart that
 process, and rerun:
 
 ```sh
-push doctor --config ~/.config/push/config.toml
+push doctor
 ```
 
 ### Messages are ignored

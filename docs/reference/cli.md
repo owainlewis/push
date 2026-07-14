@@ -2,7 +2,7 @@
 
 Push has one gateway command, one diagnostic command, and a small set of job
 commands. All commands accept `--config <path>` anywhere in the argument list.
-The default is `config.toml` in the current directory.
+The default is `~/.push/config.toml`.
 
 | Command | Purpose |
 | --- | --- |
@@ -18,12 +18,12 @@ The default is `config.toml` in the current directory.
 Examples:
 
 ```sh
-push init ~/Code/assistant --config ~/.config/push/config.toml
-push doctor --config ~/.config/push/config.toml
-push --config ~/.config/push/config.toml
-push job validate --config ~/.config/push/config.toml
-push --config ~/.config/push/config.toml job run repo-review
-push job runs repo-review --config ~/.config/push/config.toml
+push init ~/Code/assistant
+push doctor
+push
+push job validate
+push job run repo-review
+push job runs repo-review
 ```
 
 Unknown commands and missing values fail with the accepted command forms. The

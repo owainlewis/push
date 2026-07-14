@@ -69,8 +69,7 @@ install -m 755 target/release/push ~/.local/bin/push
 ## 3. Create your assistant repository
 
 ```sh
-mkdir -p ~/.config/push
-push init ~/Code/assistant --config ~/.config/push/config.toml
+push init ~/Code/assistant
 ```
 
 Push creates one Git-versioned repository containing `SOUL.md`, `AGENTS.md`,
@@ -84,7 +83,7 @@ time and never writes machine-specific paths into the repository.
 === "Telegram"
 
     Create a bot with Telegram's `@BotFather`, send it one message, and find
-    your stable numeric user ID. Then create `~/.config/push/config.toml`:
+    your stable numeric user ID. Then edit `~/.push/config.toml`:
 
     ```toml
     channel = "telegram"
@@ -107,7 +106,7 @@ time and never writes machine-specific paths into the repository.
 === "iMessage"
 
     Give the terminal or service host Full Disk Access in macOS System
-    Settings, then create `~/.config/push/config.toml`:
+    Settings, then edit `~/.push/config.toml`:
 
     ```toml
     channel = "imessage"
@@ -134,8 +133,8 @@ user files.
 ## 5. Validate and run
 
 ```sh
-push doctor --config ~/.config/push/config.toml
-push --config ~/.config/push/config.toml
+push doctor
+push
 ```
 
 Send a new message after the gateway starts. Telegram deliberately discards
