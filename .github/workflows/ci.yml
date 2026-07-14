@@ -38,6 +38,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Test installer
+        run: bash tests/install.sh
+
       - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt,clippy
