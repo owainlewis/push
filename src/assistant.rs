@@ -47,6 +47,15 @@ Store durable facts and working context here when they should be available acros
 Good examples include preferences, active projects, people, recurring processes, and reference notes. Keep secrets out of this repository. Start with small, focused Markdown files and update or remove stale information.
 "#;
 
+const DEFAULT_CONFIG: &str = r#"# Telegram quick start. Export TELEGRAM_BOT_TOKEN before running Push.
+channel = "telegram"
+agent = "codex"
+
+[telegram]
+# Replace this with your numeric Telegram user ID.
+allow_user_ids = []
+"#;
+
 #[derive(Debug)]
 pub struct InitResult {
     pub root: PathBuf,
@@ -90,6 +99,7 @@ pub fn init(requested_path: &str, config_path: &str) -> Result<InitResult> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConfigState {
+    MissingFile,
     MissingRoot,
     MatchingRoot,
 }
@@ -99,7 +109,7 @@ fn inspect_config(config_path: &Path, target: &Path) -> Result<ConfigState> {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             validate_runtime_boundary(None, target)?;
-            return Ok(ConfigState::MissingRoot);
+            return Ok(ConfigState::MissingFile);
         }
         Err(error) => {
             return Err(error).with_context(|| format!("read config {}", config_path.display()))
@@ -408,7 +418,12 @@ fn persist_root(config_path: &Path, root: &Path, state: ConfigState) -> Result<(
     };
     let existing = match fs::read_to_string(config_path) {
         Ok(existing) => existing,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && state == ConfigState::MissingFile =>
+        {
+            DEFAULT_CONFIG.to_string()
+        }
         Err(error) => {
             return Err(error).with_context(|| format!("read config {}", config_path.display()))
         }
@@ -713,6 +728,8 @@ mod tests {
         let raw = fs::read_to_string(&config).unwrap();
         assert!(raw.starts_with("channel = 'telegram'\n"));
         assert!(raw.contains("assistant_root = \".\""));
+        assert!(!raw.contains("agent = \"codex\""));
+        assert!(!raw.contains("allow_user_ids"));
         assert!(target.join("SOUL.md").is_file());
         let _ = fs::remove_dir_all(target);
     }

@@ -29,6 +29,11 @@ fn init_without_path_creates_assistant_in_current_directory() {
     let config_path = home.join(".push/config.toml");
     let config = std::fs::read_to_string(&config_path).unwrap();
     assert!(!workdir.join("config.toml").exists());
+    assert!(config.contains("channel = \"telegram\""));
+    assert!(config.contains("agent = \"codex\""));
+    assert!(config.contains("[telegram]"));
+    assert!(config.contains("allow_user_ids = []"));
+    assert!(config.contains("TELEGRAM_BOT_TOKEN"));
     assert!(config.contains(
         &assistant
             .canonicalize()
@@ -37,9 +42,28 @@ fn init_without_path_creates_assistant_in_current_directory() {
             .to_string()
     ));
     let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Review or configure the channel and its allowlist:"));
     assert!(stdout.contains("push doctor"));
     assert!(!stdout.contains("push doctor --config"));
+    assert!(stdout.contains(&format!("$EDITOR {}", config_path.display())));
+    assert!(
+        stdout
+            .find(&format!("$EDITOR {}", config_path.display()))
+            .unwrap()
+            < stdout.find("push doctor").unwrap()
+    );
     assert!(stdout.contains("SOUL.md"));
+
+    let run_output = Command::new(env!("CARGO_BIN_EXE_push"))
+        .current_dir(&workdir)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    assert!(!run_output.status.success());
+    let run_stderr = String::from_utf8_lossy(&run_output.stderr);
+    assert!(run_stderr.contains(&format!("load config {}", config_path.display())));
+    assert!(run_stderr.contains("set telegram.allow_user_ids or telegram.allow_chat_ids"));
+    assert!(!run_stderr.contains("imessage"));
     let _ = std::fs::remove_dir_all(root);
 }
 
