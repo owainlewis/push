@@ -90,7 +90,9 @@ pub struct Config {
 impl Config {
     /// Load, expand `~` in path fields, and validate the config at `path`.
     pub fn load(path: &str) -> Result<Config> {
-        let raw = std::fs::read_to_string(path).with_context(|| format!("read config {path}"))?;
+        let expanded_path = expand_home(path);
+        let raw = std::fs::read_to_string(&expanded_path)
+            .with_context(|| format!("read config {expanded_path}"))?;
         let mut value: toml::Value = toml::from_str(&raw).context("parse TOML config")?;
         let root = value
             .as_table_mut()
@@ -151,8 +153,8 @@ impl Config {
             ],
         )?;
         let mut c: Config = value.try_into().context("parse TOML config")?;
-        let config_path =
-            std::fs::canonicalize(path).with_context(|| format!("resolve config {path}"))?;
+        let config_path = std::fs::canonicalize(&expanded_path)
+            .with_context(|| format!("resolve config {expanded_path}"))?;
         c.db_path = expand_home(&c.db_path);
         c.sessions_dir = expand_home(&c.sessions_dir);
         c.state_path = expand_home(&c.state_path);

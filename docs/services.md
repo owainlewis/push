@@ -12,10 +12,9 @@ Build or install `push`, then run doctor from the same user account that will
 own the service:
 
 ```sh
-mkdir -p ~/.config/push ~/.push
-# Copy config.toml.example to ~/.config/push/config.toml and edit channel settings.
-push init ~/Code/assistant --config ~/.config/push/config.toml
-push doctor --config /Users/YOU/.config/push/config.toml
+push init ~/Code/assistant
+# Edit ~/.push/config.toml with your channel settings.
+push doctor
 ```
 
 Use absolute paths in service files. The service user needs:
@@ -70,7 +69,7 @@ and replace `YOU` with your macOS user name:
   <array>
     <string>/Users/YOU/.local/bin/push</string>
     <string>--config</string>
-    <string>/Users/YOU/.config/push/config.toml</string>
+    <string>/Users/YOU/.push/config.toml</string>
   </array>
 
   <key>WorkingDirectory</key>
@@ -135,7 +134,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/push --config %h/.config/push/config.toml
+ExecStart=%h/.local/bin/push --config %h/.push/config.toml
 WorkingDirectory=%h/.push
 Restart=on-failure
 RestartSec=10

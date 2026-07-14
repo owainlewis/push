@@ -27,6 +27,8 @@ mod util;
 
 use anyhow::{bail, Context, Result};
 
+const DEFAULT_CONFIG_PATH: &str = "~/.push/config.toml";
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
@@ -46,8 +48,13 @@ async fn main() -> Result<()> {
             println!("\nNext:");
             println!("  $EDITOR {}/SOUL.md", result.root.display());
             println!("  $EDITOR {}/context/README.md", result.root.display());
-            println!("  push doctor --config {}", result.config_path.display());
-            println!("  push --config {}", result.config_path.display());
+            if args.config_path == DEFAULT_CONFIG_PATH {
+                println!("  push doctor");
+                println!("  push");
+            } else {
+                println!("  push doctor --config {}", result.config_path.display());
+                println!("  push --config {}", result.config_path.display());
+            }
             Ok(())
         }
         Command::Doctor => doctor::doctor(&args.config_path),
@@ -62,16 +69,29 @@ async fn main() -> Result<()> {
 }
 
 fn load_run_config(path: &str) -> Result<config::Config> {
-    if matches!(
-        std::fs::symlink_metadata(path),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound
-    ) {
-        let path_arg = shell_quote(path);
-        bail!(
-            "configuration not found at {path}\n\nCreate it with:\n  push init --config {path_arg}\n\nThen configure a channel and run `push doctor --config {path_arg}`."
-        );
+    if let Some(message) = missing_config_message(path) {
+        bail!(message);
     }
     config::Config::load(path).context("config")
+}
+
+fn missing_config_message(path: &str) -> Option<String> {
+    let expanded_path = util::expand_home(path);
+    if !matches!(
+        std::fs::symlink_metadata(&expanded_path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    ) {
+        return None;
+    }
+    if path == DEFAULT_CONFIG_PATH {
+        return Some(format!(
+            "configuration not found at {path}\n\nCreate it with:\n  push init\n\nThen configure a channel and run `push doctor`."
+        ));
+    }
+    let path_arg = shell_quote(path);
+    Some(format!(
+        "configuration not found at {path}\n\nCreate it with:\n  push init --config {path_arg}\n\nThen configure a channel and run `push doctor --config {path_arg}`."
+    ))
 }
 
 fn shell_quote(value: &str) -> String {
@@ -110,7 +130,7 @@ enum JobCommand {
 
 impl Args {
     fn parse(args: Vec<String>) -> Result<Self> {
-        let mut config_path = "config.toml".to_string();
+        let mut config_path = DEFAULT_CONFIG_PATH.to_string();
         let mut positional = Vec::new();
         let mut i = 0;
         while i < args.len() {
@@ -151,7 +171,7 @@ impl Args {
 }
 
 async fn run_job_command(config_path: &str, command: JobCommand) -> Result<()> {
-    let cfg = config::Config::load(config_path).context("config")?;
+    let cfg = load_run_config(config_path)?;
     match command {
         JobCommand::Validate => {
             let catalog = jobs::Catalog::load(&cfg)?;
@@ -367,12 +387,12 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_toml_config_path() {
+    fn defaults_to_user_config_path() {
         assert_eq!(
             Args::parse(Vec::new()).unwrap(),
             Args {
                 command: Command::Run,
-                config_path: "config.toml".to_string(),
+                config_path: DEFAULT_CONFIG_PATH.to_string(),
             }
         );
     }
