@@ -138,6 +138,7 @@ pub struct FakeRunner {
 pub struct FakeRunCall {
     pub session_id: String,
     pub is_new: bool,
+    pub work_dir: String,
     pub prompt: String,
     pub instructions: String,
 }
@@ -148,6 +149,7 @@ impl FakeRunner {
         self.calls.lock().unwrap().push(FakeRunCall {
             session_id: req.session_id.to_string(),
             is_new: req.is_new,
+            work_dir: req.work_dir.to_string(),
             prompt: req.prompt.to_string(),
             instructions: req.instructions.to_string(),
         });

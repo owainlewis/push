@@ -1,6 +1,8 @@
 //! Runs the Codex CLI headlessly for a single message.
 
-use std::path::Path;
+use std::fs::OpenOptions;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -26,13 +28,37 @@ struct JsonEvent {
     item: Value,
 }
 
+struct OutputFile {
+    path: PathBuf,
+}
+
+impl OutputFile {
+    fn create() -> std::io::Result<Self> {
+        let path =
+            std::env::temp_dir().join(format!("push-codex-last-message-{}.txt", Uuid::new_v4()));
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for OutputFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 impl Runner {
     /// Executes one turn and returns Codex's final reply plus the Codex session id.
     pub async fn run(&self, req: Request<'_>, timeout: Duration) -> Result<RunOutput, RunError> {
-        let out_path = Path::new(req.work_dir)
-            .join(format!(".push-codex-last-message-{}.txt", Uuid::new_v4()));
+        let output_file = OutputFile::create()
+            .map_err(|error| RunError::Failed(format!("prepare Codex output: {error}")))?;
+        let out_path = output_file.path.as_path();
         let attempt = crate::agent::output_with_retry(|| {
-            let mut cmd = self.command(&req, &out_path);
+            let mut cmd = self.command(&req, out_path);
             async move { cmd.output().await }
         });
         let out = match tokio::time::timeout(timeout, attempt).await {
@@ -43,13 +69,11 @@ impl Runner {
 
         let stdout = String::from_utf8_lossy(&out.stdout);
         let session_id = session_id_from_jsonl(&stdout);
-        let reply = std::fs::read_to_string(&out_path)
+        let reply = std::fs::read_to_string(out_path)
             .ok()
             .filter(|s| !s.trim().is_empty())
             .or_else(|| last_agent_message_from_jsonl(&stdout))
             .unwrap_or_default();
-        let _ = std::fs::remove_file(&out_path);
-
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             let message = if stderr.is_empty() {
@@ -328,7 +352,21 @@ mod tests {
     #[tokio::test]
     async fn reports_timeout() {
         let work_dir = temp_dir("codex-timeout-work");
-        let cli = FakeCli::new("codex", "#!/bin/sh\nsleep 2\n");
+        let cli = FakeCli::new(
+            "codex",
+            r#"#!/bin/sh
+out=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = '-o' ]; then
+    shift
+    out="$1"
+  fi
+  shift
+done
+printf '%s\n' 'partial reply' > "$out"
+sleep 2
+"#,
+        );
         let runner = runner(cli.bin());
 
         let err = match runner
@@ -343,6 +381,7 @@ mod tests {
         };
 
         assert_timeout(err);
+        assert!(std::fs::read_dir(&work_dir).unwrap().next().is_none());
     }
 
     fn runner(bin: String) -> Runner {
