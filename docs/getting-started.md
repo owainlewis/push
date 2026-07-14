@@ -46,6 +46,10 @@ On Apple Silicon macOS or x86_64 Linux, install the latest prebuilt release:
 curl -fsSL https://raw.githubusercontent.com/owainlewis/push/main/install.sh | sh
 ```
 
+The installer verifies the archive against its published SHA-256 checksum
+before extracting it. On macOS, it then clears the downloaded binary's
+provenance restriction so the verified command can run.
+
 The binary goes to `~/.local/bin` by default. Add that directory to `PATH` if
 your shell does not already include it. The installer recognizes Intel macOS
 and ARM Linux, but it exits unless the latest GitHub release contains a matching
