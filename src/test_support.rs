@@ -70,6 +70,7 @@ pub fn test_config() -> crate::config::Config {
         claude_bin: "/fake/claude".to_string(),
         codex_bin: "/fake/codex".to_string(),
         codex_model: None,
+        pi_bin: "/fake/pi".to_string(),
         sessions_dir: "/fake/sessions".to_string(),
         state_path: "/fake/state.json".to_string(),
         audit_log_path: "/fake/audit.jsonl".to_string(),

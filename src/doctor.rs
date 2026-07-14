@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
-use crate::{config, drafts, history};
+use crate::{config, drafts, history, jobs};
 
 /// Fails fast with actionable messages when the environment is not ready.
 pub fn preflight(cfg: &config::Config) -> Result<()> {
@@ -234,6 +234,9 @@ fn check_bins_with(
             return;
         }
     };
+    if let Ok(catalog) = jobs::Catalog::load(cfg) {
+        bins.extend(catalog.jobs.values().map(|job| cfg.agent_bin(job.backend)));
+    }
     if cfg
         .enabled_channel_kinds()
         .is_ok_and(|channels| channels.contains(&config::ChannelKind::IMessage))
@@ -444,6 +447,51 @@ claude_tools = []
         }));
         assert!(checks.iter().any(|check| {
             check.name == "binary osascript" && matches!(check.status, CheckStatus::Fail)
+        }));
+    }
+
+    #[test]
+    fn binary_checks_use_configured_pi_binary_when_pi_is_active() {
+        let mut cfg = test_config();
+        cfg.agent = "pi".to_string();
+        cfg.pi_bin = "/custom/pi".to_string();
+        let mut checks = Vec::new();
+
+        check_bins_with(&cfg, &mut checks, |bin| {
+            (bin == "/custom/pi" || bin == "osascript").then(|| PathBuf::from(bin))
+        });
+
+        assert!(checks.iter().any(|check| {
+            check.name == "binary /custom/pi" && matches!(check.status, CheckStatus::Pass)
+        }));
+        assert!(!checks
+            .iter()
+            .any(|check| check.name == "binary /fake/codex"));
+    }
+
+    #[test]
+    fn binary_checks_include_pi_selected_by_an_installed_job() {
+        let mut cfg = test_config();
+        let jobs_dir = temp_dir("doctor-pi-job");
+        let workdir = temp_dir("doctor-pi-job-work");
+        cfg.jobs_dir = jobs_dir.to_string_lossy().to_string();
+        cfg.pi_bin = "/custom/pi".to_string();
+        std::fs::write(
+            jobs_dir.join("pi-job.md"),
+            format!(
+                "+++\nversion = 1\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"pi\"\n+++\nRun Pi.\n",
+                workdir.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let mut checks = Vec::new();
+
+        check_bins_with(&cfg, &mut checks, |bin| {
+            (bin == "/fake/codex" || bin == "osascript").then(|| PathBuf::from(bin))
+        });
+
+        assert!(checks.iter().any(|check| {
+            check.name == "binary /custom/pi" && matches!(check.status, CheckStatus::Fail)
         }));
     }
 

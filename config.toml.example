@@ -3,8 +3,13 @@ channel = "telegram"
 agent = "codex"
 assistant_root = "~/Code/assistant"
 
+# Pi is also supported. Install and authenticate it first, then use:
+# agent = "pi"
+# pi_bin = "pi"
+
 # Chat is read-only by default. Uncomment to defer entirely to your own
-# backend settings (Claude Code allow rules, Codex sandbox), including shell.
+# backend settings (Claude Code allow rules, Codex sandbox, or Pi tool config),
+# including shell.
 # permission_profile = "inherit"
 
 [telegram]

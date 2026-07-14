@@ -6,9 +6,9 @@
 [![Docs](https://img.shields.io/badge/docs-read-12756f)](https://owainlewis.github.io/push/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-111417)](LICENSE)
 
-Push turns Claude Code or Codex into an always-on personal assistant. Run one
-small process on your own machine, message it over iMessage or Telegram, and
-schedule work with plain Markdown runbooks.
+Push turns Claude Code, Codex, or Pi into an always-on personal assistant. Run
+one small process on your own machine, message it over iMessage or Telegram,
+and schedule work with plain Markdown runbooks.
 
 It can review repositories before you wake up, watch pull requests, prepare a
 daily brief, or pick up a conversation from your phone. You own one portable,
@@ -24,8 +24,9 @@ Your coding agent owns the intelligence and tools.
 
 - **An assistant that is actually available.** Push runs continuously under
   `launchd` or `systemd`, not only while a terminal window is open.
-- **The agents you already use.** Keep Claude Code or Codex, including their
-  model access, tools, MCP servers, skills, login, and backend configuration.
+- **The agents you already use.** Keep Claude Code, Codex, or Pi, including
+  their model access, tools, MCP servers, skills, login, and backend
+  configuration.
 - **Conversations from your phone.** Use private iMessage or Telegram chats.
   Each thread keeps its own backend session and canonical history.
 - **Work that starts without you.** A five-field cron trigger can run a
@@ -41,7 +42,7 @@ Your coding agent owns the intelligence and tools.
 
 ```text
 you by iMessage or Telegram ─┐
-                            ├─> Push ─> Claude Code or Codex ─> reply to you
+                            ├─> Push ─> Claude Code, Codex, or Pi ─> reply to you
 cron-triggered Markdown job ┘
 ```
 
@@ -56,12 +57,12 @@ Push keeps conversations, run history, schedules, and delivery routes durable.
 
 [Hermes Agent](https://hermes-agent.nousresearch.com/docs/) is a broad,
 batteries-included autonomous agent platform. Push is a smaller orchestration
-layer for people who already want Claude Code or Codex to do the work.
+layer for people who already want Claude Code, Codex, or Pi to do the work.
 
 | | Push | Hermes Agent |
 | --- | --- | --- |
 | Product shape | Small gateway and scheduler around external coding agents | Full autonomous agent runtime and platform |
-| Agent runtime | Claude Code or Codex | Hermes's integrated agent and tool system |
+| Agent runtime | Claude Code, Codex, or Pi | Hermes's integrated agent and tool system |
 | Main focus | A durable 24/7 assistant over private chat and Markdown jobs | A broad agent environment with many tools, channels, skills, and deployment modes |
 | Tools and context | Come from your existing backend configuration | Managed as part of the Hermes ecosystem |
 | State | Local TOML, Markdown, JSON, and SQLite owned by Push | Managed by the Hermes runtime |
@@ -75,7 +76,7 @@ and the rest of your day.
 ## What works today
 
 - iMessage on macOS and Telegram private chats on macOS or Linux
-- Claude Code and Codex backends, selectable by channel or conversation
+- Claude Code, Codex, and Pi backends, selectable by channel or conversation
 - One Git-versioned assistant repository containing `SOUL.md`, `context/`, and
   approved `jobs/`
 - Durable conversation history and backend session recovery
@@ -102,6 +103,13 @@ Linux. Other Rust-supported architectures can [build from source](docs/getting-s
 Then follow the [quickstart](https://owainlewis.github.io/push/getting-started/)
 to create your assistant repository, choose a channel, configure a backend,
 run `push doctor`, and keep the gateway online.
+
+To use [Pi](https://pi.dev/), install it, complete provider authentication for
+the same service user that runs Push, and set `agent = "pi"`. `pi_bin` defaults
+to `pi`. Push stores Pi's reported session ID and resumes that exact session on
+later turns; `/clear` starts a new one. Pi has tool allowlists but no native
+sandbox or permission prompts, so read the documented permission limits before
+allowing writes or shell access.
 
 ## Documentation
 

@@ -1393,6 +1393,27 @@ mod tests {
     }
 
     #[test]
+    fn job_backend_override_accepts_pi() {
+        let jobs_dir = temp_dir("jobs-pi-backend");
+        let workdir = temp_dir("jobs-pi-work");
+        let database = temp_path("jobs-pi-db");
+        let run_dir = temp_dir("jobs-pi-run");
+        write_job(
+            &jobs_dir,
+            "pi-job",
+            &format!(
+                "+++\nversion = 1\nbackend = \"pi\"\ntimeout = \"5s\"\nworkdir = {:?}\n+++\nbody",
+                workdir.to_string_lossy()
+            ),
+        );
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+
+        let catalog = Catalog::load(&cfg).unwrap();
+
+        assert_eq!(catalog.jobs["pi-job"].backend, AgentBackend::Pi);
+    }
+
+    #[test]
     fn cron_validation_rejects_malformed_fields_and_ranges() {
         for schedule in [
             "nonsense * * * *",
@@ -2154,7 +2175,7 @@ printf '%s\n' '{{"type":"thread.started","thread_id":"fresh-thread"}}'
 
         assert_eq!(first.1, "manual result");
         assert_eq!(second.1, "manual result");
-        let args = std::fs::read_to_string(args_path).unwrap();
+        let args = std::fs::read_to_string(&args_path).unwrap();
         assert_eq!(args.lines().filter(|line| *line == "exec").count(), 2);
         assert!(!args.lines().any(|line| line == "resume"));
         let rows = Ledger::open(&cfg.database_path)
@@ -2247,5 +2268,38 @@ printf '%s\n' ok > {}
         assert!(args.lines().any(|line| line == "--session-id"));
         assert!(!args.lines().any(|line| line == "--resume"));
         assert!(args.lines().any(|line| line == "Inspect this directory."));
+    }
+
+    #[tokio::test]
+    async fn backend_override_runs_pi_with_a_fresh_session() {
+        let jobs_dir = temp_dir("jobs-pi");
+        let workdir = temp_dir("jobs-pi-work");
+        let database = temp_path("jobs-pi-db");
+        let run_dir = temp_dir("jobs-pi-run");
+        let args_path = temp_path("jobs-pi-args");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\ncat > {}.stdin\nprintf '%s\\n' '{{\"type\":\"session\",\"id\":\"pi-job-session\"}}'\nprintf '%s\\n' '{{\"type\":\"message_end\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"pi result\"}}],\"stopReason\":\"stop\"}}}}'\n",
+            sh_arg(&args_path),
+            sh_arg(&args_path)
+        );
+        let cli = FakeCli::new("pi", &script);
+        let runbook = valid_job(&workdir).replace("backend = \"codex\"", "backend = \"pi\"");
+        write_job(&jobs_dir, "pi-job", &runbook);
+        let mut cfg = cfg(&jobs_dir, &database, &run_dir);
+        cfg.pi_bin = cli.bin();
+
+        let output = run_manual(&cfg, Catalog::load_named(&cfg, "pi-job").unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(output.1, "pi result");
+        let args = std::fs::read_to_string(&args_path).unwrap();
+        assert!(args.lines().any(|line| line == "--mode"));
+        assert!(args.lines().any(|line| line == "json"));
+        assert!(!args.lines().any(|line| line == "--session"));
+        assert_eq!(
+            std::fs::read_to_string(format!("{}.stdin", args_path.to_string_lossy())).unwrap(),
+            "\nInspect this directory.\n"
+        );
     }
 }

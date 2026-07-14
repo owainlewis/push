@@ -106,12 +106,14 @@ output:
   backend session id if created by the runtime
 ```
 
-Claude Code and Codex already fit this shape:
+Claude Code, Codex, and Pi fit this shape:
 
 - Claude Code accepts a gateway-generated session id with `--session-id` and
   resumes with `--resume`.
 - Codex creates its own thread id through `codex exec`; Push stores it and later
   resumes with `codex exec resume`.
+- Pi reports a session id in JSON mode; Push stores it and resumes with
+  `--session`.
 
 The state store must therefore track backend-owned session ids, not just
 gateway-owned UUIDs.
@@ -131,6 +133,7 @@ This means Push can be smaller and more durable:
 
 - When Claude Code improves, the Claude backend improves.
 - When Codex improves, the Codex backend improves.
+- When Pi improves, the Pi backend improves.
 - When another agent becomes better, Push can add an adapter instead of
   rewriting the product.
 
