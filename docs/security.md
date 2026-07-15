@@ -60,8 +60,13 @@ Keep them on local durable storage with permissions restricted to the service
 user. Keep the assistant directory in its own private Git repository. Never
 put real config secrets, state, audit logs, or databases in
 that repository. An explicit `assistant_root` config stored inside it cannot
-contain an inline Telegram token; use `telegram.bot_token_env` or move the
-config outside.
+contain an inline Telegram token or OpenAI API key; use the matching environment
+variable or move the config outside. When `voice.openai_api_key` is configured,
+`push doctor` requires the config file to be private on Unix:
+
+```sh
+chmod 600 ~/.push/config.toml
+```
 
 ## Network exposure
 
@@ -95,7 +100,8 @@ IDs, file paths, and backend errors. Protect and rotate it like a service log.
 - allow only identities you control
 - configure the selected agent for unattended use
 - run `push doctor` as the service user
-- keep backend credentials out of TOML and logs
+- keep agent credentials out of TOML and all credentials out of logs
+- protect config credentials with mode `0600` on Unix
 - use absolute config paths in service files
 - keep Push state and job work directories separate
 - inspect agent-authored jobs before approving them

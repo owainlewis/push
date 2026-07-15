@@ -49,6 +49,7 @@ pub fn doctor(config_path: &str) -> Result<()> {
 fn run_checks(cfg: &config::Config) -> CheckReport {
     let mut checks = Vec::new();
     check_config(cfg, &mut checks);
+    check_voice_config_permissions(cfg, &mut checks);
     check_parent_dir(
         "state directory",
         "state_path",
@@ -75,22 +76,63 @@ fn run_checks(cfg: &config::Config) -> CheckReport {
         Err(e) => checks.push(Check::fail("channels", e.to_string())),
     }
     check_bins(cfg, &mut checks);
-    check_voice(&mut checks);
+    check_voice(cfg, &mut checks);
     CheckReport { checks }
 }
 
-fn check_voice(checks: &mut Vec<Check>) {
-    if std::env::var(crate::voice::OPENAI_API_KEY_ENV).is_ok_and(|value| !value.trim().is_empty()) {
-        checks.push(Check::pass(
-            "voice messages",
-            "OPENAI_API_KEY is set; transcription and speech replies are enabled",
-        ));
-    } else {
-        checks.push(Check::pass(
-            "voice messages",
-            "OPENAI_API_KEY is not set; text messaging works and voice requests get a helpful fallback",
-        ));
+fn check_voice(cfg: &config::Config, checks: &mut Vec<Check>) {
+    let message = voice_check_message(crate::voice::Voice::credential_source(cfg));
+    checks.push(Check::pass("voice messages", message));
+}
+
+fn voice_check_message(source: Option<crate::voice::VoiceCredentialSource>) -> &'static str {
+    match source {
+        Some(crate::voice::VoiceCredentialSource::Environment) => {
+            "OPENAI_API_KEY is set; transcription and speech replies are enabled"
+        }
+        Some(crate::voice::VoiceCredentialSource::Config) => {
+            "voice.openai_api_key is set; transcription and speech replies are enabled"
+        }
+        None => {
+            "no OpenAI API key is configured; text messaging works and voice requests get a helpful fallback"
+        }
     }
+}
+
+fn check_voice_config_permissions(cfg: &config::Config, checks: &mut Vec<Check>) {
+    if cfg
+        .voice_openai_api_key
+        .as_deref()
+        .is_none_or(|key| key.trim().is_empty())
+    {
+        return;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        match std::fs::metadata(&cfg.config_path) {
+            Ok(metadata) if metadata.permissions().mode() & 0o077 == 0 => checks.push(Check::pass(
+                "config permissions",
+                format!("{} is private", cfg.config_path),
+            )),
+            Ok(_) => checks.push(Check::fail(
+                "config permissions",
+                format!(
+                    "{} contains voice.openai_api_key and is accessible by group or others. Run chmod 600 {}.",
+                    cfg.config_path, cfg.config_path
+                ),
+            )),
+            Err(error) => checks.push(Check::fail(
+                "config permissions",
+                format!("cannot inspect {}: {error}", cfg.config_path),
+            )),
+        }
+    }
+
+    #[cfg(not(unix))]
+    let _ = checks;
 }
 
 fn check_config(cfg: &config::Config, checks: &mut Vec<Check>) {
@@ -353,6 +395,40 @@ fn which(bin: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::test_support::{temp_dir, temp_path, test_config};
+
+    #[test]
+    fn voice_check_reports_config_source_without_a_secret() {
+        let message = voice_check_message(Some(crate::voice::VoiceCredentialSource::Config));
+
+        assert!(message.contains("voice.openai_api_key is set"));
+        assert!(!message.contains("secret"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inline_voice_key_requires_a_private_config_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = temp_path("voice-config-permissions");
+        std::fs::write(&path, "[voice]\nopenai_api_key = 'secret'\n").unwrap();
+        let mut cfg = test_config();
+        cfg.config_path = path.to_string_lossy().to_string();
+        cfg.voice_openai_api_key = Some("secret".to_string());
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut checks = Vec::new();
+        check_voice_config_permissions(&cfg, &mut checks);
+        assert!(matches!(checks[0].status, CheckStatus::Fail));
+        assert!(checks[0].message.contains("chmod 600"));
+        assert!(!checks[0].message.contains("'secret'"));
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        checks.clear();
+        check_voice_config_permissions(&cfg, &mut checks);
+        assert!(matches!(checks[0].status, CheckStatus::Pass));
+
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn doctor_reports_config_load_failure() {

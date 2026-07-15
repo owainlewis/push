@@ -11,6 +11,8 @@ use reqwest::multipart::{Form, Part};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::config::Config;
+
 pub const OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
 pub const TRANSCRIPTION_MODEL: &str = "gpt-4o-transcribe";
 pub const SPEECH_MODEL: &str = "gpt-4o-mini-tts";
@@ -18,6 +20,12 @@ pub const SPEECH_VOICE: &str = "marin";
 pub const MAX_AUDIO_BYTES: usize = 20 * 1024 * 1024;
 const MAX_SPEECH_CHARS: usize = 4096;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VoiceCredentialSource {
+    Environment,
+    Config,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioClip {
@@ -39,15 +47,28 @@ pub struct Voice {
 }
 
 impl Voice {
-    pub fn from_env() -> Option<Self> {
-        let key = std::env::var(OPENAI_API_KEY_ENV).ok()?;
-        let key = key.trim();
-        if key.is_empty() {
-            return None;
-        }
+    pub fn from_config(config: &Config) -> Option<Self> {
+        let environment = std::env::var(OPENAI_API_KEY_ENV).ok();
+        Self::from_sources(
+            environment.as_deref(),
+            config.voice_openai_api_key.as_deref(),
+        )
+    }
+
+    fn from_sources(environment: Option<&str>, configured: Option<&str>) -> Option<Self> {
+        let (key, _) = resolve_openai_api_key(environment, configured)?;
         Some(Self {
             provider: Arc::new(OpenAiVoice::new(key.to_string())),
         })
+    }
+
+    pub(crate) fn credential_source(config: &Config) -> Option<VoiceCredentialSource> {
+        let environment = std::env::var(OPENAI_API_KEY_ENV).ok();
+        resolve_openai_api_key(
+            environment.as_deref(),
+            config.voice_openai_api_key.as_deref(),
+        )
+        .map(|(_, source)| source)
     }
 
     #[cfg(test)]
@@ -86,6 +107,22 @@ impl Voice {
         }
         Ok(clip)
     }
+}
+
+fn resolve_openai_api_key<'a>(
+    environment: Option<&'a str>,
+    configured: Option<&'a str>,
+) -> Option<(&'a str, VoiceCredentialSource)> {
+    environment
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(|key| (key, VoiceCredentialSource::Environment))
+        .or_else(|| {
+            configured
+                .map(str::trim)
+                .filter(|key| !key.is_empty())
+                .map(|key| (key, VoiceCredentialSource::Config))
+        })
 }
 
 struct OpenAiVoice {
@@ -211,6 +248,21 @@ mod tests {
     use std::thread::JoinHandle;
 
     struct FakeProvider;
+
+    #[test]
+    fn environment_key_overrides_config_and_empty_values_are_ignored() {
+        assert_eq!(
+            resolve_openai_api_key(Some(" env-key "), Some("config-key")),
+            Some(("env-key", VoiceCredentialSource::Environment))
+        );
+        assert_eq!(
+            resolve_openai_api_key(Some("  "), Some(" config-key ")),
+            Some(("config-key", VoiceCredentialSource::Config))
+        );
+        assert_eq!(resolve_openai_api_key(Some(""), Some(" ")), None);
+        assert!(Voice::from_sources(None, Some("config-key")).is_some());
+        assert!(Voice::from_sources(None, None).is_none());
+    }
 
     impl VoiceProvider for FakeProvider {
         fn transcribe<'a>(&'a self, _clip: AudioClip) -> VoiceFuture<'a, String> {

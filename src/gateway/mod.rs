@@ -351,7 +351,7 @@ impl Gateway {
             assistant_dir: cfg.assistant_dir.clone(),
             audit,
             #[cfg(not(test))]
-            voice: Voice::from_env(),
+            voice: Voice::from_config(&cfg),
             #[cfg(test)]
             voice: None,
             #[cfg(test)]
