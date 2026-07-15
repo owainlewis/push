@@ -540,8 +540,8 @@ async fn prepare_voice(ctx: &Ctx, job: &Job) -> std::result::Result<String, Voic
     let Some(voice) = &ctx.voice else {
         return Err(VoicePreparationError::User {
             event: "voice_not_configured",
-            reply: "Voice messages are unavailable. Set OPENAI_API_KEY and restart Push, or send text instead.",
-            detail: "OPENAI_API_KEY is not configured".to_string(),
+            reply: "Voice messages are unavailable. Set voice.openai_api_key in config or OPENAI_API_KEY, restart Push, or send text instead.",
+            detail: "OpenAI API key is not configured".to_string(),
         });
     };
     let clip = ctx

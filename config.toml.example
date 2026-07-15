@@ -12,3 +12,7 @@ assistant_root = "~/Code/assistant"
 bot_token = "replace-with-the-token-from-BotFather"
 # Replace this once with your numeric Telegram user ID.
 allow_user_ids = [123456789]
+
+[voice]
+# Optional. Uncomment to enable voice transcription and spoken replies.
+# openai_api_key = "replace-with-your-openai-api-key"
