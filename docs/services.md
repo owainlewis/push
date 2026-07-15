@@ -31,8 +31,9 @@ Use absolute paths in service files. The service user needs:
 - for iMessage on macOS, Full Disk Access and `osascript`
 - for Telegram, a token in the private config and network access to
   `api.telegram.org`
-- for optional voice messages, `OPENAI_API_KEY` in the service environment and
-  network access to `api.openai.com`
+- for optional voice messages, `voice.openai_api_key` in the private config or
+  `OPENAI_API_KEY` in the service environment, plus network access to
+  `api.openai.com`
 
 `state_path` stores independent cursors for each channel and backend session
 ids. `database_path` stores the canonical conversation journal. Chat agents run
@@ -78,8 +79,6 @@ and replace `YOU` with your macOS user name:
   <dict>
     <key>PATH</key>
     <string>/Users/YOU/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-    <key>OPENAI_API_KEY</key>
-    <string>replace-with-your-openai-api-key</string>
   </dict>
 
   <key>RunAtLoad</key>
@@ -113,9 +112,9 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.owainlewis.push.plis
 launchctl kickstart -k gui/$(id -u)/com.owainlewis.push
 ```
 
-The plist contains the optional OpenAI key, so protect it with
-`chmod 600 ~/Library/LaunchAgents/com.owainlewis.push.plist`. Omit the key when
-you do not want voice support.
+For voice support, prefer `voice.openai_api_key` in the private Push config. An
+`OPENAI_API_KEY` entry in `EnvironmentVariables` remains available as an
+override when service-level secret injection is preferred.
 
 ## Linux systemd
 
@@ -159,7 +158,8 @@ systemctl --user status push.service
 journalctl --user -u push.service -f
 ```
 
-For voice support, create the optional private environment file:
+For voice support, prefer `voice.openai_api_key` in `~/.push/config.toml`. As an
+alternative, create the optional private environment file:
 
 ```sh
 printf 'OPENAI_API_KEY=replace-with-your-openai-api-key\n' > ~/.config/push/env
@@ -168,7 +168,8 @@ systemctl --user restart push.service
 ```
 
 Keep `~/.push/config.toml` at mode `0600` because it contains the Telegram bot
-token. Do not commit this file or print it in service logs.
+token and may contain the OpenAI API key. Do not commit this file or print it in
+service logs.
 
 For a user service that survives logout, enable lingering:
 

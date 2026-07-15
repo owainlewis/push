@@ -664,6 +664,9 @@ self_handles = ["me@example.com"]
 bot_token_env = "PUSH_TEST_TOKEN"
 allow_user_ids = [7]
 allow_chat_ids = [9]
+
+[voice]
+openai_api_key = "config-openai-key"
 "#,
         )
         .unwrap();
@@ -675,7 +678,49 @@ allow_chat_ids = [9]
         assert_eq!(cfg.telegram_bot_token_env, "PUSH_TEST_TOKEN");
         assert_eq!(cfg.telegram_allow_user_ids, [7]);
         assert_eq!(cfg.telegram_allow_chat_ids, [9]);
+        assert_eq!(
+            cfg.voice_openai_api_key.as_deref(),
+            Some("config-openai-key")
+        );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn voice_config_rejects_an_empty_openai_key() {
+        let path = temp_path("empty-voice-key-config");
+        std::fs::write(
+            &path,
+            r#"self_handles = ["me@icloud.com"]
+
+[voice]
+openai_api_key = " "
+"#,
+        )
+        .unwrap();
+
+        let error = Config::load(path.to_str().unwrap()).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("voice.openai_api_key cannot be empty"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn config_load_rejects_an_inline_voice_key_inside_the_assistant() {
+        let root = temp_dir("assistant-inline-voice-key");
+        let path = root.join("config.toml");
+        std::fs::write(
+            &path,
+            "self_handles = ['me@icloud.com']\nassistant_root = '.'\n[voice]\nopenai_api_key = 'committed-secret'\n",
+        )
+        .unwrap();
+
+        let error = Config::load(path.to_str().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("inline OpenAI API key"));
+        assert!(error.to_string().contains("OPENAI_API_KEY"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

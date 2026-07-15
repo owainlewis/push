@@ -1617,9 +1617,10 @@ async fn telegram_voice_without_openai_key_falls_back_without_running_agent() {
     run_messages(&mut gateway, vec![telegram_voice_message(1, 7, 7)]).await;
 
     assert!(calls.lock().unwrap().is_empty());
-    assert!(gateway.ctx.sent_replies.lock().unwrap()[0]
-        .1
-        .contains("OPENAI_API_KEY"));
+    let replies = gateway.ctx.sent_replies.lock().unwrap();
+    let reply = &replies[0].1;
+    assert!(reply.contains("voice.openai_api_key"));
+    assert!(reply.contains("OPENAI_API_KEY"));
     assert_eq!(gateway.store.lock().unwrap().cursor("telegram"), 1);
 
     let _ = std::fs::remove_file(&state_path);
@@ -2220,6 +2221,7 @@ fn test_config(state_path: &str, sessions_dir: &str, assistant_dir: &str) -> Con
         telegram_bot_token_env: "TELEGRAM_BOT_TOKEN".to_string(),
         telegram_allow_user_ids: Vec::new(),
         telegram_allow_chat_ids: Vec::new(),
+        voice_openai_api_key: None,
         agent: "codex".to_string(),
         routes: Vec::new(),
         assistant_root: assistant_dir.to_string(),
