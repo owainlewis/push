@@ -76,7 +76,7 @@ and the rest of your day.
 
 - iMessage on macOS and Telegram private chats on macOS or Linux
 - Telegram voice notes with OpenAI transcription and spoken replies
-- Claude Code, Codex, and Pi backends, selectable by channel or conversation
+- Claude Code, Codex, Pi, and aider backends, selectable by channel or conversation
 - One Git-versioned assistant repository containing `SOUL.md`, `context/`, and
   approved `jobs/`
 - Durable conversation history and backend session recovery

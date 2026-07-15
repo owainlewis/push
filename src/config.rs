@@ -65,6 +65,8 @@ pub struct Config {
     pub codex_model: Option<String>,
     #[serde(default = "default_pi_bin")]
     pub pi_bin: String,
+    #[serde(default = "default_aider_bin")]
+    pub aider_bin: String,
     #[serde(default = "default_sessions_dir")]
     pub sessions_dir: String,
     #[serde(default = "default_state_path")]
@@ -400,6 +402,7 @@ impl Config {
             AgentBackend::Claude => self.claude_bin.as_str(),
             AgentBackend::Codex => self.codex_bin.as_str(),
             AgentBackend::Pi => self.pi_bin.as_str(),
+            AgentBackend::Aider => self.aider_bin.as_str(),
         }
     }
 
@@ -754,6 +757,7 @@ pub enum AgentBackend {
     Claude,
     Codex,
     Pi,
+    Aider,
 }
 
 impl AgentBackend {
@@ -762,7 +766,10 @@ impl AgentBackend {
             "claude" => Ok(AgentBackend::Claude),
             "codex" => Ok(AgentBackend::Codex),
             "pi" => Ok(AgentBackend::Pi),
-            other => bail!("invalid agent {other:?}; expected \"claude\", \"codex\", or \"pi\""),
+            "aider" => Ok(AgentBackend::Aider),
+            other => bail!(
+                "invalid agent {other:?}; expected \"claude\", \"codex\", \"pi\", or \"aider\""
+            ),
         }
     }
 
@@ -771,6 +778,7 @@ impl AgentBackend {
             AgentBackend::Claude => "claude",
             AgentBackend::Codex => "codex",
             AgentBackend::Pi => "pi",
+            AgentBackend::Aider => "aider",
         }
     }
 }
@@ -801,6 +809,9 @@ fn default_codex_bin() -> String {
 }
 fn default_pi_bin() -> String {
     "pi".to_string()
+}
+fn default_aider_bin() -> String {
+    "aider".to_string()
 }
 fn default_jobs_dir() -> String {
     "~/.push/jobs".to_string()
@@ -871,6 +882,7 @@ mod tests {
             codex_bin: "codex".to_string(),
             codex_model: None,
             pi_bin: "pi".to_string(),
+            aider_bin: "aider".to_string(),
             sessions_dir: root.join("sessions").to_string_lossy().to_string(),
             state_path: root.join("state.json").to_string_lossy().to_string(),
             audit_log_path: root.join("audit.jsonl").to_string_lossy().to_string(),
@@ -904,6 +916,38 @@ mod tests {
             AgentBackend::Pi
         );
         assert_eq!(cfg.required_agent_bins().unwrap(), vec!["pi"]);
+    }
+
+    #[test]
+    fn aider_parses_and_is_selectable_for_default_routes_and_jobs() {
+        let mut cfg = config();
+        cfg.agent = "aider".to_string();
+        cfg.jobs_agent = Some("aider".to_string());
+        cfg.routes = vec![RouteRule {
+            thread: Some("imessage:chat:aider".to_string()),
+            channel: Some("imessage".to_string()),
+            agent: "aider".to_string(),
+        }];
+
+        assert_eq!(AgentBackend::parse("aider").unwrap(), AgentBackend::Aider);
+        assert_eq!(AgentBackend::Aider.as_str(), "aider");
+        assert_eq!(cfg.agent_backend().unwrap(), AgentBackend::Aider);
+        assert_eq!(cfg.jobs_backend().unwrap(), AgentBackend::Aider);
+        assert_eq!(
+            cfg.route_for_message("imessage", "imessage:chat:aider")
+                .unwrap()
+                .backend,
+            AgentBackend::Aider
+        );
+        assert_eq!(cfg.required_agent_bins().unwrap(), vec!["aider"]);
+    }
+
+    #[test]
+    fn aider_binary_defaults_to_aider_when_loading_toml() {
+        let cfg: Config = toml::from_str("agent = 'aider'").unwrap();
+
+        assert_eq!(cfg.agent_backend().unwrap(), AgentBackend::Aider);
+        assert_eq!(cfg.aider_bin, "aider");
     }
 
     #[test]

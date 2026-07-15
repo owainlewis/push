@@ -3,6 +3,7 @@
 //! coding-agent backend, and texts the reply back.
 
 mod agent;
+mod aider;
 mod approval;
 mod assistant;
 mod audit;

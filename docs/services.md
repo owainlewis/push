@@ -26,7 +26,7 @@ Use absolute paths in service files. The service user needs:
 - filesystem access to `assistant_root` as allowed by the selected agent
 - write access to `assistant_root/jobs/` for Push to install approved drafts;
   agent write access can also change installed jobs outside that workflow
-- access to the selected `claude`, `codex`, or `pi` executable on `PATH`
+- access to the selected `claude`, `codex`, `pi`, or `aider` executable on `PATH`
 - backend login, tokens, settings, MCP config, and project credentials
 - for iMessage on macOS, Full Disk Access and `osascript`
 - for Telegram, a token in the private config and network access to

@@ -66,7 +66,7 @@ Markdown instruction body. Version 1 supports these fields:
 - `version`: required and equal to `1`.
 - `timeout`: required positive duration, capped by the configured job maximum.
 - `workdir`: required fixed directory, expanded and canonicalised at validation.
-- `backend`: optional `claude`, `codex`, or `pi` override; otherwise use the configured
+- `backend`: optional `claude`, `codex`, `pi`, or `aider` override; otherwise use the configured
   jobs default.
 - `triggers`: optional list of separately identified trigger definitions.
 

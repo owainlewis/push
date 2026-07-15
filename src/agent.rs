@@ -6,7 +6,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::config::{AgentBackend, Config};
-use crate::{claude, codex, pi};
+use crate::{aider, claude, codex, pi};
 
 /// One headless agent turn.
 pub struct Request<'a> {
@@ -36,6 +36,7 @@ pub enum Runner {
     Claude(claude::Runner),
     Codex(codex::Runner),
     Pi(pi::Runner),
+    Aider(aider::Runner),
     #[cfg(test)]
     Fake(FakeRunner),
 }
@@ -74,6 +75,10 @@ impl Runner {
             AgentBackend::Pi => Runner::Pi(pi::Runner {
                 bin: cfg.pi_bin.clone(),
             }),
+            AgentBackend::Aider => Runner::Aider(aider::Runner {
+                bin: cfg.aider_bin.clone(),
+                sessions_dir: cfg.sessions_dir.clone(),
+            }),
         }
     }
 
@@ -82,6 +87,7 @@ impl Runner {
             Runner::Claude(_) => AgentBackend::Claude,
             Runner::Codex(_) => AgentBackend::Codex,
             Runner::Pi(_) => AgentBackend::Pi,
+            Runner::Aider(_) => AgentBackend::Aider,
             #[cfg(test)]
             Runner::Fake(r) => r.backend,
         }
@@ -92,6 +98,7 @@ impl Runner {
             Runner::Claude(_) => "Claude",
             Runner::Codex(_) => "Codex",
             Runner::Pi(_) => "Pi",
+            Runner::Aider(_) => "Aider",
             #[cfg(test)]
             Runner::Fake(_) => "Fake",
         }
@@ -102,13 +109,14 @@ impl Runner {
             Runner::Claude(_) => Uuid::new_v4().to_string(),
             Runner::Codex(_) => String::new(),
             Runner::Pi(_) => String::new(),
+            Runner::Aider(_) => Uuid::new_v4().to_string(),
             #[cfg(test)]
             Runner::Fake(_) => String::new(),
         }
     }
 
     pub fn mark_started_before_run(&self) -> bool {
-        matches!(self, Runner::Claude(_))
+        matches!(self, Runner::Claude(_) | Runner::Aider(_))
     }
 
     pub async fn run(&self, req: Request<'_>, timeout: Duration) -> Result<RunOutput, RunError> {
@@ -116,6 +124,7 @@ impl Runner {
             Runner::Claude(r) => r.run(req, timeout).await,
             Runner::Codex(r) => r.run(req, timeout).await,
             Runner::Pi(r) => r.run(req, timeout).await,
+            Runner::Aider(r) => r.run(req, timeout).await,
             #[cfg(test)]
             Runner::Fake(r) => r.run(req, timeout).await,
         }

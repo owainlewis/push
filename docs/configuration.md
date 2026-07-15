@@ -43,8 +43,8 @@ allow_user_ids = [123456789]
 ```
 
 `channel` is the easiest single-provider setup. `agent` is `claude`, `codex`,
-or `pi`. Push does not set sandbox, approval, permission-mode, or tool flags.
-Configure those in the selected agent.
+`pi`, or `aider`. Push does not set sandbox, approval, permission-mode, or tool
+flags. Configure those in the selected agent.
 
 ### Pi setup
 
@@ -62,6 +62,28 @@ stream, and resumes it with `--session`. Clearing a conversation discards that
 mapping, so the next turn creates a fresh Pi session. Push appends `SOUL.md` as
 system instructions, separate from the user message. Pi is not required unless
 the default backend, an enabled route, or `jobs_agent` selects it.
+
+### Aider setup
+
+Install [aider](https://aider.chat/) and configure a model provider (for
+example `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`) for the same user that runs
+Push. Confirm `aider --version` works in the service environment, then select
+it:
+
+```toml
+agent = "aider"
+aider_bin = "aider"
+```
+
+Aider has no server-side session identifier, so Push owns the session id and
+maps it to a per-session chat history file under `sessions_dir`. Each turn runs
+`aider --message <text> --yes-always --no-pretty --no-stream --chat-history-file
+<file>`, adding `--restore-chat-history` to resume an existing conversation.
+Clearing a conversation starts a fresh session; a missing history file on
+resume makes Push rebuild context from its own conversation history. `SOUL.md`
+is attached as a read-only conventions file rather than a system prompt, since
+aider exposes no system-prompt flag. Aider is not required unless the default
+backend, an enabled route, or `jobs_agent` selects it.
 
 ## Channels
 
@@ -162,7 +184,8 @@ Thread keys are:
 ## Agent permissions
 
 Permissions belong to the agent, not the gateway. Push invokes Claude Code,
-Codex, and Pi without overriding their sandbox, approval mode, or tool lists.
+Codex, Pi, and aider without overriding their sandbox, approval mode, or tool
+lists.
 This keeps interactive and gateway behavior aligned. Configure permissions in
 the selected agent and review [permissions and security](security.md).
 
@@ -181,6 +204,7 @@ the selected agent and review [permissions and security](security.md).
 | `codex_bin` | `"codex"` | Codex executable |
 | `codex_model` | unset | Optional Codex model override |
 | `pi_bin` | `"pi"` | Pi coding agent executable |
+| `aider_bin` | `"aider"` | aider.chat executable |
 | `reply_marker` | `"\n\n-- sent by push"` | iMessage loop-prevention marker |
 
 ### Local state

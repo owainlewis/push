@@ -134,7 +134,7 @@ user prompt.
 
 | Field | Meaning |
 |---|---|
-| `agent` | `claude`, `codex`, or `pi`. |
+| `agent` | `claude`, `codex`, `pi`, or `aider`. |
 | `routes` | Exact thread to backend overrides. |
 | `channels` | Optional advanced list of reply channels to poll concurrently; otherwise `channel` is used unchanged. |
 | `primary_delivery` | Optional enabled channel and allowlisted target for proactive output. |

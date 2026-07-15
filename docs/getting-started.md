@@ -119,8 +119,9 @@ the repository.
     Read the [iMessage guide](channels/imessage.md) for database permissions
     and filtering behavior.
 
-Replace `codex` with `claude` for Claude Code or `pi` for Pi. Pi must already
-have a configured model provider or authenticated account for the service user.
+Replace `codex` with `claude` for Claude Code, `pi` for Pi, or `aider` for
+aider. Pi and aider must already have a configured model provider or
+authenticated account for the service user.
 
 If you replace the config file created by `push init`, keep its
 `assistant_root` setting. Running the same init command again is safe for a
