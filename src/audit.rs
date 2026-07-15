@@ -296,6 +296,7 @@ mod tests {
             chat_identifier: "+15551234567".to_string(),
             is_group: false,
             text: "secret request".to_string(),
+            voice: None,
             is_from_me: false,
             is_supported: true,
             thread_id: None,

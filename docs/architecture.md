@@ -223,6 +223,26 @@ One provider can fail or rate-limit without cancelling the other. A shared
 shutdown signal cancels pending polls and lets every channel drain its workers.
 Replies remain bound to the originating loop and exact target.
 
+## Voice Boundary
+
+Voice has two independent adapters. A channel adapter exposes opaque inbound
+voice metadata, downloads bytes only after the normal allowlist accepts the
+message, and uploads a generated audio clip. The provider-neutral voice layer
+transcribes and synthesizes in-memory audio. Its output is plain text or a
+generic audio clip, so it has no Telegram identifiers or Bot API behavior.
+Download and transcription run in the accepted message's per-thread worker,
+so slow audio cannot pause polling or work in another conversation.
+
+The first provider uses `OPENAI_API_KEY` for both `gpt-4o-transcribe` and
+`gpt-4o-mini-tts`. The first channel implementation is Telegram. A future
+channel needs only voice download and upload support. It does not need to
+change gateway routing, agent requests, or the OpenAI client.
+
+Voice is an optional enhancement. Missing credentials stop voice processing
+for that message with a text explanation, while ordinary text traffic remains
+available. Speech synthesis and voice delivery happen after durable text
+delivery, so a voice-side failure cannot discard an agent answer.
+
 Optional `primary_delivery` selects one enabled, allowlisted channel target for
 proactive output. Resolution is lazy: an absent or invalid primary returns a
 scoped error to the proactive caller without affecting reply polling.

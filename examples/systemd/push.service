@@ -10,6 +10,7 @@ WorkingDirectory=%h/.push
 Restart=on-failure
 RestartSec=10
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.config/push/env
 
 [Install]
 WantedBy=default.target

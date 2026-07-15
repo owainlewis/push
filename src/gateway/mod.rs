@@ -19,17 +19,21 @@ use tracing::{error, info, warn};
 use crate::agent::Runner;
 use crate::approval::{AnswerOrigin, AnswerOutcome};
 use crate::audit::{AuditEvent, AuditLog};
-use crate::channel::{Channel, RawMessage};
+use crate::channel::{Channel, InboundVoice, RawMessage};
 use crate::config::{AgentBackend, ChannelKind, Config, PrimaryDeliveryConfig};
 use crate::history::{History, OutboundOrigin};
 use crate::jobs;
 use crate::store::Store;
 use crate::util::now_ms;
+use crate::voice::Voice;
 
 const QUEUE_DEPTH: usize = 32;
 #[cfg(not(test))]
 const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+
+#[cfg(test)]
+type SentVoiceReplies = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 
 #[derive(Clone)]
 struct Job {
@@ -40,6 +44,8 @@ struct Job {
     backend: AgentBackend,
     approval_origin: AnswerOrigin,
     text: String,
+    reply_with_voice: bool,
+    voice_attachment: Option<InboundVoice>,
 }
 
 /// Shared, cheaply cloneable context handed to each worker task.
@@ -55,10 +61,13 @@ struct Ctx {
     reply_marker: String,
     assistant_dir: String,
     audit: Arc<AuditLog>,
+    voice: Option<Voice>,
     #[cfg(test)]
     setup_failure_replies: Arc<Mutex<Vec<String>>>,
     #[cfg(test)]
     sent_replies: Arc<Mutex<Vec<(String, String)>>>,
+    #[cfg(test)]
+    sent_voice_replies: SentVoiceReplies,
     #[cfg(test)]
     send_failures_remaining: Arc<Mutex<usize>>,
 }
@@ -341,10 +350,16 @@ impl Gateway {
             reply_marker: cfg.reply_marker.clone(),
             assistant_dir: cfg.assistant_dir.clone(),
             audit,
+            #[cfg(not(test))]
+            voice: Voice::from_env(),
+            #[cfg(test)]
+            voice: None,
             #[cfg(test)]
             setup_failure_replies: Arc::new(Mutex::new(Vec::new())),
             #[cfg(test)]
             sent_replies: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(test)]
+            sent_voice_replies: Arc::new(Mutex::new(Vec::new())),
             #[cfg(test)]
             send_failures_remaining: Arc::new(Mutex::new(0)),
         };
@@ -493,12 +508,22 @@ impl Gateway {
                 continue;
             }
             if let Some((thread, target)) = self.channel.accept(m) {
+                let reply_with_voice = m.voice.is_some();
+                let message_text = if reply_with_voice {
+                    "[Voice message]".to_string()
+                } else {
+                    m.text.trim().to_string()
+                };
                 let approval_origin = approval_origin(m, &thread);
-                let approval = self.ctx.history.lock().unwrap().answer_question(
-                    &approval_origin,
-                    m.text.trim(),
-                    now_ms(),
-                );
+                let approval = if reply_with_voice {
+                    Ok(AnswerOutcome::NotAnAnswer)
+                } else {
+                    self.ctx.history.lock().unwrap().answer_question(
+                        &approval_origin,
+                        message_text.trim(),
+                        now_ms(),
+                    )
+                };
                 match approval {
                     Ok(AnswerOutcome::NotAnAnswer) => {}
                     Ok(outcome @ (AnswerOutcome::Selected(_) | AnswerOutcome::Duplicate(_))) => {
@@ -546,7 +571,7 @@ impl Gateway {
                     m.channel,
                     &thread,
                     &m.event_id(),
-                    m.text.trim(),
+                    message_text.trim(),
                 ) {
                     Ok(id) => id,
                     Err(error) => {
@@ -593,7 +618,9 @@ impl Gateway {
                     target,
                     backend,
                     approval_origin,
-                    text: m.text.trim().to_string(),
+                    text: message_text,
+                    reply_with_voice,
+                    voice_attachment: m.voice.clone(),
                 };
                 if !self.route(job).await {
                     return;

@@ -91,6 +91,11 @@ private. `push init` creates new config files with mode `0600` on Unix. The
 `bot_token_env` setting remains available when an environment variable is a
 better fit. See the [Telegram guide](telegram.md).
 
+Telegram voice notes are optional and need no TOML settings. Set
+`OPENAI_API_KEY` in the gateway process environment to enable both
+transcription and speech replies. Without it, text remains fully available and
+voice notes get a helpful fallback. See [Voice Messages](telegram.md#voice-messages).
+
 ### Run both providers
 
 Use `channels` instead of `channel`:

@@ -6,11 +6,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::channel::RawMessage;
+use crate::channel::{InboundVoice, RawMessage};
+use crate::voice::{AudioClip, MAX_AUDIO_BYTES};
 
 pub const TEXT_LIMIT: usize = 4096;
 pub const RICH_TEXT_LIMIT: usize = 32768;
@@ -23,10 +24,25 @@ struct TransportResponse {
 }
 
 type TransportFuture<'a> = Pin<Box<dyn Future<Output = Result<TransportResponse>> + Send + 'a>>;
+type BytesFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>>;
 
 trait Transport: Send + Sync {
     fn post<'a>(&'a self, token: &'a str, method: &'static str, body: Value)
         -> TransportFuture<'a>;
+
+    fn download<'a>(&'a self, _token: &'a str, _file_path: &'a str) -> BytesFuture<'a> {
+        Box::pin(async { bail!("Telegram file download is not available") })
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    fn post_voice<'a>(
+        &'a self,
+        _token: &'a str,
+        _payload: Value,
+        _clip: &'a AudioClip,
+    ) -> TransportFuture<'a> {
+        Box::pin(async { bail!("Telegram voice upload is not available") })
+    }
 }
 
 struct ReqwestTransport {
@@ -53,6 +69,85 @@ impl Transport for ReqwestTransport {
             let status = response.status().as_u16();
             let body = response.json().await.map_err(|_| {
                 anyhow::anyhow!("Telegram {method} returned HTTP {status} with invalid JSON")
+            })?;
+            Ok(TransportResponse { status, body })
+        })
+    }
+
+    fn download<'a>(&'a self, token: &'a str, file_path: &'a str) -> BytesFuture<'a> {
+        Box::pin(async move {
+            let url = format!("https://api.telegram.org/file/bot{token}/{file_path}");
+            let mut response = self
+                .client
+                .get(url)
+                .timeout(Duration::from_secs(HTTP_TIMEOUT_SECONDS))
+                .send()
+                .await
+                .map_err(|_| anyhow::anyhow!("Telegram voice download failed"))?;
+            let status = response.status();
+            if !status.is_success() {
+                bail!("Telegram voice download returned HTTP {}", status.as_u16());
+            }
+            if response
+                .content_length()
+                .is_some_and(|size| size > MAX_AUDIO_BYTES as u64)
+            {
+                bail!("Telegram voice message exceeds the 20 MB limit");
+            }
+            let mut bytes = Vec::with_capacity(
+                response
+                    .content_length()
+                    .unwrap_or_default()
+                    .min(MAX_AUDIO_BYTES as u64) as usize,
+            );
+            while let Some(chunk) = response
+                .chunk()
+                .await
+                .context("read Telegram voice message")?
+            {
+                if bytes.len().saturating_add(chunk.len()) > MAX_AUDIO_BYTES {
+                    bail!("Telegram voice message exceeds the 20 MB limit");
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(bytes)
+        })
+    }
+
+    fn post_voice<'a>(
+        &'a self,
+        token: &'a str,
+        payload: Value,
+        clip: &'a AudioClip,
+    ) -> TransportFuture<'a> {
+        Box::pin(async move {
+            let url = format!("https://api.telegram.org/bot{token}/sendVoice");
+            let mut form = reqwest::multipart::Form::new();
+            let object = payload
+                .as_object()
+                .context("Telegram voice payload must be an object")?;
+            for (key, value) in object {
+                let value = value
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| value.to_string());
+                form = form.text(key.clone(), value);
+            }
+            let part = reqwest::multipart::Part::bytes(clip.bytes.clone())
+                .file_name(clip.filename.clone())
+                .mime_str(&clip.mime_type)
+                .context("prepare Telegram voice reply")?;
+            let response = self
+                .client
+                .post(url)
+                .timeout(Duration::from_secs(HTTP_TIMEOUT_SECONDS))
+                .multipart(form.part("voice", part))
+                .send()
+                .await
+                .map_err(|_| anyhow::anyhow!("Telegram sendVoice request failed"))?;
+            let status = response.status().as_u16();
+            let body = response.json().await.with_context(|| {
+                format!("Telegram sendVoice returned HTTP {status} with invalid JSON")
             })?;
             Ok(TransportResponse { status, body })
         })
@@ -218,6 +313,75 @@ impl Telegram {
         Ok(())
     }
 
+    pub async fn download_voice(&self, voice: &InboundVoice) -> Result<AudioClip> {
+        if voice.file_size.is_some_and(|size| size > MAX_AUDIO_BYTES) {
+            bail!("Telegram voice message exceeds the 20 MB limit");
+        }
+        let transport_response = self
+            .transport
+            .post(&self.token, "getFile", json!({"file_id": voice.locator}))
+            .await?;
+        let response: ApiResponse<TelegramFile> =
+            serde_json::from_value(transport_response.body)
+                .map_err(|_| anyhow::anyhow!("Telegram getFile returned an invalid response"))?;
+        if !response.ok {
+            bail!(
+                "Telegram getFile returned HTTP {}",
+                transport_response.status
+            );
+        }
+        let file_path = response
+            .result
+            .context("Telegram getFile omitted the file path")?
+            .file_path;
+        let bytes = self.transport.download(&self.token, &file_path).await?;
+        Ok(AudioClip {
+            bytes,
+            filename: voice.filename.clone(),
+            mime_type: voice.mime_type.clone(),
+        })
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    pub async fn send_voice(&self, target: &str, clip: &AudioClip) -> Result<()> {
+        let payload = target_payload(target);
+        let transport_response = self.post_voice_with_topic_fallback(payload, clip).await?;
+        let response: ApiResponse<Value> = serde_json::from_value(transport_response.body)
+            .map_err(|_| anyhow::anyhow!("Telegram sendVoice returned an invalid response"))?;
+        if !response.ok {
+            bail!(
+                "Telegram sendVoice returned HTTP {}",
+                transport_response.status
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    async fn post_voice_with_topic_fallback(
+        &self,
+        mut payload: Value,
+        clip: &AudioClip,
+    ) -> Result<TransportResponse> {
+        let response = self
+            .transport
+            .post_voice(&self.token, payload.clone(), clip)
+            .await?;
+        let thread_missing = response.status == 400
+            && response
+                .body
+                .get("description")
+                .and_then(Value::as_str)
+                .is_some_and(|description| description.contains("message thread not found"));
+        if !thread_missing || payload.get("message_thread_id").is_none() {
+            return Ok(response);
+        }
+        if let Some(object) = payload.as_object_mut() {
+            object.remove("message_thread_id");
+        }
+        self.transport.post_voice(&self.token, payload, clip).await
+    }
+
     /// Posts the payload, retrying once without `message_thread_id` when
     /// Telegram rejects a private-chat topic send with "message thread not
     /// found", for example when a topic is stale or unavailable. The retry
@@ -300,6 +464,7 @@ impl Update {
                 chat_identifier: String::new(),
                 is_group: false,
                 text: String::new(),
+                voice: None,
                 is_from_me: false,
                 is_supported: false,
                 thread_id: None,
@@ -315,6 +480,13 @@ impl Update {
             chat_identifier: message.chat.id.to_string(),
             is_group: message.chat.kind != "private",
             text: message.text.unwrap_or_default(),
+            voice: message.voice.map(|voice| InboundVoice {
+                locator: voice.file_id,
+                file_size: voice.file_size,
+                mime_type: voice.mime_type.unwrap_or_else(|| "audio/ogg".to_string()),
+                filename: "voice.ogg".to_string(),
+                data: None,
+            }),
             is_from_me: false,
             is_supported: true,
             thread_id: message.message_thread_id,
@@ -330,7 +502,23 @@ struct TelegramMessage {
     #[serde(default)]
     text: Option<String>,
     #[serde(default)]
+    voice: Option<TelegramVoice>,
+    #[serde(default)]
     message_thread_id: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct TelegramVoice {
+    file_id: String,
+    #[serde(default)]
+    file_size: Option<usize>,
+    #[serde(default)]
+    mime_type: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+struct TelegramFile {
+    file_path: String,
 }
 
 #[derive(Deserialize)]
@@ -377,6 +565,9 @@ mod tests {
     struct FakeTransport {
         calls: Mutex<Vec<(String, Value)>>,
         responses: Mutex<VecDeque<TransportResponse>>,
+        downloads: Mutex<VecDeque<Vec<u8>>>,
+        download_paths: Mutex<Vec<String>>,
+        voice_calls: Mutex<Vec<(Value, AudioClip)>>,
     }
 
     impl FakeTransport {
@@ -389,6 +580,9 @@ mod tests {
                         .map(|body| TransportResponse { status: 200, body })
                         .collect(),
                 ),
+                downloads: Mutex::new(VecDeque::new()),
+                download_paths: Mutex::new(Vec::new()),
+                voice_calls: Mutex::new(Vec::new()),
             }
         }
 
@@ -401,6 +595,9 @@ mod tests {
                         .map(|(status, body)| TransportResponse { status, body })
                         .collect(),
                 ),
+                downloads: Mutex::new(VecDeque::new()),
+                download_paths: Mutex::new(Vec::new()),
+                voice_calls: Mutex::new(Vec::new()),
             }
         }
     }
@@ -414,6 +611,39 @@ mod tests {
         ) -> TransportFuture<'a> {
             Box::pin(async move {
                 self.calls.lock().unwrap().push((method.to_string(), body));
+                self.responses
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .ok_or_else(|| anyhow::anyhow!("missing fake response"))
+            })
+        }
+
+        fn download<'a>(&'a self, _token: &'a str, file_path: &'a str) -> BytesFuture<'a> {
+            Box::pin(async move {
+                self.download_paths
+                    .lock()
+                    .unwrap()
+                    .push(file_path.to_string());
+                self.downloads
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .ok_or_else(|| anyhow::anyhow!("missing fake download"))
+            })
+        }
+
+        fn post_voice<'a>(
+            &'a self,
+            _token: &'a str,
+            payload: Value,
+            clip: &'a AudioClip,
+        ) -> TransportFuture<'a> {
+            Box::pin(async move {
+                self.voice_calls
+                    .lock()
+                    .unwrap()
+                    .push((payload, clip.clone()));
                 self.responses
                     .lock()
                     .unwrap()
@@ -520,6 +750,7 @@ mod tests {
                     kind: "private".to_string(),
                 },
                 text: Some("hi".to_string()),
+                voice: None,
                 message_thread_id: None,
             }),
         }
@@ -530,6 +761,84 @@ mod tests {
         assert!(telegram.is_allowed(&message));
         message.chat_identifier = "10".to_string();
         assert!(!telegram.is_allowed(&message));
+    }
+
+    #[test]
+    fn parses_voice_attachment_without_downloading_it() {
+        let message = Update {
+            update_id: 2,
+            message: Some(TelegramMessage {
+                from: Some(User { id: 7 }),
+                chat: Chat {
+                    id: 7,
+                    kind: "private".to_string(),
+                },
+                text: None,
+                voice: Some(TelegramVoice {
+                    file_id: "file-123".to_string(),
+                    file_size: Some(42),
+                    mime_type: Some("audio/ogg".to_string()),
+                }),
+                message_thread_id: None,
+            }),
+        }
+        .into_raw();
+
+        assert!(message.text.is_empty());
+        let voice = message.voice.unwrap();
+        assert_eq!(voice.locator, "file-123");
+        assert_eq!(voice.file_size, Some(42));
+        assert!(voice.data.is_none());
+    }
+
+    #[tokio::test]
+    async fn downloads_voice_by_file_id_and_returns_generic_audio() {
+        let fake = Arc::new(FakeTransport::with_responses(vec![json!({
+            "ok": true,
+            "result": {"file_path": "voice/file.oga"}
+        })]));
+        fake.downloads.lock().unwrap().push_back(vec![1, 2, 3]);
+        let telegram =
+            Telegram::with_transport("secret".to_string(), vec![7], vec![], fake.clone());
+        let voice = InboundVoice {
+            locator: "file-123".to_string(),
+            file_size: Some(3),
+            mime_type: "audio/ogg".to_string(),
+            filename: "voice.ogg".to_string(),
+            data: None,
+        };
+
+        let clip = telegram.download_voice(&voice).await.unwrap();
+
+        assert_eq!(clip.bytes, vec![1, 2, 3]);
+        assert_eq!(fake.calls.lock().unwrap()[0].0, "getFile");
+        assert_eq!(fake.calls.lock().unwrap()[0].1["file_id"], "file-123");
+        assert_eq!(
+            fake.download_paths.lock().unwrap().as_slice(),
+            ["voice/file.oga"]
+        );
+    }
+
+    #[tokio::test]
+    async fn uploads_opus_voice_to_the_exact_topic() {
+        let fake = Arc::new(FakeTransport::with_responses(vec![json!({
+            "ok": true,
+            "result": {}
+        })]));
+        let telegram =
+            Telegram::with_transport("secret".to_string(), vec![7], vec![], fake.clone());
+        let clip = AudioClip {
+            bytes: vec![4, 5, 6],
+            filename: "reply.opus".to_string(),
+            mime_type: "audio/ogg".to_string(),
+        };
+
+        telegram.send_voice("7:99", &clip).await.unwrap();
+
+        let calls = fake.voice_calls.lock().unwrap();
+        assert_eq!(calls[0].0["chat_id"], "7");
+        assert_eq!(calls[0].0["message_thread_id"], 99);
+        assert_eq!(calls[0].1, clip);
     }
 
     #[test]

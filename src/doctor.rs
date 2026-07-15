@@ -75,7 +75,22 @@ fn run_checks(cfg: &config::Config) -> CheckReport {
         Err(e) => checks.push(Check::fail("channels", e.to_string())),
     }
     check_bins(cfg, &mut checks);
+    check_voice(&mut checks);
     CheckReport { checks }
+}
+
+fn check_voice(checks: &mut Vec<Check>) {
+    if std::env::var(crate::voice::OPENAI_API_KEY_ENV).is_ok_and(|value| !value.trim().is_empty()) {
+        checks.push(Check::pass(
+            "voice messages",
+            "OPENAI_API_KEY is set; transcription and speech replies are enabled",
+        ));
+    } else {
+        checks.push(Check::pass(
+            "voice messages",
+            "OPENAI_API_KEY is not set; text messaging works and voice requests get a helpful fallback",
+        ));
+    }
 }
 
 fn check_config(cfg: &config::Config, checks: &mut Vec<Check>) {

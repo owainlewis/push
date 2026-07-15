@@ -15,6 +15,7 @@ use crate::history::{DeliveryStatus, OutboundMessage, OutboundOrigin};
 use crate::rehydration::{self, RehydrationPrompt};
 use crate::soul;
 use crate::util::now_ms;
+use crate::voice::MAX_AUDIO_BYTES;
 
 use super::{audit, complete_row, reply_to, Ctx, Job};
 
@@ -32,7 +33,7 @@ pub(super) async fn run(ctx: Ctx, mut rx: mpsc::Receiver<Job>) {
     }
 }
 
-pub(super) async fn handle(ctx: &Ctx, job: Job) {
+pub(super) async fn handle(ctx: &Ctx, mut job: Job) {
     let existing_outbound = match ctx.history.lock().unwrap().outbound_for(job.inbound_id) {
         Ok(outbound) => outbound,
         Err(error) => {
@@ -80,6 +81,31 @@ pub(super) async fn handle(ctx: &Ctx, job: Job) {
             "recover outbound",
         );
         return;
+    }
+
+    if job.voice_attachment.is_some() {
+        match prepare_voice(ctx, &job).await {
+            Ok(transcript) => job.text = transcript,
+            Err(VoicePreparationError::History(error)) => {
+                history_error(ctx, &job, "store voice transcript", error);
+                return;
+            }
+            Err(VoicePreparationError::User {
+                event,
+                reply,
+                detail,
+            }) => {
+                warn!("[{}] {detail}", job.thread);
+                audit(
+                    ctx,
+                    ctx.audit
+                        .failed(event, job.row_id, &job.thread, Some(job.backend), detail),
+                );
+                let delivery = record_and_deliver(ctx, &job, OutboundOrigin::Gateway, reply).await;
+                report_delivery(ctx, &job, delivery, reply, event, "deliver voice fallback");
+                return;
+            }
+        }
     }
 
     if let Some(reply) = command(ctx, &job) {
@@ -487,6 +513,62 @@ pub(super) async fn handle(ctx: &Ctx, job: Job) {
     }
 }
 
+enum VoicePreparationError {
+    User {
+        event: &'static str,
+        reply: &'static str,
+        detail: String,
+    },
+    History(anyhow::Error),
+}
+
+async fn prepare_voice(ctx: &Ctx, job: &Job) -> std::result::Result<String, VoicePreparationError> {
+    let attachment = job
+        .voice_attachment
+        .as_ref()
+        .expect("voice preparation requires an attachment");
+    if attachment
+        .file_size
+        .is_some_and(|size| size > MAX_AUDIO_BYTES)
+    {
+        return Err(VoicePreparationError::User {
+            event: "voice_too_large",
+            reply: "That voice message is too large. The limit is 20 MB.",
+            detail: "voice message exceeds the 20 MB limit".to_string(),
+        });
+    }
+    let Some(voice) = &ctx.voice else {
+        return Err(VoicePreparationError::User {
+            event: "voice_not_configured",
+            reply: "Voice messages are unavailable. Set OPENAI_API_KEY and restart Push, or send text instead.",
+            detail: "OPENAI_API_KEY is not configured".to_string(),
+        });
+    };
+    let clip = ctx
+        .channel
+        .download_voice(attachment)
+        .await
+        .map_err(|error| VoicePreparationError::User {
+            event: "voice_download_failed",
+            reply: "I could not download that voice message. Please try again or send text.",
+            detail: format!("voice download failed: {error:#}"),
+        })?;
+    let transcript = voice
+        .transcribe(clip)
+        .await
+        .map_err(|error| VoicePreparationError::User {
+            event: "voice_transcription_failed",
+            reply: "I could not transcribe that voice message. Please try again or send text.",
+            detail: format!("voice transcription failed: {error:#}"),
+        })?;
+    ctx.history
+        .lock()
+        .unwrap()
+        .replace_inbound_content(job.inbound_id, &transcript)
+        .map_err(VoicePreparationError::History)?;
+    Ok(transcript)
+}
+
 /// Error and completion labels for one gateway-authored reply flow.
 struct ReplyLabels {
     record: &'static str,
@@ -778,6 +860,7 @@ async fn deliver_stored(
             .unwrap()
             .mark_delivery(outbound.id, status)?;
         if delivered {
+            deliver_voice_reply(ctx, job, &outbound.content).await;
             return Ok(DeliveryOutcome::Delivered);
         }
         audit(
@@ -804,6 +887,39 @@ async fn deliver_stored(
         }
         #[cfg(test)]
         tokio::task::yield_now().await;
+    }
+}
+
+async fn deliver_voice_reply(ctx: &Ctx, job: &Job, text: &str) {
+    if !job.reply_with_voice {
+        return;
+    }
+    let Some(voice) = &ctx.voice else {
+        return;
+    };
+    let clip = match voice.synthesize(text).await {
+        Ok(clip) => clip,
+        Err(error) => {
+            warn!(
+                "[{}] voice reply synthesis failed; text reply was delivered: {error:#}",
+                job.thread
+            );
+            return;
+        }
+    };
+    #[cfg(test)]
+    {
+        ctx.sent_voice_replies
+            .lock()
+            .unwrap()
+            .push((job.target.clone(), clip.bytes));
+    }
+    #[cfg(not(test))]
+    if let Err(error) = ctx.channel.send_voice(&job.target, &clip).await {
+        warn!(
+            "[{}] voice reply delivery failed; text reply was delivered: {error:#}",
+            job.thread
+        );
     }
 }
 
