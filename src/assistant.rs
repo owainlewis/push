@@ -7,7 +7,7 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
-use crate::config::validate_inline_token_location;
+use crate::config::{validate_inline_token_location, validate_inline_voice_key_location};
 use crate::util::expand_home;
 
 const SOUL: &str = r#"# SOUL
@@ -157,6 +157,17 @@ fn validate_config_secrets(config_path: &Path, target: &Path, config: &toml::Tab
         .and_then(toml::Value::as_str);
     for token in [flat_token, nested_token] {
         validate_inline_token_location(&config_path, &assistant, token)?;
+    }
+    let flat_voice_key = config
+        .get("voice_openai_api_key")
+        .and_then(toml::Value::as_str);
+    let nested_voice_key = config
+        .get("voice")
+        .and_then(toml::Value::as_table)
+        .and_then(|voice| voice.get("openai_api_key"))
+        .and_then(toml::Value::as_str);
+    for key in [flat_voice_key, nested_voice_key] {
+        validate_inline_voice_key_location(&config_path, &assistant, key)?;
     }
     Ok(())
 }
@@ -756,6 +767,24 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&config).unwrap(),
             "channel = 'telegram'\n[telegram]\nbot_token = 'secret'\n"
+        );
+        let _ = fs::remove_dir_all(target);
+    }
+
+    #[test]
+    fn refuses_an_inline_voice_key_in_a_config_inside_the_assistant() {
+        let target = temp_path("assistant-voice-secret-config");
+        fs::create_dir_all(&target).unwrap();
+        let config = target.join("config.toml");
+        fs::write(&config, "[voice]\nopenai_api_key = 'secret'\n").unwrap();
+
+        let error = init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("inline OpenAI API key"));
+        assert!(!target.join("SOUL.md").exists());
+        assert_eq!(
+            fs::read_to_string(&config).unwrap(),
+            "[voice]\nopenai_api_key = 'secret'\n"
         );
         let _ = fs::remove_dir_all(target);
     }

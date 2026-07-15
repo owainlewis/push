@@ -35,6 +35,8 @@ pub struct Config {
     pub telegram_allow_user_ids: Vec<i64>,
     #[serde(default)]
     pub telegram_allow_chat_ids: Vec<i64>,
+    #[serde(default)]
+    pub voice_openai_api_key: Option<String>,
     #[serde(default = "default_agent")]
     pub agent: String,
     #[serde(default)]
@@ -170,6 +172,7 @@ impl Config {
                 ("allow_chat_ids", "telegram_allow_chat_ids"),
             ],
         )?;
+        flatten_provider_section(root, "voice", &[("openai_api_key", "voice_openai_api_key")])?;
         let mut c: Config = value.try_into().context("parse TOML config")?;
         let config_path = std::fs::canonicalize(&expanded_path)
             .with_context(|| format!("resolve config {expanded_path}"))?;
@@ -198,6 +201,11 @@ impl Config {
                 &config_path,
                 &assistant_root,
                 c.telegram_bot_token.as_deref(),
+            )?;
+            validate_inline_voice_key_location(
+                &config_path,
+                &assistant_root,
+                c.voice_openai_api_key.as_deref(),
             )?;
         }
         c.assistant_root = assistant_root.to_string_lossy().to_string();
@@ -396,6 +404,13 @@ impl Config {
     }
 
     fn validate(&self) -> Result<()> {
+        if self
+            .voice_openai_api_key
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            bail!("voice.openai_api_key cannot be empty");
+        }
         for channel in self.enabled_channel_kinds()? {
             match channel {
                 ChannelKind::IMessage => {
@@ -533,6 +548,20 @@ pub(crate) fn validate_inline_token_location(
     {
         bail!(
             "config {} contains an inline Telegram token inside the Git-versioned assistant repository. Move the config outside the assistant or use telegram.bot_token_env.",
+            config_path.display()
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_inline_voice_key_location(
+    config_path: &Path,
+    assistant_root: &Path,
+    key: Option<&str>,
+) -> Result<()> {
+    if key.is_some_and(|key| !key.trim().is_empty()) && config_path.starts_with(assistant_root) {
+        bail!(
+            "config {} contains an inline OpenAI API key inside the Git-versioned assistant repository. Move the config outside the assistant or use OPENAI_API_KEY.",
             config_path.display()
         );
     }
@@ -828,6 +857,7 @@ mod tests {
             telegram_bot_token_env: "TELEGRAM_BOT_TOKEN".to_string(),
             telegram_allow_user_ids: Vec::new(),
             telegram_allow_chat_ids: Vec::new(),
+            voice_openai_api_key: None,
             agent: "codex".to_string(),
             routes: Vec::new(),
             assistant_root: root.to_string_lossy().to_string(),
