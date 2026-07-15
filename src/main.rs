@@ -24,6 +24,7 @@ mod telegram;
 #[cfg(test)]
 mod test_support;
 mod util;
+mod voice;
 
 use anyhow::{bail, Context, Result};
 

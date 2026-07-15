@@ -20,6 +20,9 @@
   <dict>
     <key>PATH</key>
     <string>/Users/YOU/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <!-- Optional: uncomment both lines to enable voice messages. -->
+    <!-- <key>OPENAI_API_KEY</key> -->
+    <!-- <string>replace-with-your-openai-api-key</string> -->
   </dict>
 
   <key>RunAtLoad</key>

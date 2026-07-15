@@ -5,12 +5,55 @@ use super::worker::{
 use super::*;
 use crate::agent::{FakeRunCall, FakeRunner};
 use crate::approval::Question;
-use crate::channel::{normalize_handle, thread_handle};
+use crate::channel::{normalize_handle, thread_handle, InboundVoice};
 use crate::history::DeliveryStatus;
 use crate::imessage::{Poller, Sender};
+use crate::voice::{AudioClip, VoiceFuture, VoiceProvider};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use uuid::Uuid;
+
+struct FakeVoice;
+
+impl VoiceProvider for FakeVoice {
+    fn transcribe<'a>(&'a self, _clip: AudioClip) -> VoiceFuture<'a, String> {
+        Box::pin(async { Ok("voice request".to_string()) })
+    }
+
+    fn synthesize<'a>(&'a self, _text: &'a str) -> VoiceFuture<'a, AudioClip> {
+        Box::pin(async {
+            Ok(AudioClip {
+                bytes: vec![4, 5, 6],
+                filename: "reply.opus".to_string(),
+                mime_type: "audio/ogg".to_string(),
+            })
+        })
+    }
+}
+
+struct BlockingVoice {
+    release: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+
+impl VoiceProvider for BlockingVoice {
+    fn transcribe<'a>(&'a self, _clip: AudioClip) -> VoiceFuture<'a, String> {
+        Box::pin(async move {
+            let release = self.release.lock().await.take().unwrap();
+            release.await.unwrap();
+            Ok("slow voice request".to_string())
+        })
+    }
+
+    fn synthesize<'a>(&'a self, _text: &'a str) -> VoiceFuture<'a, AudioClip> {
+        Box::pin(async {
+            Ok(AudioClip {
+                bytes: vec![7],
+                filename: "reply.opus".to_string(),
+                mime_type: "audio/ogg".to_string(),
+            })
+        })
+    }
+}
 
 #[tokio::test]
 async fn periodic_activity_refreshes_until_operation_completes() {
@@ -118,6 +161,7 @@ fn msg(chat: &str, handle: &str, from_me: bool, text: &str) -> RawMessage {
         handle: handle.to_string(),
         chat_identifier: chat.to_string(),
         text: text.to_string(),
+        voice: None,
         is_from_me: from_me,
         is_group: false,
         is_supported: true,
@@ -182,8 +226,10 @@ fn setup_failure_ctx(
             false,
             "imessage",
         )),
+        voice: None,
         setup_failure_replies: Arc::new(Mutex::new(Vec::new())),
         sent_replies: Arc::new(Mutex::new(Vec::new())),
+        sent_voice_replies: Arc::new(Mutex::new(Vec::new())),
         send_failures_remaining: Arc::new(Mutex::new(0)),
     }
 }
@@ -202,6 +248,8 @@ fn setup_failure_job(row_id: i64) -> Job {
             chat_key: "me@icloud.com".to_string(),
         },
         text: "hello".to_string(),
+        reply_with_voice: false,
+        voice_attachment: None,
     }
 }
 
@@ -1496,6 +1544,157 @@ async fn enabled_channels_process_concurrently_with_isolated_state_and_origin_re
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn telegram_voice_is_transcribed_and_gets_text_and_voice_replies() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("voice-sessions");
+    let assistant_dir = temp_path("voice-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut cfg = test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    );
+    cfg.channel = "telegram".to_string();
+    cfg.telegram_bot_token = Some("secret".to_string());
+    cfg.telegram_allow_user_ids = vec![7];
+    let mut gateway = Gateway::new(cfg).unwrap();
+    gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+    gateway.ctx.voice = Some(Voice::with_provider(Arc::new(FakeVoice)));
+
+    run_messages(&mut gateway, vec![telegram_voice_message(1, 7, 7)]).await;
+
+    assert_eq!(calls.lock().unwrap()[0].prompt, "voice request");
+    assert_eq!(
+        gateway.ctx.sent_replies.lock().unwrap().as_slice(),
+        [("7".to_string(), "fake reply: voice request".to_string())]
+    );
+    assert_eq!(
+        gateway.ctx.sent_voice_replies.lock().unwrap().as_slice(),
+        [("7".to_string(), vec![4, 5, 6])]
+    );
+    assert_eq!(gateway.store.lock().unwrap().cursor("telegram"), 1);
+    let history = gateway
+        .ctx
+        .history
+        .lock()
+        .unwrap()
+        .recent_messages_before("telegram", "telegram:dm:7", i64::MAX, 10)
+        .unwrap();
+    assert!(history
+        .iter()
+        .any(|message| message.content == "voice request"));
+    assert!(history
+        .iter()
+        .all(|message| message.content != "[Voice message]"));
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn telegram_voice_without_openai_key_falls_back_without_running_agent() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("voice-missing-key-sessions");
+    let assistant_dir = temp_path("voice-missing-key-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut cfg = test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    );
+    cfg.channel = "telegram".to_string();
+    cfg.telegram_bot_token = Some("secret".to_string());
+    cfg.telegram_allow_user_ids = vec![7];
+    let mut gateway = Gateway::new(cfg).unwrap();
+    gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+    gateway.ctx.voice = None;
+
+    run_messages(&mut gateway, vec![telegram_voice_message(1, 7, 7)]).await;
+
+    assert!(calls.lock().unwrap().is_empty());
+    assert!(gateway.ctx.sent_replies.lock().unwrap()[0]
+        .1
+        .contains("OPENAI_API_KEY"));
+    assert_eq!(gateway.store.lock().unwrap().cursor("telegram"), 1);
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn slow_voice_transcription_does_not_block_another_telegram_thread() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("voice-concurrency-sessions");
+    let assistant_dir = temp_path("voice-concurrency-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut cfg = test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    );
+    cfg.channel = "telegram".to_string();
+    cfg.telegram_bot_token = Some("secret".to_string());
+    cfg.telegram_allow_user_ids = vec![7, 8];
+    let mut gateway = Gateway::new(cfg).unwrap();
+    gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+    let (release, blocked) = tokio::sync::oneshot::channel();
+    gateway.ctx.voice = Some(Voice::with_provider(Arc::new(BlockingVoice {
+        release: tokio::sync::Mutex::new(Some(blocked)),
+    })));
+
+    gateway
+        .tick_fake(vec![
+            telegram_voice_message(1, 7, 7),
+            telegram_message(2, 8, 8, false, "fast text request"),
+        ])
+        .await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|call| call.prompt == "fast text request")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("text thread should run while voice transcription is blocked");
+    assert!(!calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|call| call.prompt == "slow voice request"));
+
+    release.send(()).unwrap();
+    gateway.queues.clear();
+    gateway.drain_workers().await;
+    assert!(calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|call| call.prompt == "slow voice request"));
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn primary_delivery_is_scoped_validated_and_non_fatal_when_missing_or_invalid() {
     let state_path = temp_state_path();
     let sessions_dir = temp_path("primary-sessions");
@@ -2002,6 +2201,8 @@ fn draft_test_job(row_id: i64, target: &str, origin: AnswerOrigin) -> Job {
         backend: AgentBackend::Codex,
         approval_origin: origin,
         text: "draft".to_string(),
+        reply_with_voice: false,
+        voice_attachment: None,
     }
 }
 
@@ -2126,6 +2327,7 @@ fn message(row_id: i64, chat: &str, handle: &str, is_from_me: bool, text: &str) 
         handle: handle.to_string(),
         chat_identifier: chat.to_string(),
         text: text.to_string(),
+        voice: None,
         is_from_me,
         is_group: false,
         is_supported: true,
@@ -2146,9 +2348,22 @@ fn telegram_message(
         handle: user_id.to_string(),
         chat_identifier: chat_id.to_string(),
         text: text.to_string(),
+        voice: None,
         is_from_me: false,
         is_group,
         is_supported: true,
         thread_id: None,
     }
+}
+
+fn telegram_voice_message(row_id: i64, user_id: i64, chat_id: i64) -> RawMessage {
+    let mut message = telegram_message(row_id, user_id, chat_id, false, "");
+    message.voice = Some(InboundVoice {
+        locator: "voice-file".to_string(),
+        file_size: Some(3),
+        mime_type: "audio/ogg".to_string(),
+        filename: "voice.ogg".to_string(),
+        data: Some(vec![1, 2, 3]),
+    });
+    message
 }

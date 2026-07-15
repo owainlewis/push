@@ -31,6 +31,8 @@ Use absolute paths in service files. The service user needs:
 - for iMessage on macOS, Full Disk Access and `osascript`
 - for Telegram, a token in the private config and network access to
   `api.telegram.org`
+- for optional voice messages, `OPENAI_API_KEY` in the service environment and
+  network access to `api.openai.com`
 
 `state_path` stores independent cursors for each channel and backend session
 ids. `database_path` stores the canonical conversation journal. Chat agents run
@@ -76,6 +78,8 @@ and replace `YOU` with your macOS user name:
   <dict>
     <key>PATH</key>
     <string>/Users/YOU/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>OPENAI_API_KEY</key>
+    <string>replace-with-your-openai-api-key</string>
   </dict>
 
   <key>RunAtLoad</key>
@@ -109,6 +113,10 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.owainlewis.push.plis
 launchctl kickstart -k gui/$(id -u)/com.owainlewis.push
 ```
 
+The plist contains the optional OpenAI key, so protect it with
+`chmod 600 ~/Library/LaunchAgents/com.owainlewis.push.plist`. Omit the key when
+you do not want voice support.
+
 ## Linux systemd
 
 Use this for Telegram-only deployments. The iMessage channel still requires
@@ -136,6 +144,7 @@ WorkingDirectory=%h/.push
 Restart=on-failure
 RestartSec=10
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.config/push/env
 
 [Install]
 WantedBy=default.target
@@ -148,6 +157,14 @@ systemctl --user daemon-reload
 systemctl --user enable --now push.service
 systemctl --user status push.service
 journalctl --user -u push.service -f
+```
+
+For voice support, create the optional private environment file:
+
+```sh
+printf 'OPENAI_API_KEY=replace-with-your-openai-api-key\n' > ~/.config/push/env
+chmod 600 ~/.config/push/env
+systemctl --user restart push.service
 ```
 
 Keep `~/.push/config.toml` at mode `0600` because it contains the Telegram bot

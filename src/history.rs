@@ -186,6 +186,24 @@ impl History {
         Ok(message)
     }
 
+    pub fn replace_inbound_content(&mut self, inbound_id: i64, content: &str) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE messages
+                 SET content = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE id = ?1 AND direction = 'inbound'",
+                params![inbound_id, content],
+            )
+            .with_context(|| {
+                format!("update inbound message content in {}", self.path.display())
+            })?;
+        if changed != 1 {
+            bail!("inbound message {inbound_id} does not exist");
+        }
+        Ok(())
+    }
+
     pub fn outbound_for(&self, inbound_id: i64) -> Result<Option<OutboundMessage>> {
         outbound_for_query(&self.conn, inbound_id).with_context(|| {
             format!(

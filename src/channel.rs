@@ -7,6 +7,18 @@ use anyhow::{bail, Context, Result};
 use crate::config::{ChannelKind, Config};
 use crate::imessage::{Poller as IMessagePoller, Sender as IMessageSender};
 use crate::telegram::Telegram;
+use crate::voice::AudioClip;
+
+#[derive(Debug, Clone)]
+pub struct InboundVoice {
+    /// Channel-owned file identifier. The voice layer treats this as opaque.
+    pub locator: String,
+    pub file_size: Option<usize>,
+    pub mime_type: String,
+    pub filename: String,
+    /// Channels that already have the bytes may provide them directly.
+    pub data: Option<Vec<u8>>,
+}
 
 #[derive(Debug, Clone)]
 pub struct RawMessage {
@@ -16,6 +28,7 @@ pub struct RawMessage {
     pub chat_identifier: String,
     pub is_group: bool,
     pub text: String,
+    pub voice: Option<InboundVoice>,
     pub is_from_me: bool,
     pub is_supported: bool,
     /// Channel-specific thread/topic id (Telegram `message_thread_id`).
@@ -150,6 +163,7 @@ impl Channel {
                         chat_identifier: message.chat_identifier,
                         is_group: message.is_group,
                         text: message.text,
+                        voice: None,
                         is_from_me: message.is_from_me,
                         is_supported: true,
                         thread_id: None,
@@ -172,7 +186,10 @@ impl Channel {
 
     /// Returns `(thread_key, reply_target)` for an accepted message.
     pub fn accept(&self, message: &RawMessage) -> Option<(String, String)> {
-        if !message.is_supported || message.is_group || message.text.trim().is_empty() {
+        if !message.is_supported
+            || message.is_group
+            || (message.text.trim().is_empty() && message.voice.is_none())
+        {
             return None;
         }
         match self {
@@ -222,8 +239,8 @@ impl Channel {
             "unsupported_update"
         } else if message.is_group {
             "group_chat"
-        } else if message.text.trim().is_empty() {
-            "empty_text"
+        } else if message.text.trim().is_empty() && message.voice.is_none() {
+            "empty_message"
         } else {
             match self {
                 Self::IMessage { reply_marker, .. }
@@ -283,6 +300,28 @@ impl Channel {
             Self::Telegram(telegram) => telegram.send_typing(target).await,
         }
     }
+
+    pub async fn download_voice(&self, voice: &InboundVoice) -> Result<AudioClip> {
+        if let Some(bytes) = &voice.data {
+            return Ok(AudioClip {
+                bytes: bytes.clone(),
+                filename: voice.filename.clone(),
+                mime_type: voice.mime_type.clone(),
+            });
+        }
+        match self {
+            Self::Telegram(telegram) => telegram.download_voice(voice).await,
+            Self::IMessage { .. } => bail!("iMessage voice messages are not supported yet"),
+        }
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    pub async fn send_voice(&self, target: &str, clip: &AudioClip) -> Result<()> {
+        match self {
+            Self::Telegram(telegram) => telegram.send_voice(target, clip).await,
+            Self::IMessage { .. } => bail!("iMessage voice replies are not supported yet"),
+        }
+    }
 }
 
 pub(crate) fn normalize_handle(value: &str) -> String {
@@ -331,6 +370,7 @@ mod tests {
             chat_identifier: chat.to_string(),
             is_group,
             text: "hello".to_string(),
+            voice: None,
             is_from_me: false,
             is_supported: true,
             thread_id: None,
