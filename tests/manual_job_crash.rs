@@ -2,7 +2,7 @@
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OptionalExtension};
@@ -100,9 +100,7 @@ fn concurrent_first_runs_on_a_fresh_database_skip_without_sqlite_errors() {
     let mut second = spawn_run(binary, &config);
     wait_for_counts(&database, 1, 1);
 
-    let first_status = first.try_wait().unwrap();
-    let second_status = second.try_wait().unwrap();
-    assert!(first_status.is_none() ^ second_status.is_none());
+    let (first_status, second_status) = wait_for_one_exit(&mut first, &mut second);
     let skipped_status = first_status.or(second_status).unwrap();
     assert!(skipped_status.success());
     if first_status.is_none() {
@@ -194,6 +192,26 @@ fn spawn_run(binary: &str, config: &Path) -> std::process::Child {
         .stderr(Stdio::null())
         .spawn()
         .unwrap()
+}
+
+fn wait_for_one_exit(
+    first: &mut Child,
+    second: &mut Child,
+) -> (Option<ExitStatus>, Option<ExitStatus>) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let first_status = first.try_wait().unwrap();
+        let second_status = second.try_wait().unwrap();
+        if first_status.is_some() ^ second_status.is_some() {
+            return (first_status, second_status);
+        }
+        assert!(
+            first_status.is_none() && second_status.is_none(),
+            "both concurrent runs exited"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("timed out waiting for the skipped run to exit");
 }
 
 fn run_cli(binary: &str, config: &Path, args: &[&str]) -> std::process::Output {
