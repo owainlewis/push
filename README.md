@@ -62,6 +62,7 @@ Push keeps conversations, run history, schedules, and delivery routes durable.
   [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview), or
   [Pi](https://pi.dev/) installed, authenticated, and runnable by the user that
   will run Push
+- Git for the assistant repository created by `push init`
 - `curl` and `tar` for the release installer
 
 First confirm that your chosen backend works. For example:
@@ -81,7 +82,7 @@ curl -fsSL https://raw.githubusercontent.com/owainlewis/push/main/install.sh | s
 The installer verifies the release archive against its published SHA-256
 checksum. If `~/.local/bin` is not on `PATH`, add it before continuing.
 
-To build from source instead, install Git and the stable Rust toolchain first:
+To build from source instead, install the stable Rust toolchain first:
 
 ```sh
 git clone https://github.com/owainlewis/push.git
