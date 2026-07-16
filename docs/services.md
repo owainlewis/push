@@ -104,6 +104,12 @@ launchctl print gui/$(id -u)/com.owainlewis.push
 tail -f ~/Library/Logs/push.err.log ~/Library/Logs/push.out.log
 ```
 
+After editing `~/.push/config.toml`, restart the gateway with:
+
+```sh
+push restart
+```
+
 After changing the plist:
 
 ```sh
@@ -156,6 +162,12 @@ systemctl --user daemon-reload
 systemctl --user enable --now push.service
 systemctl --user status push.service
 journalctl --user -u push.service -f
+```
+
+After editing `~/.push/config.toml`, restart the gateway with:
+
+```sh
+push restart
 ```
 
 For voice support, prefer `voice.openai_api_key` in `~/.push/config.toml`. As an
