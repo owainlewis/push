@@ -23,7 +23,9 @@ fn help_commands_print_usage_without_creating_files() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage: push"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Usage: push"));
+        assert!(stdout.contains("restart"));
         assert!(output.stderr.is_empty());
     }
     assert_eq!(std::fs::read_dir(&workdir).unwrap().count(), 0);

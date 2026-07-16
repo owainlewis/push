@@ -38,6 +38,7 @@ Commands:
   help              Print this help
   init [path]       Create an assistant repository (default: ./assistant)
   doctor            Validate the configuration and dependencies
+  restart           Restart the installed gateway service
   job validate      Validate all installed jobs
   job list          List installed jobs
   job show <name>   Show an installed job
