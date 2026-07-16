@@ -35,6 +35,7 @@ const HELP: &str = "Push turns coding agents into a personal assistant you can t
 Usage: push [OPTIONS] [COMMAND]
 
 Commands:
+  help              Print this help
   init [path]       Create an assistant repository (default: ./assistant)
   doctor            Validate the configuration and dependencies
   job validate      Validate all installed jobs
@@ -191,6 +192,7 @@ impl Args {
         }
         let command = match positional.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
             [] => Command::Run,
+            ["help"] => Command::Help,
             ["init"] => Command::Init("./assistant".to_string()),
             ["init", path] => Command::Init((*path).to_string()),
             ["doctor"] => Command::Doctor,
@@ -202,7 +204,7 @@ impl Args {
             ["job", "runs"] => Command::Job(JobCommand::Runs(None)),
             ["job", "runs", name] => Command::Job(JobCommand::Runs(Some((*name).to_string()))),
             _ => bail!(
-                "unknown command; expected init [path], doctor, restart, job validate, job list, job show <name>, job run <name>, job runs [<name>], or --config <path>"
+                "unknown command; expected help, init [path], doctor, restart, job validate, job list, job show <name>, job run <name>, job runs [<name>], or --config <path>"
             ),
         };
         Ok(Self {
@@ -362,6 +364,13 @@ mod tests {
 
     #[test]
     fn parses_help_without_treating_it_as_a_command_argument() {
+        assert_eq!(
+            Args::parse(vec!["help".into()]).unwrap(),
+            Args {
+                command: Command::Help,
+                config_path: DEFAULT_CONFIG_PATH.to_string(),
+            }
+        );
         assert_eq!(
             Args::parse(vec!["--help".into()]).unwrap(),
             Args {
