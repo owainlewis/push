@@ -30,6 +30,25 @@ mod voice;
 use anyhow::{bail, Context, Result};
 
 const DEFAULT_CONFIG_PATH: &str = "~/.push/config.toml";
+const HELP: &str = "Push turns coding agents into a personal assistant you can text.
+
+Usage: push [OPTIONS] [COMMAND]
+
+Commands:
+  help              Print this help
+  init [path]       Create an assistant repository (default: ./assistant)
+  doctor            Validate the configuration and dependencies
+  restart           Restart the installed gateway service
+  job validate      Validate all installed jobs
+  job list          List installed jobs
+  job show <name>   Show an installed job
+  job run <name>    Run an installed job
+  job runs [name]   Show job run history
+
+Options:
+  --config <path>   Use a configuration file (default: ~/.push/config.toml)
+  -h, --help        Print help
+";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -37,6 +56,10 @@ async fn main() -> Result<()> {
 
     let args = Args::parse(std::env::args().skip(1).collect())?;
     match args.command {
+        Command::Help => {
+            print!("{HELP}");
+            Ok(())
+        }
         Command::Init(path) => {
             let result = assistant::init(&path, &args.config_path)?;
             println!("Initialized assistant at {}", result.root.display());
@@ -121,6 +144,7 @@ struct Args {
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
+    Help,
     Run,
     Init(String),
     Doctor,
@@ -139,6 +163,16 @@ enum JobCommand {
 
 impl Args {
     fn parse(args: Vec<String>) -> Result<Self> {
+        if args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
+        {
+            return Ok(Self {
+                command: Command::Help,
+                config_path: DEFAULT_CONFIG_PATH.to_string(),
+            });
+        }
+
         let mut config_path = DEFAULT_CONFIG_PATH.to_string();
         let mut positional = Vec::new();
         let mut i = 0;
@@ -159,6 +193,7 @@ impl Args {
         }
         let command = match positional.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
             [] => Command::Run,
+            ["help"] => Command::Help,
             ["init"] => Command::Init("./assistant".to_string()),
             ["init", path] => Command::Init((*path).to_string()),
             ["doctor"] => Command::Doctor,
@@ -170,7 +205,7 @@ impl Args {
             ["job", "runs"] => Command::Job(JobCommand::Runs(None)),
             ["job", "runs", name] => Command::Job(JobCommand::Runs(Some((*name).to_string()))),
             _ => bail!(
-                "unknown command; expected init [path], doctor, restart, job validate, job list, job show <name>, job run <name>, job runs [<name>], or --config <path>"
+                "unknown command; expected help, init [path], doctor, restart, job validate, job list, job show <name>, job run <name>, job runs [<name>], or --config <path>"
             ),
         };
         Ok(Self {
@@ -325,6 +360,30 @@ mod tests {
                 command: Command::Restart,
                 config_path: "custom.toml".to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn parses_help_without_treating_it_as_a_command_argument() {
+        assert_eq!(
+            Args::parse(vec!["help".into()]).unwrap(),
+            Args {
+                command: Command::Help,
+                config_path: DEFAULT_CONFIG_PATH.to_string(),
+            }
+        );
+        assert_eq!(
+            Args::parse(vec!["--help".into()]).unwrap(),
+            Args {
+                command: Command::Help,
+                config_path: DEFAULT_CONFIG_PATH.to_string(),
+            }
+        );
+        assert_eq!(
+            Args::parse(vec!["job".into(), "--help".into()])
+                .unwrap()
+                .command,
+            Command::Help
         );
     }
 
