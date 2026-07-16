@@ -18,6 +18,7 @@ mod imessage;
 mod jobs;
 mod pi;
 mod rehydration;
+mod restart;
 mod soul;
 mod store;
 mod telegram;
@@ -63,6 +64,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Doctor => doctor::doctor(&args.config_path),
+        Command::Restart => restart::gateway(),
         Command::Job(command) => run_job_command(&args.config_path, command).await,
         Command::Run => {
             let cfg = load_run_config(&args.config_path)?;
@@ -122,6 +124,7 @@ enum Command {
     Run,
     Init(String),
     Doctor,
+    Restart,
     Job(JobCommand),
 }
 
@@ -159,6 +162,7 @@ impl Args {
             ["init"] => Command::Init("./assistant".to_string()),
             ["init", path] => Command::Init((*path).to_string()),
             ["doctor"] => Command::Doctor,
+            ["restart"] => Command::Restart,
             ["job", "validate"] => Command::Job(JobCommand::Validate),
             ["job", "list"] => Command::Job(JobCommand::List),
             ["job", "show", name] => Command::Job(JobCommand::Show((*name).to_string())),
@@ -166,7 +170,7 @@ impl Args {
             ["job", "runs"] => Command::Job(JobCommand::Runs(None)),
             ["job", "runs", name] => Command::Job(JobCommand::Runs(Some((*name).to_string()))),
             _ => bail!(
-                "unknown command; expected init [path], doctor, job validate, job list, job show <name>, job run <name>, job runs [<name>], or --config <path>"
+                "unknown command; expected init [path], doctor, restart, job validate, job list, job show <name>, job run <name>, job runs [<name>], or --config <path>"
             ),
         };
         Ok(Self {
@@ -301,6 +305,24 @@ mod tests {
             args,
             Args {
                 command: Command::Doctor,
+                config_path: "custom.toml".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_restart_with_config_path() {
+        let args = Args::parse(vec![
+            "--config".to_string(),
+            "custom.toml".to_string(),
+            "restart".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            args,
+            Args {
+                command: Command::Restart,
                 config_path: "custom.toml".to_string(),
             }
         );
