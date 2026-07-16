@@ -163,6 +163,64 @@ fn job_without_default_config_reports_init_guidance() {
     assert_missing_default_config_guidance(&["job", "list"]);
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn restart_invokes_the_platform_service_manager() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = temp_dir("restart-service-manager");
+    let bin_dir = root.join("bin");
+    let args_path = root.join("args");
+    std::fs::create_dir(&bin_dir).unwrap();
+    let manager = if cfg!(target_os = "macos") {
+        "launchctl"
+    } else {
+        "systemctl"
+    };
+    let manager_path = bin_dir.join(manager);
+    std::fs::write(
+        &manager_path,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$PUSH_RESTART_ARGS_PATH\"\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&manager_path).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&manager_path, permissions).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin_dir.clone()).chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_push"))
+        .arg("restart")
+        .env("PATH", path)
+        .env("PUSH_RESTART_ARGS_PATH", &args_path)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "Restarted the Push gateway."
+    );
+    let args = std::fs::read_to_string(args_path).unwrap();
+    if cfg!(target_os = "macos") {
+        let lines = args.lines().collect::<Vec<_>>();
+        assert_eq!(&lines[..2], &["kickstart", "-k"]);
+        assert!(lines[2].starts_with("gui/"));
+        assert!(lines[2].ends_with("/com.owainlewis.push"));
+    } else {
+        assert_eq!(args, "--user\nrestart\npush.service\n");
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
 fn assert_missing_default_config_guidance(args: &[&str]) {
     let root = temp_dir("missing-default-config-command");
     let home = root.join("home");
