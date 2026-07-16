@@ -3,6 +3,37 @@ use std::process::Command;
 use uuid::Uuid;
 
 #[test]
+fn help_commands_print_usage_without_creating_files() {
+    let root = temp_dir("help");
+    let home = root.join("home");
+    let workdir = root.join("workdir");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workdir).unwrap();
+
+    for args in [&["help"][..], &["init", "--help"][..]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_push"))
+            .args(args)
+            .current_dir(&workdir)
+            .env("HOME", &home)
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Usage: push"));
+        assert!(stdout.contains("restart"));
+        assert!(output.stderr.is_empty());
+    }
+    assert_eq!(std::fs::read_dir(&workdir).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(&home).unwrap().count(), 0);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn init_without_path_creates_assistant_in_current_directory() {
     let root = temp_dir("default");
     let home = root.join("home");

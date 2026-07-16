@@ -6,6 +6,7 @@ The default is `~/.push/config.toml`.
 
 | Command | Purpose |
 | --- | --- |
+| `push help`, `push --help` | Print command and option help without loading config or changing files |
 | `push init [path]` | Create and Git-initialize the one assistant repository; defaults to `./assistant` |
 | `push` | Start the configured channel gateway and scheduler |
 | `push doctor` | Validate config, paths, channel requirements, and required backend binaries |
@@ -20,6 +21,7 @@ Examples:
 
 ```sh
 push init ~/Code/assistant
+push help
 push doctor
 push
 push restart
@@ -29,7 +31,7 @@ push job runs repo-review
 ```
 
 Unknown commands and missing values fail with the accepted command forms. The
-CLI does not currently provide shell completion or a generated `--help` page.
+CLI does not currently provide shell completion.
 
 `push restart` targets the service definitions documented by Push:
 `com.owainlewis.push` under launchd on macOS and the `push.service` user unit
