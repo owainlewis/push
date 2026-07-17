@@ -5,6 +5,15 @@ user-owned Markdown runbook in the configured assistant repository's `jobs/`
 directory. TOML frontmatter defines execution policy; the Markdown body is
 sent verbatim to a fresh backend session.
 
+The schedule definition lives in the same Markdown file as the job. Push
+evaluates that definition and stores its run and delivery state. For every run:
+
+- `SOUL.md` is supplied automatically as identity and working instructions;
+- files under `context/` are optional shared information and are not inserted
+  automatically; keep task-specific instructions in the job;
+- the job body is the fresh request, without chat history or template expansion;
+- `primary_delivery` in Push configuration selects where scheduled results go.
+
 ## Create a job
 
 Create `<assistant_root>/jobs/repo-review.md`:
@@ -96,6 +105,28 @@ Push runs at most `jobs_max_workers` scheduled jobs concurrently. It does not
 catch up cron occurrences missed while offline. Daylight-saving gaps are
 skipped; repeated local times run once at their first instant.
 
+## Complete assistant example
+
+The [daily inbox triage job](https://github.com/owainlewis/push/blob/main/examples/assistant/jobs/daily-inbox-triage.md)
+keeps global identity separate while making the scheduled runbook self-contained:
+
+```text
+SOUL.md
+jobs/daily-inbox-triage.md
+```
+
+Create its external working directory before installing the job:
+
+```sh
+mkdir -p ~/.push/workspaces/daily-inbox-triage
+```
+
+That one job file contains its schedule, triage priorities, output format, and
+safety rules. It uses email tools configured in the selected agent, drafts no
+replies, and performs no external side effects. Its schedule is disabled by
+default. Set `enabled = true` in the job only after configuring the email tools
+and primary delivery destination.
+
 ## Execution and delivery guarantees
 
 - Every run uses a fresh backend session, without chat history.
@@ -105,6 +136,10 @@ skipped; repeated local times run once at their first instant.
 - Success, failure, timeout, overlap, and delivery state are stored separately.
 - Scheduled output is persisted before delivery.
 - Delivery retries use the stored result and never rerun the backend.
+- Delivery is claimed across gateway processes. Normal partial-message retries
+  resume from the first unsent chunk. Delivery can still produce an at-least-once
+  duplicate after a process crash or delivery-state persistence failure because
+  channel APIs do not provide atomic delivery.
 - Queued runs and pending delivery survive restart. Interrupted execution is
   not automatically replayed.
 

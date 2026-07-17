@@ -197,6 +197,7 @@ logical fields are:
   notification destination when applicable;
 - lifecycle state and a bounded result or error reference;
 - delivery state, attempt count, last attempt time, and delivery error.
+- delivery claim owner, claim time, and the first unsent message chunk.
 
 Run lifecycle states are `queued`, `running`, `succeeded`, `failed`,
 `timed_out`, `skipped_overlap`, and `cancelled`. Delivery is tracked separately
@@ -204,9 +205,9 @@ as `not_requested`, `pending`, `delivered`, or `failed`. A run can therefore
 succeed while its delivery fails.
 
 Successful output is stored before delivery. Failures and timeouts produce a
-bounded diagnostic result and follow the same delivery policy. Delivery may be
-retried up to three times with backoff using the already stored result; it
-never reruns the agent. Exhausted delivery remains `failed` and is visible in
+bounded diagnostic result and follow the same delivery policy. Delivery is
+attempted up to five times with bounded backoff using the already stored result;
+it never reruns the agent. Exhausted delivery remains `failed` and is visible in
 the read-only run log. Manual runs move directly to `running` in their claim
 transaction and are never handed to the gateway. On restart, valid scheduled
 `queued` rows remain eligible for the gateway because backend execution has not
