@@ -65,14 +65,13 @@ impl Runner {
     pub fn for_backend(backend: AgentBackend, cfg: &Config) -> Self {
         match backend {
             AgentBackend::Claude => Runner::Claude(claude::Runner {
-                bin: cfg.claude_bin.clone(),
+                bin: cfg.agent_bin(backend).to_string(),
             }),
             AgentBackend::Codex => Runner::Codex(codex::Runner {
-                bin: cfg.codex_bin.clone(),
-                model: cfg.codex_model.clone(),
+                bin: cfg.agent_bin(backend).to_string(),
             }),
             AgentBackend::Pi => Runner::Pi(pi::Runner {
-                bin: cfg.pi_bin.clone(),
+                bin: cfg.agent_bin(backend).to_string(),
             }),
         }
     }

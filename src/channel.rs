@@ -9,6 +9,8 @@ use crate::imessage::{Poller as IMessagePoller, Sender as IMessageSender};
 use crate::telegram::Telegram;
 use crate::voice::AudioClip;
 
+pub(crate) const REPLY_MARKER: &str = "\n\n-- sent by push";
+
 #[derive(Debug, Clone)]
 pub struct InboundVoice {
     /// Channel-owned file identifier. The voice layer treats this as opaque.
@@ -76,7 +78,7 @@ impl Channel {
                     .iter()
                     .map(|value| (normalize_handle(value), thread_handle(value)))
                     .collect(),
-                reply_marker: cfg.reply_marker.clone(),
+                reply_marker: REPLY_MARKER.to_string(),
             }),
             ChannelKind::Telegram => Ok(Self::Telegram(Telegram::new(
                 cfg.telegram_token()

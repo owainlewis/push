@@ -5,7 +5,6 @@ assistant_root = "~/Code/assistant"
 
 # Pi is also supported. Install and authenticate it first, then use:
 # agent = "pi"
-# pi_bin = "pi"
 
 [telegram]
 # Paste the token from BotFather here. Keep this file private.
