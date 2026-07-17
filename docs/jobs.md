@@ -123,7 +123,9 @@ mkdir -p ~/.push/workspaces/daily-inbox-triage
 
 That one job file contains its schedule, triage priorities, output format, and
 safety rules. It uses email tools configured in the selected agent, drafts no
-replies, and performs no external side effects.
+replies, and performs no external side effects. Its schedule is disabled by
+default. Set `enabled = true` in the job only after configuring the email tools
+and primary delivery destination.
 
 ## Execution and delivery guarantees
 

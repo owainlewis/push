@@ -5,7 +5,7 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::future::Future;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use chrono::{Datelike, LocalResult, TimeZone, Timelike, Utc};
@@ -1250,12 +1250,12 @@ impl Scheduler {
                 )
             })
             .collect::<HashMap<_, _>>();
-        if self.validation_initialized {
-            for (path, message) in &current {
-                if self.validation_errors.get(path) != Some(message) {
-                    tracing::warn!("job disabled ({path}): {message}");
-                }
+        for (path, message) in &current {
+            if !self.validation_initialized || self.validation_errors.get(path) != Some(message) {
+                tracing::warn!("job disabled ({path}): {message}");
             }
+        }
+        if self.validation_initialized {
             for path in self.validation_errors.keys() {
                 if !current.contains_key(path) {
                     tracing::info!("job validation recovered ({path})");
@@ -1278,6 +1278,7 @@ where
     F: Fn(String, String, String, usize) -> Fut,
     Fut: Future<Output = DeliveryAttempt>,
 {
+    let started = Instant::now();
     let text = format_delivery(&row);
     let attempt = deliver(
         row.channel.clone(),
@@ -1286,7 +1287,9 @@ where
         row.chunk_index,
     )
     .await;
-    Ledger::open(&database_path)?.record_delivery(&row.id, &owner, &attempt, attempted_at_ms)
+    let completed_at_ms = attempted_at_ms
+        .saturating_add(i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX));
+    Ledger::open(&database_path)?.record_delivery(&row.id, &owner, &attempt, completed_at_ms)
 }
 
 async fn run_scheduled(cfg: Config, queued: QueuedRun) -> Result<()> {
@@ -1433,7 +1436,22 @@ pub fn format_job(job: &Job) -> String {
 mod tests {
     use super::*;
     use crate::test_support::{sh_arg, temp_dir, temp_path, FakeCli};
-    use std::sync::Arc;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[cfg(unix)]
     #[test]
@@ -1492,7 +1510,7 @@ mod tests {
         _text: String,
         start_chunk: usize,
     ) -> DeliveryAttempt {
-        DeliveryAttempt::delivered(start_chunk)
+        DeliveryAttempt::delivered(start_chunk.saturating_add(1))
     }
 
     async fn delivery_failed(
@@ -1537,7 +1555,7 @@ mod tests {
         let job = Catalog::load_named(&cfg, "daily-inbox-triage").unwrap();
 
         assert_eq!(job.triggers.len(), 1);
-        assert!(job.triggers[0].enabled);
+        assert!(!job.triggers[0].enabled);
     }
 
     #[test]
@@ -1746,6 +1764,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delivery_retry_backoff_starts_when_slow_attempt_finishes() {
+        let jobs_dir = temp_dir("delivery-backoff-jobs");
+        let workdir = temp_dir("delivery-backoff-work");
+        let database = temp_path("delivery-backoff-db");
+        let run_dir = temp_dir("delivery-backoff-run");
+        write_job(&jobs_dir, "backoff", &scheduled_job(&workdir, true));
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let job = Catalog::load_named(&cfg, "backoff").unwrap();
+        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let id = ledger
+            .enqueue_scheduled(&job, &job.triggers[0], 60_000, 60_000, "telegram", "7")
+            .unwrap();
+        ledger
+            .conn
+            .execute(
+                "UPDATE job_runs SET state = 'skipped_overlap', finished_at_ms = 60000,
+                    delivery_state = 'pending' WHERE id = ?1",
+                [&id],
+            )
+            .unwrap();
+        let row = ledger
+            .claim_due_deliveries(60_000, "slow-worker", 1)
+            .unwrap()
+            .remove(0);
+        drop(ledger);
+
+        run_delivery(
+            cfg.database_path.clone(),
+            "slow-worker".to_string(),
+            row,
+            60_000,
+            |_, _, _, chunk| async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                DeliveryAttempt::failed(chunk, "delivery unavailable")
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let completed_at_ms = ledger
+            .conn
+            .query_row(
+                "SELECT delivery_last_attempt_ms FROM job_runs WHERE id = ?1",
+                [&id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert!(completed_at_ms > 60_000);
+        assert!(ledger
+            .claim_due_deliveries(90_000, "retry-worker", 1)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            ledger
+                .claim_due_deliveries(120_000, "retry-worker", 1)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn slow_delivery_does_not_block_scheduler_ticks() {
         let jobs_dir = temp_dir("slow-delivery-jobs");
         let workdir = temp_dir("slow-delivery-work");
@@ -1814,6 +1895,32 @@ mod tests {
         write_job(&jobs_dir, "runtime", &scheduled_job(&workdir, true));
         scheduler.tick(2_000, delivery_ok).await.unwrap();
         assert!(scheduler.validation_errors.is_empty());
+    }
+
+    #[test]
+    fn runtime_job_validation_logs_errors_on_first_pass() {
+        let jobs_dir = temp_dir("startup-validation-jobs");
+        let database = temp_path("startup-validation-db");
+        let run_dir = temp_dir("startup-validation-run");
+        write_job(&jobs_dir, "broken", "invalid");
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let catalog = Catalog::load(&cfg).unwrap();
+        let mut scheduler = Scheduler::new(cfg, "telegram".into(), "7".into());
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let captured = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || LogWriter(captured.clone()))
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            scheduler.report_catalog_errors(&catalog);
+        });
+
+        let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(logs.contains("job disabled"));
+        assert!(logs.contains("broken"));
     }
 
     #[tokio::test]

@@ -8,7 +8,8 @@ id = "weekday-morning"
 kind = "cron"
 schedule = "0 8 * * 1-5"
 timezone = "Europe/London"
-enabled = true
+# Enable only after configuring the agent's email tools and primary delivery.
+enabled = false
 +++
 
 Using the email tools configured for this agent, review unread messages received
