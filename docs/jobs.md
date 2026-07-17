@@ -9,7 +9,8 @@ The schedule definition lives in the same Markdown file as the job. Push
 evaluates that definition and stores its run and delivery state. For every run:
 
 - `SOUL.md` is supplied automatically as identity and working instructions;
-- files under `context/` are available but are not inserted automatically;
+- files under `context/` are optional shared information and are not inserted
+  automatically; keep task-specific instructions in the job;
 - the job body is the fresh request, without chat history or template expansion;
 - `primary_delivery` in Push configuration selects where scheduled results go.
 
@@ -106,12 +107,11 @@ skipped; repeated local times run once at their first instant.
 
 ## Complete assistant example
 
-The [daily inbox triage example](https://github.com/owainlewis/push/tree/main/examples/assistant)
-shows the three user-owned layers together:
+The [daily inbox triage job](https://github.com/owainlewis/push/blob/main/examples/assistant/jobs/daily-inbox-triage.md)
+keeps global identity separate while making the scheduled runbook self-contained:
 
 ```text
 SOUL.md
-context/inbox-triage.md
 jobs/daily-inbox-triage.md
 ```
 
@@ -121,9 +121,9 @@ Create its external working directory before installing the job:
 mkdir -p ~/.push/workspaces/daily-inbox-triage
 ```
 
-The job reads the relevant context explicitly, uses email tools configured in
-the selected agent, and includes its weekday schedule in the job frontmatter.
-It drafts no replies and performs no external side effects.
+That one job file contains its schedule, triage priorities, output format, and
+safety rules. It uses email tools configured in the selected agent, drafts no
+replies, and performs no external side effects.
 
 ## Execution and delivery guarantees
 
