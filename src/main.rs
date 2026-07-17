@@ -825,13 +825,13 @@ allow_user_ids = [9]
     #[test]
     fn removed_runtime_settings_fail_with_migration_help() {
         let path = temp_path("removed-runtime-setting-config");
-        for key in [
-            "claude_bin",
-            "codex_bin",
-            "pi_bin",
-            "codex_model",
-            "sessions_dir",
-            "reply_marker",
+        for (key, replacement) in [
+            ("claude_bin", "service PATH"),
+            ("codex_bin", "service PATH"),
+            ("pi_bin", "service PATH"),
+            ("codex_model", "configure the model in Codex"),
+            ("sessions_dir", "remove this key"),
+            ("reply_marker", "remove this key"),
         ] {
             std::fs::write(&path, format!("{key} = 'legacy-value'\n")).unwrap();
 
@@ -839,6 +839,7 @@ allow_user_ids = [9]
 
             assert!(error.to_string().contains(key));
             assert!(error.to_string().contains("no longer configurable"));
+            assert!(error.to_string().contains(replacement));
         }
         std::fs::write(
             &path,

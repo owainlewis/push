@@ -161,16 +161,16 @@ impl Config {
                 "telegram_bot_token_env / telegram.bot_token_env is no longer configurable; set TELEGRAM_BOT_TOKEN or remove this key from Push config"
             );
         }
-        for removed in [
-            "claude_bin",
-            "codex_bin",
-            "pi_bin",
-            "codex_model",
-            "sessions_dir",
-            "reply_marker",
+        for (removed, replacement) in [
+            ("claude_bin", "put claude on the service PATH instead"),
+            ("codex_bin", "put codex on the service PATH instead"),
+            ("pi_bin", "put pi on the service PATH instead"),
+            ("codex_model", "configure the model in Codex instead"),
+            ("sessions_dir", "remove this key from Push config"),
+            ("reply_marker", "remove this key from Push config"),
         ] {
             if root.contains_key(removed) {
-                bail!("{removed} is no longer configurable; remove this key from Push config");
+                bail!("{removed} is no longer configurable; {replacement}");
             }
         }
         if root.contains_key("job_permission_profiles") {
