@@ -279,6 +279,19 @@ impl Channel {
         }
     }
 
+    pub fn scheduled_outbound_chunks(&self, text: &str, marker: &str) -> Vec<OutboundChunk> {
+        match self {
+            Self::Telegram(_) => crate::telegram::split_text(text)
+                .into_iter()
+                .map(|text| OutboundChunk {
+                    text,
+                    rich_markdown: false,
+                })
+                .collect(),
+            Self::IMessage { .. } => self.outbound_chunks(text, marker),
+        }
+    }
+
     #[cfg_attr(test, allow(dead_code))]
     pub async fn send_chunk(&self, target: &str, chunk: &OutboundChunk) -> Result<()> {
         match self {
@@ -427,6 +440,23 @@ mod tests {
         assert!(long
             .iter()
             .all(|chunk| { chunk.text.encode_utf16().count() <= crate::telegram::TEXT_LIMIT }));
+    }
+
+    #[test]
+    fn scheduled_telegram_output_uses_persistable_plain_chunk_boundaries() {
+        let text = "x".repeat(crate::telegram::TEXT_LIMIT + 1);
+
+        let chunks = telegram().scheduled_outbound_chunks(&text, "ignored");
+
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks.iter().all(|chunk| !chunk.rich_markdown));
+        assert_eq!(
+            chunks
+                .into_iter()
+                .map(|chunk| chunk.text)
+                .collect::<String>(),
+            text
+        );
     }
 
     #[test]
