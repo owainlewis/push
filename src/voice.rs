@@ -16,7 +16,7 @@ use crate::config::Config;
 pub const OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
 pub const TRANSCRIPTION_MODEL: &str = "gpt-4o-transcribe";
 pub const SPEECH_MODEL: &str = "gpt-4o-mini-tts";
-pub const SPEECH_VOICE: &str = "marin";
+pub const SPEECH_VOICE: &str = "cedar";
 pub const MAX_AUDIO_BYTES: usize = 20 * 1024 * 1024;
 const MAX_SPEECH_CHARS: usize = 4096;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
@@ -193,7 +193,7 @@ impl VoiceProvider for OpenAiVoice {
                     "model": SPEECH_MODEL,
                     "voice": SPEECH_VOICE,
                     "input": text,
-                    "instructions": "Speak naturally, clearly, and concisely.",
+                    "instructions": "Speak in a natural, clear, concise male voice.",
                     "response_format": "opus"
                 }))
                 .send()
@@ -370,6 +370,7 @@ mod tests {
     fn defaults_use_current_openai_audio_models() {
         assert_eq!(TRANSCRIPTION_MODEL, "gpt-4o-transcribe");
         assert_eq!(SPEECH_MODEL, "gpt-4o-mini-tts");
+        assert_eq!(SPEECH_VOICE, "cedar");
     }
 
     #[tokio::test]
@@ -416,6 +417,10 @@ mod tests {
         assert_eq!(output.bytes, vec![9, 8, 7]);
         assert_eq!(payload["model"], SPEECH_MODEL);
         assert_eq!(payload["voice"], SPEECH_VOICE);
+        assert_eq!(
+            payload["instructions"],
+            "Speak in a natural, clear, concise male voice."
+        );
         assert_eq!(payload["response_format"], "opus");
         assert_eq!(payload["input"], "hello");
     }
