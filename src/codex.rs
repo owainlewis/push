@@ -15,7 +15,6 @@ use crate::agent::{Request, RunError, RunOutput};
 /// Runner invokes `codex exec` in non-interactive mode.
 pub struct Runner {
     pub bin: String,
-    pub model: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -117,9 +116,6 @@ impl Runner {
                 .arg(req.work_dir)
                 .arg("-o")
                 .arg(out_path);
-            if let Some(model) = self.model.as_deref() {
-                cmd.arg("-m").arg(model);
-            }
             cmd.arg(req.prompt);
         } else {
             cmd.arg("exec");
@@ -128,9 +124,6 @@ impl Runner {
                 .arg("--skip-git-repo-check")
                 .arg("-o")
                 .arg(out_path);
-            if let Some(model) = self.model.as_deref() {
-                cmd.arg("-m").arg(model);
-            }
             cmd.arg(req.session_id).arg(req.prompt);
         }
         cmd.current_dir(req.work_dir);
@@ -385,7 +378,7 @@ sleep 2
     }
 
     fn runner(bin: String) -> Runner {
-        Runner { bin, model: None }
+        Runner { bin }
     }
 
     fn request(work_dir: &str) -> Request<'_> {

@@ -354,7 +354,7 @@ impl Gateway {
             runners,
             channel: channel.clone(),
             run_timeout: cfg.run_timeout_dur()?,
-            reply_marker: cfg.reply_marker.clone(),
+            reply_marker: crate::channel::REPLY_MARKER.to_string(),
             assistant_dir: cfg.assistant_dir.clone(),
             audit,
             #[cfg(not(test))]

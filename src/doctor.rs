@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 
 use crate::{channel::Channel, config, drafts, history, jobs};
+use config::TELEGRAM_BOT_TOKEN_ENV;
 
 /// Fails fast with actionable messages when the environment is not ready.
 pub fn preflight(cfg: &config::Config) -> Result<()> {
@@ -314,14 +315,14 @@ fn check_telegram_config(cfg: &config::Config, checks: &mut Vec<Check>) {
     if cfg.telegram_token().is_some() {
         checks.push(Check::pass(
             "Telegram bot token",
-            format!("loaded from config or {}", cfg.telegram_bot_token_env),
+            format!("loaded from config or {TELEGRAM_BOT_TOKEN_ENV}"),
         ));
     } else {
         checks.push(Check::fail(
             "Telegram bot token",
             format!(
                 "not configured. Set {} or telegram.bot_token without printing the token.",
-                cfg.telegram_bot_token_env
+                TELEGRAM_BOT_TOKEN_ENV
             ),
         ));
     }
@@ -596,11 +597,11 @@ claude_tools = []
         let mut checks = Vec::new();
 
         check_bins_with(&cfg, &mut checks, |bin| {
-            (bin == "/fake/codex").then(|| PathBuf::from(bin))
+            (bin == "codex").then(|| PathBuf::from(bin))
         });
 
         assert!(checks.iter().any(|check| {
-            check.name == "binary /fake/codex" && matches!(check.status, CheckStatus::Pass)
+            check.name == "binary codex" && matches!(check.status, CheckStatus::Pass)
         }));
         assert!(checks.iter().any(|check| {
             check.name == "binary osascript" && matches!(check.status, CheckStatus::Fail)
@@ -611,7 +612,7 @@ claude_tools = []
     fn binary_checks_use_configured_pi_binary_when_pi_is_active() {
         let mut cfg = test_config();
         cfg.agent = "pi".to_string();
-        cfg.pi_bin = "/custom/pi".to_string();
+        cfg.agent_commands.pi = "/custom/pi".to_string();
         let mut checks = Vec::new();
 
         check_bins_with(&cfg, &mut checks, |bin| {
@@ -632,7 +633,7 @@ claude_tools = []
         let jobs_dir = temp_dir("doctor-pi-job");
         let workdir = temp_dir("doctor-pi-job-work");
         cfg.jobs_dir = jobs_dir.to_string_lossy().to_string();
-        cfg.pi_bin = "/custom/pi".to_string();
+        cfg.agent_commands.pi = "/custom/pi".to_string();
         std::fs::write(
             jobs_dir.join("pi-job.md"),
             format!(
@@ -644,7 +645,7 @@ claude_tools = []
         let mut checks = Vec::new();
 
         check_bins_with(&cfg, &mut checks, |bin| {
-            (bin == "/fake/codex" || bin == "osascript").then(|| PathBuf::from(bin))
+            (bin == "codex" || bin == "osascript").then(|| PathBuf::from(bin))
         });
 
         assert!(checks.iter().any(|check| {
@@ -667,11 +668,11 @@ claude_tools = []
         let mut checks = Vec::new();
 
         check_bins_with(&cfg, &mut checks, |bin| {
-            (bin == "/fake/codex").then(|| PathBuf::from(bin))
+            (bin == "codex").then(|| PathBuf::from(bin))
         });
 
         assert!(checks.iter().any(|check| {
-            check.name == "binary /fake/codex" && matches!(check.status, CheckStatus::Pass)
+            check.name == "binary codex" && matches!(check.status, CheckStatus::Pass)
         }));
         assert!(!checks
             .iter()

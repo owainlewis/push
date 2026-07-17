@@ -16,7 +16,7 @@ fn job_cli_validates_lists_shows_runs_and_reads_history() {
     let run = root.join("run");
     let database = root.join("push.db");
     let config = root.join("config.toml");
-    let codex = root.join("fake-codex");
+    let codex = root.join("bin/codex");
     std::fs::create_dir_all(&jobs).unwrap();
     std::fs::create_dir_all(&work).unwrap();
     write_executable(
@@ -32,7 +32,7 @@ printf '%s\n' 'cli result' > "$out"
 printf '%s\n' '{"type":"thread.started","thread_id":"cli-thread"}'
 "#,
     );
-    write_job_and_config(&jobs, &work, &run, &database, &config, &codex);
+    write_job_and_config(&jobs, &work, &run, &database, &config);
     let binary = env!("CARGO_BIN_EXE_push");
 
     let validate = run_cli(binary, &config, &["job", "validate"]);
@@ -89,11 +89,11 @@ fn concurrent_first_runs_on_a_fresh_database_skip_without_sqlite_errors() {
     let run = root.join("run");
     let database = root.join("push.db");
     let config = root.join("config.toml");
-    let codex = root.join("fake-codex");
+    let codex = root.join("bin/codex");
     std::fs::create_dir_all(&jobs).unwrap();
     std::fs::create_dir_all(&work).unwrap();
     write_executable(&codex, "#!/bin/sh\nsleep 30\n");
-    write_job_and_config(&jobs, &work, &run, &database, &config, &codex);
+    write_job_and_config(&jobs, &work, &run, &database, &config);
 
     let binary = env!("CARGO_BIN_EXE_push");
     let mut first = spawn_run(binary, &config);
@@ -124,14 +124,14 @@ fn live_cli_is_not_reclaimed_and_crashed_cli_is_recovered() {
     let run = root.join("run");
     let database = root.join("push.db");
     let config = root.join("config.toml");
-    let codex = root.join("fake-codex");
+    let codex = root.join("bin/codex");
     std::fs::create_dir_all(&jobs).unwrap();
     std::fs::create_dir_all(&work).unwrap();
     write_executable(&codex, "#!/bin/sh\nsleep 30\n");
-    write_job_and_config(&jobs, &work, &run, &database, &config, &codex);
+    write_job_and_config(&jobs, &work, &run, &database, &config);
 
     let binary = env!("CARGO_BIN_EXE_push");
-    let mut live = Command::new(binary)
+    let mut live = push_command(binary, &config)
         .args(["job", "run", "crash-test", "--config"])
         .arg(&config)
         .stdout(Stdio::null())
@@ -140,7 +140,7 @@ fn live_cli_is_not_reclaimed_and_crashed_cli_is_recovered() {
         .unwrap();
     wait_for_state(&database, "running");
 
-    let overlap = Command::new(binary)
+    let overlap = push_command(binary, &config)
         .args(["job", "run", "crash-test", "--config"])
         .arg(&config)
         .output()
@@ -165,7 +165,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"fresh-thread"}'
 "#,
     );
 
-    let recovered = Command::new(binary)
+    let recovered = push_command(binary, &config)
         .args(["job", "run", "crash-test", "--config"])
         .arg(&config)
         .output()
@@ -185,7 +185,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"fresh-thread"}'
 }
 
 fn spawn_run(binary: &str, config: &Path) -> std::process::Child {
-    Command::new(binary)
+    push_command(binary, config)
         .args(["job", "run", "crash-test", "--config"])
         .arg(config)
         .stdout(Stdio::null())
@@ -215,7 +215,7 @@ fn wait_for_one_exit(
 }
 
 fn run_cli(binary: &str, config: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(binary)
+    push_command(binary, config)
         .args(args)
         .arg("--config")
         .arg(config)
@@ -227,14 +227,17 @@ fn stdout(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
-fn write_job_and_config(
-    jobs: &Path,
-    work: &Path,
-    run: &Path,
-    database: &Path,
-    config: &Path,
-    codex: &Path,
-) {
+fn push_command(binary: &str, config: &Path) -> Command {
+    let mut paths = vec![config.parent().unwrap().join("bin")];
+    if let Some(inherited) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&inherited));
+    }
+    let mut command = Command::new(binary);
+    command.env("PATH", std::env::join_paths(paths).unwrap());
+    command
+}
+
+fn write_job_and_config(jobs: &Path, work: &Path, run: &Path, database: &Path, config: &Path) {
     std::fs::write(
         jobs.join("crash-test.md"),
         format!(
@@ -246,11 +249,10 @@ fn write_job_and_config(
     std::fs::write(
         config,
         format!(
-            "channel = \"telegram\"\nagent = \"codex\"\ntelegram_bot_token = \"test\"\ntelegram_allow_user_ids = [1]\ndatabase_path = {:?}\nassistant_root = {:?}\njobs_run_dir = {:?}\ncodex_bin = {:?}\n",
+            "channel = \"telegram\"\nagent = \"codex\"\ntelegram_bot_token = \"test\"\ntelegram_allow_user_ids = [1]\ndatabase_path = {:?}\nassistant_root = {:?}\njobs_run_dir = {:?}\n",
             database.to_string_lossy(),
             jobs.parent().unwrap().to_string_lossy(),
             run.to_string_lossy(),
-            codex.to_string_lossy(),
         ),
     )
     .unwrap();
@@ -318,6 +320,7 @@ fn count_state(database: &Path, state: &str) -> i64 {
 }
 
 fn write_executable(path: &PathBuf, content: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let temporary = path.with_extension("tmp");
     std::fs::write(&temporary, content).unwrap();
     std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o700)).unwrap();

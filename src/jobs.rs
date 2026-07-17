@@ -1975,7 +1975,7 @@ printf '%s\n' '{{"type":"thread.started","thread_id":"scheduled"}}'
         let cli = FakeCli::new("codex", &script);
         write_job(&jobs_dir, "scheduled", &scheduled_job(&workdir, true));
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
-        cfg.codex_bin = cli.bin();
+        cfg.agent_commands.codex = cli.bin();
         let mut scheduler = Scheduler::new(cfg.clone(), "telegram".into(), "7".into());
         let start = Utc
             .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
@@ -2061,7 +2061,7 @@ printf '%s\n' '{{"type":"thread.started","thread_id":"restart"}}'
         let cli = FakeCli::new("codex", &script);
         write_job(&jobs_dir, "restart", &scheduled_job(&workdir, true));
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
-        cfg.codex_bin = cli.bin();
+        cfg.agent_commands.codex = cli.bin();
         let job = Catalog::load_named(&cfg, "restart").unwrap();
         let mut ledger = Ledger::open(&cfg.database_path).unwrap();
         let first_id = ledger
@@ -2116,7 +2116,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"delivery-only"}'
         let cli = FakeCli::new("codex", script);
         write_job(&jobs_dir, "delivery-only", &scheduled_job(&workdir, true));
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
-        cfg.codex_bin = cli.bin();
+        cfg.agent_commands.codex = cli.bin();
         let job = Catalog::load_named(&cfg, "delivery-only").unwrap();
         Ledger::open(&cfg.database_path)
             .unwrap()
@@ -2163,7 +2163,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"delivery-only"}'
             &scheduled_job(&workdir, true).replace("timeout = \"5s\"", "timeout = \"10ms\""),
         );
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
-        cfg.codex_bin = slow.bin();
+        cfg.agent_commands.codex = slow.bin();
         let job = Catalog::load_named(&cfg, "timeout").unwrap();
         Ledger::open(&cfg.database_path)
             .unwrap()
@@ -2195,7 +2195,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"delivery-only"}'
         let failed = FakeCli::new("codex", "#!/bin/sh\nprintf '%s\n' boom >&2\nexit 1\n");
         write_job(&jobs_dir, "failure", &scheduled_job(&workdir, true));
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
-        cfg.codex_bin = failed.bin();
+        cfg.agent_commands.codex = failed.bin();
         let job = Catalog::load_named(&cfg, "failure").unwrap();
         Ledger::open(&cfg.database_path)
             .unwrap()
@@ -2241,7 +2241,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"limited"}'
         write_job(&jobs_dir, "first", &scheduled_job(&workdir, true));
         write_job(&jobs_dir, "second", &scheduled_job(&workdir, true));
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
-        cfg.codex_bin = cli.bin();
+        cfg.agent_commands.codex = cli.bin();
         cfg.jobs_max_workers = 1;
         let catalog = Catalog::load(&cfg).unwrap();
         let mut ledger = Ledger::open(&cfg.database_path).unwrap();
@@ -2346,7 +2346,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"after-crash"}'
         let cli = FakeCli::new("codex", script);
         write_job(&jobs_dir, "cli-live", &scheduled_job(&workdir, true));
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
-        cfg.codex_bin = cli.bin();
+        cfg.agent_commands.codex = cli.bin();
         let start = 1_800_000_000_000i64;
         let mut before_restart = Scheduler::new(cfg.clone(), "telegram".into(), "7".into());
         before_restart.tick(start, delivery_ok).await.unwrap();
@@ -2600,7 +2600,7 @@ printf '%s\n' '{{"type":"thread.started","thread_id":"fresh-thread"}}'
         let cli = FakeCli::new("codex", &script);
         write_job(&jobs_dir, "execute", &valid_job(&workdir));
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
-        cfg.codex_bin = cli.bin();
+        cfg.agent_commands.codex = cli.bin();
 
         let first = run_manual(&cfg, Catalog::load_named(&cfg, "execute").unwrap())
             .await
@@ -2638,7 +2638,7 @@ printf '%s\n' '{{"type":"thread.started","thread_id":"fresh-thread"}}'
             &valid_job(&workdir).replace("timeout = \"5s\"", "timeout = \"10ms\""),
         );
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
-        cfg.codex_bin = slow.bin();
+        cfg.agent_commands.codex = slow.bin();
         let job = Catalog::load_named(&cfg, "timeout").unwrap();
 
         assert!(run_manual(&cfg, job).await.is_err());
@@ -2664,7 +2664,7 @@ printf '%s\n' ok > {}
             sh_arg(&args_path)
         );
         let success = FakeCli::new("codex", &script);
-        cfg.codex_bin = success.bin();
+        cfg.agent_commands.codex = success.bin();
         write_job(&jobs_dir, "timeout", &valid_job(&workdir));
         let output = run_manual(&cfg, Catalog::load_named(&cfg, "timeout").unwrap())
             .await
@@ -2693,7 +2693,7 @@ printf '%s\n' ok > {}
         let runbook = valid_job(&workdir).replace("backend = \"codex\"", "backend = \"claude\"");
         write_job(&jobs_dir, "claude-job", &runbook);
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
-        cfg.claude_bin = cli.bin();
+        cfg.agent_commands.claude = cli.bin();
 
         let output = run_manual(&cfg, Catalog::load_named(&cfg, "claude-job").unwrap())
             .await
@@ -2722,7 +2722,7 @@ printf '%s\n' ok > {}
         let runbook = valid_job(&workdir).replace("backend = \"codex\"", "backend = \"pi\"");
         write_job(&jobs_dir, "pi-job", &runbook);
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
-        cfg.pi_bin = cli.bin();
+        cfg.agent_commands.pi = cli.bin();
 
         let output = run_manual(&cfg, Catalog::load_named(&cfg, "pi-job").unwrap())
             .await
