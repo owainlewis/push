@@ -13,7 +13,8 @@ and schedule work with plain Markdown runbooks.
 It can review repositories before you wake up, watch pull requests, prepare a
 daily brief, or pick up a conversation from your phone. You own one portable,
 Git-versioned assistant repository containing identity, context, and jobs. Push
-owns channels, schedules, history, approvals, security, and result delivery.
+owns channels, schedule evaluation, history, approvals, security, and result
+delivery. Each job file owns its schedule definition.
 Your coding agent owns the intelligence and tools.
 
 [Read the documentation](https://owainlewis.github.io/push/) ·

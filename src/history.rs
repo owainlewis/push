@@ -13,7 +13,7 @@ use crate::approval::{
     NormalizedAnswer, Question,
 };
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 const MAX_HISTORY_READ_BYTES: usize = 8 * 1024;
 const READ_TRUNCATED: &str = "\n[truncated by push while reading history]";
 
@@ -918,6 +918,14 @@ fn migrate(conn: &Connection) -> Result<()> {
              PRAGMA user_version = 5;",
         )?;
     }
+    if version <= 5 {
+        conn.execute_batch(
+            "ALTER TABLE job_runs ADD COLUMN delivery_claim_owner TEXT;
+             ALTER TABLE job_runs ADD COLUMN delivery_claimed_at_ms INTEGER;
+             ALTER TABLE job_runs ADD COLUMN delivery_chunk_index INTEGER NOT NULL DEFAULT 0;
+             PRAGMA user_version = 6;",
+        )?;
+    }
     conn.execute_batch("COMMIT;")?;
     Ok(())
 }
@@ -1089,12 +1097,14 @@ mod tests {
             .conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('job_runs')
-                 WHERE name IN ('delivery_channel', 'delivery_target')",
+                 WHERE name IN ('delivery_channel', 'delivery_target',
+                    'delivery_claim_owner', 'delivery_claimed_at_ms',
+                    'delivery_chunk_index')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(delivery_columns, 2);
+        assert_eq!(delivery_columns, 5);
         let _ = std::fs::remove_file(path);
     }
 

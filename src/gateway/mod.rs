@@ -242,20 +242,27 @@ async fn run_scheduler(
             }
             _ = ticker.tick() => {
                 let contexts = contexts.clone();
-                if let Err(error) = scheduler.tick(now_ms(), move |channel, target, text| {
+                if let Err(error) = scheduler.tick(now_ms(), move |channel, target, text, start_chunk| {
                     let contexts = contexts.clone();
                     async move {
-                        let ctx = contexts.get(&channel).with_context(|| {
-                            format!("persisted delivery channel {channel:?} is not enabled")
-                        })?;
-                        let target = ctx.channel.primary_target(&target).context(
-                            "persisted delivery target is no longer allowlisted",
-                        )?;
-                        if reply_to(ctx, &target, &text).await {
-                            Ok(())
-                        } else {
-                            anyhow::bail!("delivery to {channel} target {target:?} failed")
-                        }
+                        let Some(ctx) = contexts.get(&channel) else {
+                            return jobs::DeliveryAttempt::failed(
+                                start_chunk,
+                                format!("persisted delivery channel {channel:?} is not enabled"),
+                            );
+                        };
+                        let target = match ctx.channel.primary_target(&target) {
+                            Ok(target) => target,
+                            Err(error) => {
+                                return jobs::DeliveryAttempt::failed(
+                                    start_chunk,
+                                    format!(
+                                        "persisted delivery target is no longer allowlisted: {error}"
+                                    ),
+                                )
+                            }
+                        };
+                        scheduled_reply_to(ctx, &target, &text, start_chunk).await
                     }
                 }).await {
                     error!("job scheduler tick failed: {error:#}");
@@ -808,6 +815,54 @@ async fn reply_to(ctx: &Ctx, target: &str, text: &str) -> bool {
             }
         }
         true
+    }
+}
+
+async fn scheduled_reply_to(
+    ctx: &Ctx,
+    target: &str,
+    text: &str,
+    start_chunk: usize,
+) -> jobs::DeliveryAttempt {
+    let chunks = ctx
+        .channel
+        .scheduled_outbound_chunks(text, &ctx.reply_marker);
+    if start_chunk >= chunks.len() {
+        return jobs::DeliveryAttempt::delivered(chunks.len());
+    }
+    #[cfg(test)]
+    {
+        let chunk_count = chunks.len();
+        let mut failures = ctx.send_failures_remaining.lock().unwrap();
+        if *failures > 0 {
+            *failures -= 1;
+            return jobs::DeliveryAttempt::failed(start_chunk, "scheduled send failed");
+        }
+        drop(failures);
+        ctx.sent_replies.lock().unwrap().extend(
+            chunks
+                .into_iter()
+                .skip(start_chunk)
+                .map(|chunk| (target.to_string(), chunk.text)),
+        );
+        jobs::DeliveryAttempt::delivered(chunk_count)
+    }
+    #[cfg(not(test))]
+    {
+        for (index, chunk) in chunks.iter().enumerate().skip(start_chunk) {
+            match tokio::time::timeout(SEND_TIMEOUT, ctx.channel.send_chunk(target, chunk)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::error!("scheduled send error to {target}: {error}");
+                    return jobs::DeliveryAttempt::failed(index, error.to_string());
+                }
+                Err(_) => {
+                    tracing::error!("scheduled send to {target} timed out");
+                    return jobs::DeliveryAttempt::failed(index, "send timed out");
+                }
+            }
+        }
+        jobs::DeliveryAttempt::delivered(chunks.len())
     }
 }
 
