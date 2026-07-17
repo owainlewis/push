@@ -55,6 +55,7 @@ fn init_without_path_creates_assistant_in_current_directory() {
     let assistant = workdir.join("assistant");
     assert!(assistant.join("SOUL.md").is_file());
     assert!(assistant.join("context/README.md").is_file());
+    assert!(assistant.join("evals").is_dir());
     assert!(assistant.join("jobs").is_dir());
     assert!(assistant.join(".git").exists());
     let config_path = home.join(".push/config.toml");

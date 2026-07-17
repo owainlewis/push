@@ -68,6 +68,8 @@ Markdown instruction body. Version 1 supports these fields:
 - `workdir`: required fixed directory, expanded and canonicalised at validation.
 - `backend`: optional `claude`, `codex`, or `pi` override; otherwise use the configured
   jobs default.
+- `evals`: optional list of reusable Markdown agent eval names loaded from the
+  assistant repository's `evals/` directory.
 - `triggers`: optional list of separately identified trigger definitions.
 
 Unknown fields are errors. The Markdown body is sent as the current request
@@ -161,6 +163,16 @@ not saved for reuse. The working
 directory is stable across runs, so filesystem state may persist even though
 conversation state does not.
 
+After successful execution, a job with assigned evals starts one additional
+fresh session on the same backend in the same work directory. Push supplies the
+original job, final response, and all assigned eval Markdown, then requires the
+evaluator to end with `VERDICT: PASS` or `VERDICT: FAIL`. Evaluation state and
+details are stored separately from execution and delivery. Evaluation never
+reruns or rewrites completed work. Evaluator invocations restrict each backend
+to no tools and disable MCP servers, extensions, browser integrations, and
+session persistence. The first version evaluates the returned response without
+inspecting work-directory artifacts.
+
 Before backend execution, both manual and scheduled starts attempt a
 non-blocking OS advisory lock for the job under `~/.push/run/locks/`. The
 winning process holds that lock until its run finishes. It then uses one SQLite
@@ -196,6 +208,7 @@ logical fields are:
 - backend, timeout, canonical work directory, and resolved
   notification destination when applicable;
 - lifecycle state and a bounded result or error reference;
+- evaluation state and a bounded verdict or error;
 - delivery state, attempt count, last attempt time, and delivery error.
 - delivery claim owner, claim time, and the first unsent message chunk.
 
