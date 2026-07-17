@@ -10,6 +10,11 @@ use serde::Deserialize;
 use crate::util::expand_home;
 
 pub const TELEGRAM_BOT_TOKEN_ENV: &str = "TELEGRAM_BOT_TOKEN";
+pub const DEFAULT_VOICE_NAME: &str = "cedar";
+const SUPPORTED_VOICE_NAMES: &[&str] = &[
+    "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse",
+    "marin", "cedar",
+];
 
 #[cfg(test)]
 #[derive(Debug, Clone)]
@@ -56,6 +61,8 @@ pub struct Config {
     pub telegram_allow_chat_ids: Vec<i64>,
     #[serde(default)]
     pub voice_openai_api_key: Option<String>,
+    #[serde(default = "default_voice_name")]
+    pub voice_name: String,
     #[serde(default = "default_agent")]
     pub agent: String,
     #[serde(default)]
@@ -204,7 +211,14 @@ impl Config {
                 ("allow_chat_ids", "telegram_allow_chat_ids"),
             ],
         )?;
-        flatten_provider_section(root, "voice", &[("openai_api_key", "voice_openai_api_key")])?;
+        flatten_provider_section(
+            root,
+            "voice",
+            &[
+                ("openai_api_key", "voice_openai_api_key"),
+                ("name", "voice_name"),
+            ],
+        )?;
         let mut c: Config = value.try_into().context("parse TOML config")?;
         let config_path = std::fs::canonicalize(&expanded_path)
             .with_context(|| format!("resolve config {expanded_path}"))?;
@@ -447,6 +461,13 @@ impl Config {
             .is_some_and(|value| value.trim().is_empty())
         {
             bail!("voice.openai_api_key cannot be empty");
+        }
+        if !SUPPORTED_VOICE_NAMES.contains(&self.voice_name.as_str()) {
+            bail!(
+                "invalid voice.name {:?}; expected one of: {}",
+                self.voice_name,
+                SUPPORTED_VOICE_NAMES.join(", ")
+            );
         }
         for channel in self.enabled_channel_kinds()? {
             match channel {
@@ -796,6 +817,9 @@ fn default_run_timeout() -> String {
 fn default_agent() -> String {
     "claude".to_string()
 }
+fn default_voice_name() -> String {
+    DEFAULT_VOICE_NAME.to_string()
+}
 fn default_jobs_dir() -> String {
     "~/.push/jobs".to_string()
 }
@@ -844,6 +868,7 @@ mod tests {
             telegram_allow_user_ids: Vec::new(),
             telegram_allow_chat_ids: Vec::new(),
             voice_openai_api_key: None,
+            voice_name: DEFAULT_VOICE_NAME.to_string(),
             agent: "codex".to_string(),
             routes: Vec::new(),
             assistant_root: root.to_string_lossy().to_string(),

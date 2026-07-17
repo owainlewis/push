@@ -16,7 +16,6 @@ use crate::config::Config;
 pub const OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
 pub const TRANSCRIPTION_MODEL: &str = "gpt-4o-transcribe";
 pub const SPEECH_MODEL: &str = "gpt-4o-mini-tts";
-pub const SPEECH_VOICE: &str = "cedar";
 pub const MAX_AUDIO_BYTES: usize = 20 * 1024 * 1024;
 const MAX_SPEECH_CHARS: usize = 4096;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
@@ -52,13 +51,18 @@ impl Voice {
         Self::from_sources(
             environment.as_deref(),
             config.voice_openai_api_key.as_deref(),
+            &config.voice_name,
         )
     }
 
-    fn from_sources(environment: Option<&str>, configured: Option<&str>) -> Option<Self> {
+    fn from_sources(
+        environment: Option<&str>,
+        configured: Option<&str>,
+        voice_name: &str,
+    ) -> Option<Self> {
         let (key, _) = resolve_openai_api_key(environment, configured)?;
         Some(Self {
-            provider: Arc::new(OpenAiVoice::new(key.to_string())),
+            provider: Arc::new(OpenAiVoice::new(key.to_string(), voice_name.to_string())),
         })
     }
 
@@ -127,23 +131,26 @@ fn resolve_openai_api_key<'a>(
 
 struct OpenAiVoice {
     api_key: String,
+    voice_name: String,
     client: reqwest::Client,
     base_url: String,
 }
 
 impl OpenAiVoice {
-    fn new(api_key: String) -> Self {
+    fn new(api_key: String, voice_name: String) -> Self {
         Self {
             api_key,
+            voice_name,
             client: reqwest::Client::new(),
             base_url: "https://api.openai.com/v1".to_string(),
         }
     }
 
     #[cfg(test)]
-    fn with_base_url(api_key: String, base_url: String) -> Self {
+    fn with_base_url(api_key: String, base_url: String, voice_name: String) -> Self {
         Self {
             api_key,
+            voice_name,
             client: reqwest::Client::new(),
             base_url,
         }
@@ -191,7 +198,7 @@ impl VoiceProvider for OpenAiVoice {
                 .timeout(REQUEST_TIMEOUT)
                 .json(&json!({
                     "model": SPEECH_MODEL,
-                    "voice": SPEECH_VOICE,
+                    "voice": self.voice_name,
                     "input": text,
                     "instructions": "Speak in a natural, clear, concise male voice.",
                     "response_format": "opus"
@@ -260,8 +267,8 @@ mod tests {
             Some(("config-key", VoiceCredentialSource::Config))
         );
         assert_eq!(resolve_openai_api_key(Some(""), Some(" ")), None);
-        assert!(Voice::from_sources(None, Some("config-key")).is_some());
-        assert!(Voice::from_sources(None, None).is_none());
+        assert!(Voice::from_sources(None, Some("config-key"), "cedar").is_some());
+        assert!(Voice::from_sources(None, None, "cedar").is_none());
     }
 
     impl VoiceProvider for FakeProvider {
@@ -370,7 +377,6 @@ mod tests {
     fn defaults_use_current_openai_audio_models() {
         assert_eq!(TRANSCRIPTION_MODEL, "gpt-4o-transcribe");
         assert_eq!(SPEECH_MODEL, "gpt-4o-mini-tts");
-        assert_eq!(SPEECH_VOICE, "cedar");
     }
 
     #[tokio::test]
@@ -380,7 +386,8 @@ mod tests {
             "application/json",
             br#"{"text":"contract transcript"}"#.to_vec(),
         );
-        let provider = OpenAiVoice::with_base_url("test-key".to_string(), base_url);
+        let provider =
+            OpenAiVoice::with_base_url("test-key".to_string(), base_url, "cedar".to_string());
 
         let transcript = provider
             .transcribe(clip(b"audio-bytes".to_vec()))
@@ -403,7 +410,8 @@ mod tests {
     #[tokio::test]
     async fn openai_speech_http_contract_requests_opus_and_returns_audio() {
         let (base_url, request) = serve_once("200 OK", "application/octet-stream", vec![9, 8, 7]);
-        let provider = OpenAiVoice::with_base_url("test-key".to_string(), base_url);
+        let provider =
+            OpenAiVoice::with_base_url("test-key".to_string(), base_url, "onyx".to_string());
 
         let output = provider.synthesize("hello").await.unwrap();
         let request = request.join().unwrap();
@@ -416,7 +424,7 @@ mod tests {
 
         assert_eq!(output.bytes, vec![9, 8, 7]);
         assert_eq!(payload["model"], SPEECH_MODEL);
-        assert_eq!(payload["voice"], SPEECH_VOICE);
+        assert_eq!(payload["voice"], "onyx");
         assert_eq!(
             payload["instructions"],
             "Speak in a natural, clear, concise male voice."
@@ -432,7 +440,8 @@ mod tests {
             "application/json",
             br#"{"error":"secret upstream detail"}"#.to_vec(),
         );
-        let provider = OpenAiVoice::with_base_url("bad-key".to_string(), base_url);
+        let provider =
+            OpenAiVoice::with_base_url("bad-key".to_string(), base_url, "cedar".to_string());
 
         let error = provider
             .transcribe(clip(b"audio".to_vec()))
