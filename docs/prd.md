@@ -150,19 +150,12 @@ user prompt.
 | `imessage.self_handles` | User's own iMessage handles. |
 | `imessage.allow_from` | Other allowed senders. |
 | `telegram.bot_token` | Telegram bot token stored in the private config. |
-| `telegram.bot_token_env` | Environment variable containing the bot token. |
 | `telegram.allow_user_ids` | Allowed private-chat sender IDs. |
 | `telegram.allow_chat_ids` | Allowed private chat IDs. |
-| `claude_bin` | Claude Code binary. |
-| `codex_bin` | Codex binary. |
-| `codex_model` | Optional Codex model override. |
-| `pi_bin` | Pi coding agent binary. |
-| `sessions_dir` | Legacy compatibility setting. |
 | `state_path` | JSON state path. |
 | `audit_log_path` | Local JSONL audit log path. |
 | `audit_log_content` | Whether audit events include message and reply text. |
 | `database_path` | Canonical SQLite history path; defaults to `~/.push/push.db`. |
-| `reply_marker` | Footer used to skip Push's own replies. |
 
 ## Control Commands
 

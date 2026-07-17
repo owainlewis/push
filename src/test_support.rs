@@ -52,7 +52,6 @@ pub fn test_config() -> crate::config::Config {
         self_handles: vec!["me@icloud.com".to_string()],
         allow_from: Vec::new(),
         telegram_bot_token: None,
-        telegram_bot_token_env: "TELEGRAM_BOT_TOKEN".to_string(),
         telegram_allow_user_ids: Vec::new(),
         telegram_allow_chat_ids: Vec::new(),
         voice_openai_api_key: None,
@@ -65,18 +64,13 @@ pub fn test_config() -> crate::config::Config {
         jobs_max_timeout: "30m".to_string(),
         jobs_run_dir: "/fake/run".to_string(),
         jobs_max_workers: 2,
-        claude_bin: "/fake/claude".to_string(),
-        codex_bin: "/fake/codex".to_string(),
-        codex_model: None,
-        pi_bin: "/fake/pi".to_string(),
-        sessions_dir: "/fake/sessions".to_string(),
         state_path: "/fake/state.json".to_string(),
         audit_log_path: "/fake/audit.jsonl".to_string(),
         database_path: "/fake/push.db".to_string(),
         audit_log_content: false,
         config_path: String::new(),
+        agent_commands: crate::config::AgentCommands::default(),
         assistant_dir: "/fake/assistant".to_string(),
-        reply_marker: "\n\n-- sent by push".to_string(),
     }
 }
 

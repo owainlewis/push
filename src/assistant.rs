@@ -175,7 +175,6 @@ fn validate_config_secrets(config_path: &Path, target: &Path, config: &toml::Tab
 fn validate_runtime_boundary(config: Option<&toml::Table>, target: &Path) -> Result<()> {
     let assistant = resolve_existing_or_lexical(target)?;
     for (key, default) in [
-        ("sessions_dir", "~/.push/sessions"),
         ("drafts_dir", "~/.push/drafts"),
         ("jobs_run_dir", "~/.push/run"),
     ] {
@@ -706,13 +705,13 @@ mod tests {
         let config = parent.join("push.toml");
         fs::write(
             &config,
-            format!("sessions_dir = {:?}\n", target.join("sessions")),
+            format!("drafts_dir = {:?}\n", target.join("drafts")),
         )
         .unwrap();
 
         let error = init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap_err();
 
-        assert!(error.to_string().contains("sessions_dir must stay outside"));
+        assert!(error.to_string().contains("drafts_dir must stay outside"));
         assert!(!target.exists());
         let _ = fs::remove_dir_all(parent);
     }

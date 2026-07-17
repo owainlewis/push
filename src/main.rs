@@ -494,7 +494,6 @@ mod tests {
         assert!(cfg.channels.is_empty());
         assert!(cfg.primary_delivery.is_none());
         assert_eq!(cfg.agent, "codex");
-        assert_eq!(cfg.telegram_bot_token_env, "TELEGRAM_BOT_TOKEN");
         assert_eq!(
             cfg.telegram_bot_token.as_deref(),
             Some("replace-with-the-token-from-BotFather")
@@ -706,7 +705,7 @@ mod tests {
         let error = Config::load(path.to_str().unwrap()).unwrap_err();
 
         assert!(error.to_string().contains("inline Telegram token"));
-        assert!(error.to_string().contains("telegram.bot_token_env"));
+        assert!(error.to_string().contains("TELEGRAM_BOT_TOKEN"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -742,7 +741,6 @@ db_path = "/tmp/messages.db"
 self_handles = ["me@example.com"]
 
 [telegram]
-bot_token_env = "PUSH_TEST_TOKEN"
 allow_user_ids = [7]
 allow_chat_ids = [9]
 
@@ -756,7 +754,6 @@ openai_api_key = "config-openai-key"
 
         assert_eq!(cfg.db_path, "/tmp/messages.db");
         assert_eq!(cfg.self_handles, ["me@example.com"]);
-        assert_eq!(cfg.telegram_bot_token_env, "PUSH_TEST_TOKEN");
         assert_eq!(cfg.telegram_allow_user_ids, [7]);
         assert_eq!(cfg.telegram_allow_chat_ids, [9]);
         assert_eq!(
@@ -826,24 +823,34 @@ allow_user_ids = [9]
     }
 
     #[test]
-    fn legacy_flat_telegram_settings_remain_supported() {
-        let path = temp_path("legacy-flat-telegram-config");
+    fn removed_runtime_settings_fail_with_migration_help() {
+        let path = temp_path("removed-runtime-setting-config");
+        for (key, replacement) in [
+            ("claude_bin", "service PATH"),
+            ("codex_bin", "service PATH"),
+            ("pi_bin", "service PATH"),
+            ("codex_model", "configure the model in Codex"),
+            ("sessions_dir", "remove this key"),
+            ("reply_marker", "remove this key"),
+        ] {
+            std::fs::write(&path, format!("{key} = 'legacy-value'\n")).unwrap();
+
+            let error = Config::load(path.to_str().unwrap()).unwrap_err();
+
+            assert!(error.to_string().contains(key));
+            assert!(error.to_string().contains("no longer configurable"));
+            assert!(error.to_string().contains(replacement));
+        }
         std::fs::write(
             &path,
-            r#"channel = "telegram"
-agent = "codex"
-telegram_bot_token_env = "LEGACY_TOKEN"
-telegram_allow_user_ids = [7]
-telegram_allow_chat_ids = [9]
-"#,
+            "[telegram]\nbot_token_env = 'LEGACY_TOKEN'\nallow_user_ids = [7]\n",
         )
         .unwrap();
 
-        let cfg = Config::load(path.to_str().unwrap()).unwrap();
+        let error = Config::load(path.to_str().unwrap()).unwrap_err();
 
-        assert_eq!(cfg.telegram_bot_token_env, "LEGACY_TOKEN");
-        assert_eq!(cfg.telegram_allow_user_ids, [7]);
-        assert_eq!(cfg.telegram_allow_chat_ids, [9]);
+        assert!(error.to_string().contains("telegram.bot_token_env"));
+        assert!(error.to_string().contains("TELEGRAM_BOT_TOKEN"));
         let _ = std::fs::remove_file(path);
     }
 
