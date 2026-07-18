@@ -287,7 +287,7 @@ impl Channel {
                 .into_iter()
                 .map(|text| OutboundChunk {
                     text,
-                    rich_markdown: false,
+                    rich_markdown: true,
                 })
                 .collect(),
             Self::IMessage { .. } => self.outbound_chunks(text, marker),
@@ -451,7 +451,7 @@ mod tests {
         let chunks = telegram().scheduled_outbound_chunks(&text, "ignored");
 
         assert_eq!(chunks.len(), 2);
-        assert!(chunks.iter().all(|chunk| !chunk.rich_markdown));
+        assert!(chunks.iter().all(|chunk| chunk.rich_markdown));
         assert_eq!(
             chunks
                 .into_iter()
