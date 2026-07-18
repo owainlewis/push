@@ -36,9 +36,11 @@ Usage: push [OPTIONS] [COMMAND]
 
 Commands:
   help              Print this help
+  version           Print the installed Push version
   init [path]       Create an assistant repository (default: ./assistant)
   doctor            Validate the configuration and dependencies
-  restart           Restart the installed gateway service
+  reload            Reload the installed gateway service
+  restart           Alias for reload
   job validate      Validate all installed jobs
   job list          List installed jobs
   job show <name>   Show an installed job
@@ -48,6 +50,7 @@ Commands:
 Options:
   --config <path>   Use a configuration file (default: ~/.push/config.toml)
   -h, --help        Print help
+  -V, --version     Print version
 ";
 
 #[tokio::main]
@@ -58,6 +61,10 @@ async fn main() -> Result<()> {
     match args.command {
         Command::Help => {
             print!("{HELP}");
+            Ok(())
+        }
+        Command::Version => {
+            println!("push {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         Command::Init(path) => {
@@ -145,6 +152,7 @@ struct Args {
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     Help,
+    Version,
     Run,
     Init(String),
     Doctor,
@@ -172,6 +180,15 @@ impl Args {
                 config_path: DEFAULT_CONFIG_PATH.to_string(),
             });
         }
+        if args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "-V" | "--version"))
+        {
+            return Ok(Self {
+                command: Command::Version,
+                config_path: DEFAULT_CONFIG_PATH.to_string(),
+            });
+        }
 
         let mut config_path = DEFAULT_CONFIG_PATH.to_string();
         let mut positional = Vec::new();
@@ -194,10 +211,11 @@ impl Args {
         let command = match positional.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
             [] => Command::Run,
             ["help"] => Command::Help,
+            ["version"] => Command::Version,
             ["init"] => Command::Init("./assistant".to_string()),
             ["init", path] => Command::Init((*path).to_string()),
             ["doctor"] => Command::Doctor,
-            ["restart"] => Command::Restart,
+            ["reload" | "restart"] => Command::Restart,
             ["job", "validate"] => Command::Job(JobCommand::Validate),
             ["job", "list"] => Command::Job(JobCommand::List),
             ["job", "show", name] => Command::Job(JobCommand::Show((*name).to_string())),
@@ -205,7 +223,7 @@ impl Args {
             ["job", "runs"] => Command::Job(JobCommand::Runs(None)),
             ["job", "runs", name] => Command::Job(JobCommand::Runs(Some((*name).to_string()))),
             _ => bail!(
-                "unknown command; expected help, init [path], doctor, restart, job validate, job list, job show <name>, job run <name>, job runs [<name>], or --config <path>"
+                "unknown command; expected help, version, init [path], doctor, reload, restart, job validate, job list, job show <name>, job run <name>, job runs [<name>], or --config <path>"
             ),
         };
         Ok(Self {
@@ -285,9 +303,19 @@ async fn run_job_command(config_path: &str, command: JobCommand) -> Result<()> {
                     .or(run.error)
                     .unwrap_or_default()
                     .replace('\n', " ");
+                let evaluation_detail =
+                    if run.evaluation_result.is_none() && run.evaluation_error.is_none() {
+                        String::new()
+                    } else {
+                        jobs::format_evaluation_detail(
+                            run.evaluation_result.as_deref(),
+                            run.evaluation_error.as_deref(),
+                        )
+                        .replace('\n', " ")
+                    };
                 let delivery_error = run.delivery_error.unwrap_or_default().replace('\n', " ");
                 println!(
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                     run.id,
                     run.job_name,
                     run.state,
@@ -298,6 +326,8 @@ async fn run_job_command(config_path: &str, command: JobCommand) -> Result<()> {
                     delivery,
                     destination,
                     execution_detail,
+                    run.evaluation_state,
+                    evaluation_detail,
                     delivery_error,
                 );
             }
@@ -361,6 +391,25 @@ mod tests {
                 config_path: "custom.toml".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn parses_reload_as_restart() {
+        assert_eq!(
+            Args::parse(vec!["reload".into()]).unwrap().command,
+            Command::Restart
+        );
+    }
+
+    #[test]
+    fn parses_version_command_and_flag() {
+        for args in [
+            vec!["version".into()],
+            vec!["--version".into()],
+            vec!["-V".into()],
+        ] {
+            assert_eq!(Args::parse(args).unwrap().command, Command::Version);
+        }
     }
 
     #[test]
@@ -746,6 +795,7 @@ allow_chat_ids = [9]
 
 [voice]
 openai_api_key = "config-openai-key"
+name = "onyx"
 "#,
         )
         .unwrap();
@@ -760,7 +810,29 @@ openai_api_key = "config-openai-key"
             cfg.voice_openai_api_key.as_deref(),
             Some("config-openai-key")
         );
+        assert_eq!(cfg.voice_name, "onyx");
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn voice_config_defaults_to_cedar_and_rejects_unknown_names() {
+        let default_path = temp_path("default-voice-config");
+        std::fs::write(&default_path, "self_handles = ['me@icloud.com']\n").unwrap();
+
+        let cfg = Config::load(default_path.to_str().unwrap()).unwrap();
+        assert_eq!(cfg.voice_name, "cedar");
+
+        let invalid_path = temp_path("invalid-voice-config");
+        std::fs::write(
+            &invalid_path,
+            "self_handles = ['me@icloud.com']\n[voice]\nname = 'unknown'\n",
+        )
+        .unwrap();
+
+        let error = Config::load(invalid_path.to_str().unwrap()).unwrap_err();
+        assert!(error.to_string().contains("invalid voice.name \"unknown\""));
+        let _ = std::fs::remove_file(default_path);
+        let _ = std::fs::remove_file(invalid_path);
     }
 
     #[test]

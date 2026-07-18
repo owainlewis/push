@@ -25,6 +25,7 @@ const AGENTS: &str = r#"# Assistant repository instructions
 
 - Treat `SOUL.md` as user-owned identity. Do not edit it unless the user asks.
 - Use `context/` for durable user context and working notes.
+- Treat `evals/` as user-owned evaluation criteria. Do not edit them during evaluation.
 - Treat `jobs/` as installed runbooks. Propose job changes through Push's approval workflow.
 - Keep secrets, sessions, databases, drafts, logs, and other runtime state outside this repository.
 "#;
@@ -35,6 +36,7 @@ This Git repository contains the durable, user-owned parts of one Push assistant
 
 - `SOUL.md` defines the assistant's identity and working style.
 - `context/` contains durable context the assistant may read and update.
+- `evals/` contains reusable agent evaluation criteria.
 - `jobs/` contains installed Push job runbooks.
 
 Push owns channels, scheduling, history, security, approvals, and delivery outside this repository. The configured agent runtime owns reasoning, tools, skills, MCP servers, and authentication.
@@ -322,6 +324,7 @@ fn prepare_target(target: &Path, config_path: &Path) -> Result<()> {
 
 fn scaffold(root: &Path) -> Result<()> {
     create_directory(&root.join("context"))?;
+    create_directory(&root.join("evals"))?;
     create_directory(&root.join("jobs"))?;
     create_file(&root.join("SOUL.md"), SOUL)?;
     create_file(&root.join("AGENTS.md"), AGENTS)?;
@@ -540,6 +543,7 @@ mod tests {
         assert!(target.join("AGENTS.md").is_file());
         assert!(target.join("README.md").is_file());
         assert!(target.join("context/README.md").is_file());
+        assert!(target.join("evals").is_dir());
         assert!(target.join("jobs").is_dir());
         assert_eq!(fs::read_dir(target.join("jobs")).unwrap().count(), 0);
         assert!(target.join(".git").exists());

@@ -107,7 +107,7 @@ tail -f ~/Library/Logs/push.err.log ~/Library/Logs/push.out.log
 After editing `~/.push/config.toml`, restart the gateway with:
 
 ```sh
-push restart
+push reload
 ```
 
 After changing the plist:
@@ -167,7 +167,7 @@ journalctl --user -u push.service -f
 After editing `~/.push/config.toml`, restart the gateway with:
 
 ```sh
-push restart
+push reload
 ```
 
 For voice support, prefer `voice.openai_api_key` in `~/.push/config.toml`. As an
