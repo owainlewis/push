@@ -23,6 +23,7 @@ Use absolute paths in service files. The service user needs:
 - write access to `state_path`
 - write access to `audit_log_path`
 - write access to `database_path`
+- write access to `drafts_dir` and `jobs_run_dir`
 - filesystem access to `assistant_root` as allowed by the selected agent
 - write access to `assistant_root/jobs/` for Push to install approved drafts;
   agent write access can also change installed jobs outside that workflow

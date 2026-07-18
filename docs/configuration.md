@@ -181,6 +181,39 @@ the selected agent and review [permissions and security](security.md).
 | `poll_interval` | `"3s"` | Delay between channel polls |
 | `run_timeout` | `"10m"` | Maximum chat backend run time |
 
+### iMessage
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `imessage.db_path` | `~/Library/Messages/chat.db` | Messages database read by the macOS channel |
+| `imessage.self_handles` | `[]` | Own handles accepted in one-to-one self chats |
+| `imessage.allow_from` | `[]` | Other trusted one-to-one sender handles |
+
+### Telegram
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `telegram.bot_token` | `TELEGRAM_BOT_TOKEN` fallback | Private Bot API token; the environment value is used when this is omitted |
+| `telegram.allow_user_ids` | `[]` | Trusted numeric sender IDs |
+| `telegram.allow_chat_ids` | `[]` | Trusted numeric private-chat IDs |
+
+### Voice
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `voice.openai_api_key` | `OPENAI_API_KEY` fallback | Optional key for Telegram transcription and spoken replies; the environment value has priority |
+| `voice.name` | `"cedar"` | OpenAI voice used for spoken replies |
+
+### Delivery and routes
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `primary_delivery.channel` | none | Enabled channel used for scheduled job results |
+| `primary_delivery.target` | none | Allowlisted destination on the primary channel |
+| `routes[].thread` | none | Exact channel-qualified thread key to match |
+| `routes[].channel` | none | Enabled provider to match when no exact thread route wins |
+| `routes[].agent` | required per route | Backend selected by the matching route |
+
 ### Local state
 
 | Setting | Default | Purpose |

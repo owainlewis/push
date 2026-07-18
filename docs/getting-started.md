@@ -12,7 +12,8 @@ You need:
 - macOS for iMessage, or macOS/Linux for Telegram
 - Claude Code, Codex, or Pi installed, authenticated, and runnable by the same
   user that will run Push
-- `curl` and `tar` for the release installer
+- Git for the assistant repository created by `push init`
+- `curl`, `tar`, and either `shasum` or `sha256sum` for the release installer
 
 Push uses the backend's existing login, settings, tools, MCP servers, skills,
 and backend configuration. Each chat runs from `assistant_root`, so the backend
@@ -63,6 +64,7 @@ Use this path on other Rust-supported architectures or when testing `main`:
 git clone https://github.com/owainlewis/push.git
 cd push
 cargo build --locked --release
+mkdir -p ~/.local/bin
 install -m 755 target/release/push ~/.local/bin/push
 ```
 

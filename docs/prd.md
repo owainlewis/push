@@ -1,5 +1,15 @@
 # Push v1 PRD
 
+**Status:** Historical product plan, superseded by the current documentation
+
+!!! warning "Historical record"
+
+    This file preserves the original v1 scope and is not a description of the
+    current product or roadmap. Telegram, scheduled jobs, proactive delivery,
+    and release installation have shipped since it was written. Use the
+    [documentation home](index.md) for current behavior and
+    [strategy](strategy.md#roadmap) for possible future work.
+
 ## Summary
 
 Push is a small Rust binary that turns coding-agent runtimes into a personal
@@ -83,7 +93,7 @@ Push takes a narrower bet:
 
 - `src/imessage/poller.rs`: reads Messages rows.
 - `src/imessage/sender.rs`: sends replies through AppleScript.
-- `src/gateway.rs`: poll loop, filtering, commands, queues, worker dispatch.
+- `src/gateway/`: poll loop, filtering, commands, queues, worker dispatch.
 - `src/history.rs`: canonical SQLite conversations and messages.
 - `src/jobs.rs`: validated runbooks, advisory locking, manual execution, and run ledger.
 - `src/assistant.rs`: safe assistant repository scaffolding and root persistence.
@@ -193,9 +203,11 @@ user prompt.
 - Permissive agent settings are powerful local execution modes.
 - iMessage database shape can change across macOS versions.
 
-## Next Scope
+## Original Next Scope
 
-1. A second message channel.
+These items record the plan at the time and are not the current roadmap:
+
+1. A second message channel, completed by Telegram support.
 2. Audited memory write-back.
 3. Richer routing rules, such as task-type routing.
 4. Homebrew formula after the release flow is proven.

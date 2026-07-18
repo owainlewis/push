@@ -1,6 +1,11 @@
 # Core Assistant System
 
-**Status:** Approved
+**Status:** Historical approved design, substantially implemented
+
+!!! warning "Historical record"
+
+    This file preserves the approved design and rollout sequence. It is not a
+    current roadmap. See [Architecture](../architecture.md) for shipped behavior.
 
 **Author:** Owain Lewis  **Date:** 2026-07-11
 
