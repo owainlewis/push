@@ -142,7 +142,9 @@ without affecting conversations or manual jobs.
 
 Push runs at most `jobs_max_workers` scheduled jobs concurrently. It does not
 catch up cron occurrences missed while offline. Daylight-saving gaps are
-skipped; repeated local times run once at their first instant.
+skipped; repeated local times run once at their first instant. Cron expressions
+whose selected months and days can never form a calendar date are rejected
+during job validation.
 
 ## Complete assistant example
 
@@ -176,9 +178,12 @@ and primary delivery destination.
 - Scheduled output is persisted before delivery.
 - Delivery retries use the stored result and never rerun the backend.
 - Delivery is claimed across gateway processes. Normal partial-message retries
-  resume from the first unsent chunk. Delivery can still produce an at-least-once
-  duplicate after a process crash or delivery-state persistence failure because
-  channel APIs do not provide atomic delivery.
+  resume from the first unsent chunk. Push checkpoints each successful chunk
+  and bounds a delivery attempt below its claim lease so an active worker cannot
+  be reclaimed. Delivery can still produce an at-least-once duplicate after a
+  process crash between a channel send and its checkpoint, or after a
+  delivery-state persistence failure, because channel APIs do not provide
+  atomic delivery.
 - Queued runs and pending delivery survive restart. Interrupted execution is
   not automatically replayed.
 
