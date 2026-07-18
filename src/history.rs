@@ -13,7 +13,7 @@ use crate::approval::{
     NormalizedAnswer, Question,
 };
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 const MAX_HISTORY_READ_BYTES: usize = 8 * 1024;
 const READ_TRUNCATED: &str = "\n[truncated by push while reading history]";
 
@@ -63,6 +63,7 @@ pub struct OutboundMessage {
     pub id: i64,
     pub content: String,
     pub status: DeliveryStatus,
+    pub delivery_chunk_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -259,6 +260,24 @@ impl History {
             .with_context(|| {
                 format!("update outbound delivery status in {}", self.path.display())
             })?;
+        if changed != 1 {
+            bail!("outbound message {message_id} does not exist");
+        }
+        Ok(())
+    }
+
+    pub fn checkpoint_delivery(&mut self, message_id: i64, next_chunk: usize) -> Result<()> {
+        let next_chunk = i64::try_from(next_chunk).context("delivery chunk index is too large")?;
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE messages
+                 SET delivery_chunk_index = MAX(delivery_chunk_index, ?2),
+                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE id = ?1 AND direction = 'outbound'",
+                params![message_id, next_chunk],
+            )
+            .with_context(|| format!("checkpoint outbound delivery in {}", self.path.display()))?;
         if changed != 1 {
             bail!("outbound message {message_id} does not exist");
         }
@@ -977,6 +996,13 @@ fn migrate(conn: &Connection) -> Result<()> {
              PRAGMA user_version = 8;",
         )?;
     }
+    if version <= 8 {
+        conn.execute_batch(
+            "ALTER TABLE messages ADD COLUMN delivery_chunk_index INTEGER NOT NULL DEFAULT 0
+                 CHECK(delivery_chunk_index >= 0);
+             PRAGMA user_version = 9;",
+        )?;
+    }
     conn.execute_batch("COMMIT;")?;
     Ok(())
 }
@@ -1011,20 +1037,22 @@ fn conversation(tx: &Transaction<'_>, channel: &str, thread_key: &str) -> Result
 
 fn outbound_for_query(conn: &Connection, inbound_id: i64) -> Result<Option<OutboundMessage>> {
     conn.query_row(
-        "SELECT id, content, delivery_status
+        "SELECT id, content, delivery_status, delivery_chunk_index
              FROM messages WHERE in_reply_to_id = ?1",
         [inbound_id],
         |row| {
             let status: String = row.get(2)?;
-            Ok((row.get(0)?, row.get(1)?, status))
+            Ok((row.get(0)?, row.get(1)?, status, row.get::<_, i64>(3)?))
         },
     )
     .optional()?
-    .map(|(id, content, status)| {
+    .map(|(id, content, status, delivery_chunk_index)| {
         Ok(OutboundMessage {
             id,
             content,
             status: DeliveryStatus::parse(&status)?,
+            delivery_chunk_index: usize::try_from(delivery_chunk_index)
+                .context("stored delivery chunk index is negative")?,
         })
     })
     .transpose()
@@ -1086,6 +1114,55 @@ mod tests {
     }
 
     #[test]
+    fn migrates_v8_messages_with_delivery_chunk_progress() {
+        let path = temp_path("message-delivery-v8-migration");
+        let history = History::open(path.to_str().unwrap()).unwrap();
+        history.execute_batch_for_test(
+            "ALTER TABLE messages DROP COLUMN delivery_chunk_index; PRAGMA user_version = 8;",
+        );
+        drop(history);
+
+        let reopened = History::open(path.to_str().unwrap()).unwrap();
+        let chunk_column: i64 = reopened
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('messages')
+                 WHERE name = 'delivery_chunk_index'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(chunk_column, 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn outbound_delivery_chunk_progress_survives_reopen() {
+        let path = temp_path("outbound-delivery-progress");
+        let mut history = History::open(path.to_str().unwrap()).unwrap();
+        let inbound = history
+            .record_inbound("telegram", "telegram:dm:7", "telegram:1", "hello")
+            .unwrap();
+        let outbound = history
+            .record_outbound(inbound, OutboundOrigin::Backend, Some("codex"), "reply")
+            .unwrap();
+        history.checkpoint_delivery(outbound.id, 1).unwrap();
+        history.checkpoint_delivery(outbound.id, 0).unwrap();
+        drop(history);
+
+        let reopened = History::open(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            reopened
+                .outbound_for(inbound)
+                .unwrap()
+                .unwrap()
+                .delivery_chunk_index,
+            1
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn migrates_v1_history_database_without_losing_messages() {
         let path = temp_path("approval-v1-migration");
         let mut history = History::open(path.to_str().unwrap()).unwrap();
@@ -1093,7 +1170,12 @@ mod tests {
             .record_inbound("imessage", "imessage:self:me", "imessage:1", "hello")
             .unwrap();
         history.execute_batch_for_test(
-            "DROP TABLE gateway_control_actions; DROP TABLE job_draft_proposals; DROP TABLE job_runs; DROP TABLE approval_questions; PRAGMA user_version = 1;",
+            "DROP TABLE gateway_control_actions;
+             DROP TABLE job_draft_proposals;
+             DROP TABLE job_runs;
+             DROP TABLE approval_questions;
+             ALTER TABLE messages DROP COLUMN delivery_chunk_index;
+             PRAGMA user_version = 1;",
         );
         drop(history);
 
@@ -1118,7 +1200,11 @@ mod tests {
         let question = question(2_000);
         history.create_question(&question, 1_000).unwrap();
         history.execute_batch_for_test(
-            "DROP TABLE gateway_control_actions; DROP TABLE job_draft_proposals; DROP TABLE job_runs; PRAGMA user_version = 2;",
+            "DROP TABLE gateway_control_actions;
+             DROP TABLE job_draft_proposals;
+             DROP TABLE job_runs;
+             ALTER TABLE messages DROP COLUMN delivery_chunk_index;
+             PRAGMA user_version = 2;",
         );
         drop(history);
 
@@ -1176,6 +1262,7 @@ mod tests {
              ALTER TABLE job_runs DROP COLUMN evaluation_result;
              ALTER TABLE job_runs DROP COLUMN evaluation_state;
              DROP TABLE gateway_control_actions;
+             ALTER TABLE messages DROP COLUMN delivery_chunk_index;
              PRAGMA user_version = 6;",
         );
         drop(history);

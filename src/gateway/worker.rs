@@ -918,7 +918,7 @@ pub(super) async fn record_and_deliver_once(
     origin: OutboundOrigin,
     text: &str,
 ) -> Result<bool> {
-    let outbound = ctx.history.lock().unwrap().record_outbound(
+    let mut outbound = ctx.history.lock().unwrap().record_outbound(
         job.inbound_id,
         origin,
         Some(job.backend.as_str()),
@@ -927,7 +927,7 @@ pub(super) async fn record_and_deliver_once(
     if outbound.status == DeliveryStatus::Delivered {
         return Ok(true);
     }
-    let delivered = reply_to(ctx, &job.target, &outbound.content).await;
+    let delivered = deliver_outbound_once(ctx, &job.target, &mut outbound).await?;
     ctx.history.lock().unwrap().mark_delivery(
         outbound.id,
         if delivered {
@@ -947,10 +947,11 @@ async fn deliver_stored(
     if outbound.status == DeliveryStatus::Delivered {
         return Ok(DeliveryOutcome::AlreadyDelivered);
     }
+    let mut outbound = outbound.clone();
     let mut attempt = 0;
     loop {
         attempt += 1;
-        let delivered = reply_to(ctx, &job.target, &outbound.content).await;
+        let delivered = deliver_outbound_once(ctx, &job.target, &mut outbound).await?;
         let status = if delivered {
             DeliveryStatus::Delivered
         } else {
@@ -989,6 +990,44 @@ async fn deliver_stored(
         #[cfg(test)]
         tokio::task::yield_now().await;
     }
+}
+
+async fn deliver_outbound_once(
+    ctx: &Ctx,
+    target: &str,
+    outbound: &mut OutboundMessage,
+) -> Result<bool> {
+    let chunks = ctx
+        .channel
+        .outbound_chunks(&outbound.content, &ctx.reply_marker);
+    if outbound.delivery_chunk_index > chunks.len() {
+        anyhow::bail!(
+            "outbound {} has invalid delivery chunk index {} for {} chunks",
+            outbound.id,
+            outbound.delivery_chunk_index,
+            chunks.len()
+        );
+    }
+    for (index, chunk) in chunks
+        .iter()
+        .enumerate()
+        .skip(outbound.delivery_chunk_index)
+    {
+        if let Err(error) = super::send_reply_chunk(ctx, target, chunk).await {
+            error!(
+                "outbound {} chunk {index} send error to {target}: {error}",
+                outbound.id
+            );
+            return Ok(false);
+        }
+        let next_chunk = index + 1;
+        ctx.history
+            .lock()
+            .unwrap()
+            .checkpoint_delivery(outbound.id, next_chunk)?;
+        outbound.delivery_chunk_index = next_chunk;
+    }
+    Ok(true)
 }
 
 async fn deliver_voice_reply(ctx: &Ctx, job: &Job, text: &str) {
