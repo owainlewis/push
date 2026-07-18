@@ -813,20 +813,58 @@ impl Gateway {
         self.spawn_worker(thread.to_string(), pending);
     }
 
-    async fn stop(&self, job: Job) -> bool {
+    async fn stop(&mut self, job: Job) -> bool {
         let row_id = job.row_id;
         self.ack.lock().unwrap().in_flight.insert(row_id);
-        let stopped = self.queues.get(&job.thread).is_some_and(|worker| {
+        let candidate_target = self.queues.get(&job.thread).and_then(|worker| {
             let state = worker.state.lock().unwrap();
-            let target_row = state.current_row.or_else(|| {
+            state.current_row.or_else(|| {
                 state
                     .pending
                     .iter()
                     .find(|pending| !state.retained_rows.contains(&pending.row_id))
                     .map(|pending| pending.row_id)
-            });
-            target_row.is_some_and(|row_id| worker.cancel.send(row_id).is_ok())
+            })
         });
+        let target_row = match self
+            .ctx
+            .history
+            .lock()
+            .unwrap()
+            .record_stop_target(job.inbound_id, candidate_target)
+        {
+            Ok(target_row) => target_row,
+            Err(error) => {
+                error!("[{}] stop target write failed: {error:#}", job.thread);
+                self.audit(self.ctx.audit.failed(
+                    "message_history_failed",
+                    row_id,
+                    &job.thread,
+                    Some(job.backend),
+                    error.to_string(),
+                ));
+                self.ack.lock().unwrap().in_flight.remove(&row_id);
+                return false;
+            }
+        };
+        let stopped = target_row.is_some();
+        if let Some(target_row) = target_row {
+            let signaled = self.queues.get(&job.thread).is_none_or(|worker| {
+                let state = worker.state.lock().unwrap();
+                let retained = state.retained_rows.contains(&target_row);
+                let pending = state
+                    .pending
+                    .iter()
+                    .any(|pending| pending.row_id == target_row);
+                let target_is_runnable =
+                    state.current_row == Some(target_row) || (pending && !retained);
+                !target_is_runnable || worker.cancel.send(target_row).is_ok()
+            });
+            if !signaled {
+                self.ack.lock().unwrap().in_flight.remove(&row_id);
+                return false;
+            }
+        }
         let reply = if stopped {
             "Stop requested. Queued messages will continue."
         } else {

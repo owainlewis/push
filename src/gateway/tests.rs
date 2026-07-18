@@ -2144,6 +2144,138 @@ async fn failed_stop_history_write_retries_before_later_rows() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn retried_stop_acknowledgement_does_not_cancel_the_next_request() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("stop-idempotency-sessions");
+    let assistant_dir = temp_path("stop-idempotency-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let config = test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    );
+    let mut gateway = Gateway::new(config.clone()).unwrap();
+    let mut runners = HashMap::new();
+    runners.insert(
+        AgentBackend::Codex,
+        Runner::Fake(FakeRunner {
+            backend: AgentBackend::Codex,
+            session_id: "fake-session".to_string(),
+            calls: calls.clone(),
+            before_return: None,
+            wait_for_release: Some(release.clone()),
+            failure: None,
+            resume_missing_once: None,
+        }),
+    );
+    gateway.ctx.runners = Arc::new(runners);
+
+    gateway
+        .tick_fake(vec![message(1, "me@icloud.com", "", true, "slow")])
+        .await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while calls.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first request should start");
+    gateway.ctx.history.lock().unwrap().execute_batch_for_test(
+        "CREATE TRIGGER fail_stop_request_outbound
+         BEFORE INSERT ON messages
+         WHEN NEW.direction = 'outbound'
+          AND NEW.content = 'Stop requested. Queued messages will continue.'
+         BEGIN
+           SELECT RAISE(FAIL, 'forced stop acknowledgement failure');
+         END;",
+    );
+
+    gateway
+        .tick_fake(vec![
+            message(2, "me@icloud.com", "", true, "queued"),
+            message(3, "me@icloud.com", "", true, "/stop"),
+        ])
+        .await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while calls.lock().unwrap().len() < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("queued request should start after the first request is interrupted");
+    gateway
+        .ctx
+        .history
+        .lock()
+        .unwrap()
+        .execute_batch_for_test("DROP TRIGGER fail_stop_request_outbound;");
+
+    gateway.queues.clear();
+    for worker in gateway.handles.drain(..) {
+        worker.abort();
+        let _ = worker.await;
+    }
+    drop(gateway);
+
+    let restart_calls = Arc::new(Mutex::new(Vec::new()));
+    let restart_release = Arc::new(tokio::sync::Notify::new());
+    let mut restarted = Gateway::new(config).unwrap();
+    let mut restart_runners = HashMap::new();
+    restart_runners.insert(
+        AgentBackend::Codex,
+        Runner::Fake(FakeRunner {
+            backend: AgentBackend::Codex,
+            session_id: "fake-session".to_string(),
+            calls: restart_calls.clone(),
+            before_return: None,
+            wait_for_release: Some(restart_release.clone()),
+            failure: None,
+            resume_missing_once: None,
+        }),
+    );
+    restarted.ctx.runners = Arc::new(restart_runners);
+    restarted
+        .tick_fake(vec![
+            message(2, "me@icloud.com", "", true, "queued"),
+            message(3, "me@icloud.com", "", true, "/stop"),
+        ])
+        .await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while restart_calls.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("queued request should restart before the stop acknowledgement is retried");
+    restart_release.notify_one();
+    restarted.queues.clear();
+    restarted.drain_workers().await;
+
+    let replies = restarted.ctx.sent_replies.lock().unwrap();
+    assert_eq!(
+        replies
+            .iter()
+            .filter(|(_, reply)| reply.starts_with("Stopped the current request"))
+            .count(),
+        0
+    );
+    assert!(replies
+        .iter()
+        .any(|(_, reply)| reply.contains("Stop requested")));
+    assert!(replies.iter().any(|(_, reply)| reply.contains("queued")));
+    assert_eq!(restart_calls.lock().unwrap().len(), 1);
+    assert_eq!(restarted.store.lock().unwrap().last_row(), 3);
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn failed_stop_acknowledgement_does_not_block_later_messages() {
     let state_path = temp_state_path();
     let sessions_dir = temp_path("stop-delivery-failure-sessions");
