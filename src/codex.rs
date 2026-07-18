@@ -126,9 +126,15 @@ impl Runner {
                 .arg(developer_instructions(req.instructions.trim()));
         }
         if evaluator {
-            cmd.arg("-c").arg("mcp_servers={}");
+            cmd.arg("-c")
+                .arg("mcp_servers={}")
+                .arg("-c")
+                .arg("project_doc_max_bytes=0")
+                .arg("-c")
+                .arg("web_search=\"disabled\"");
             for feature in [
                 "shell_tool",
+                "unified_exec",
                 "browser_use",
                 "browser_use_external",
                 "browser_use_full_cdp_access",
@@ -447,9 +453,11 @@ sleep 2
         assert!(args.iter().any(|arg| arg == "--ephemeral"));
         assert!(args.iter().any(|arg| arg == "--ignore-user-config"));
         assert!(args.iter().any(|arg| arg == "mcp_servers={}"));
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["--disable", "shell_tool"]));
+        assert!(args.iter().any(|arg| arg == "project_doc_max_bytes=0"));
+        assert!(args.iter().any(|arg| arg == "web_search=\"disabled\""));
+        for feature in ["shell_tool", "unified_exec"] {
+            assert!(args.windows(2).any(|pair| pair == ["--disable", feature]));
+        }
     }
 
     fn runner(bin: String) -> Runner {

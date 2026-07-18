@@ -168,10 +168,11 @@ fresh session on the same backend in the same work directory. Push supplies the
 original job, final response, and all assigned eval Markdown, then requires the
 evaluator to end with `VERDICT: PASS` or `VERDICT: FAIL`. Evaluation state and
 details are stored separately from execution and delivery. Evaluation never
-reruns or rewrites completed work. Evaluator invocations restrict each backend
-to no tools and disable MCP servers, extensions, browser integrations, and
-session persistence. The first version evaluates the returned response without
-inspecting work-directory artifacts.
+reruns or rewrites completed work. Evaluator invocations disable shell access,
+MCP servers, extensions, browser integrations, and session persistence. Codex
+project instructions are also disabled. A backend may retain non-mutating
+built-in utility tools. The first version evaluates the returned response
+without inspecting work-directory artifacts.
 
 Before backend execution, both manual and scheduled starts attempt a
 non-blocking OS advisory lock for the job under `~/.push/run/locks/`. The

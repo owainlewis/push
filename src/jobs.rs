@@ -22,6 +22,8 @@ use crate::{history::History, soul};
 
 const MAX_STORED_RESULT_BYTES: usize = 64 * 1024;
 const MAX_EVAL_BYTES: usize = 64 * 1024;
+const MAX_EVALS: usize = 16;
+const MAX_TOTAL_EVAL_BYTES: usize = 256 * 1024;
 const MAX_DELIVERY_ATTEMPTS: i64 = 5;
 const MAX_DELIVERY_WORKERS: usize = 4;
 const DELIVERY_CLAIM_LEASE_MS: i64 = 15 * 60 * 1_000;
@@ -235,14 +237,25 @@ pub(crate) fn validate_contents(
 }
 
 fn load_evals(cfg: &Config, names: &[String]) -> Result<Vec<Eval>> {
+    if names.len() > MAX_EVALS {
+        bail!("a job may assign at most {MAX_EVALS} evals");
+    }
     let mut seen = HashSet::new();
     let mut evals = Vec::with_capacity(names.len());
+    let mut total_bytes = 0usize;
     for name in names {
         validate_slug(name).with_context(|| format!("invalid eval name {name:?}"))?;
         if !seen.insert(name.as_str()) {
             bail!("duplicate eval {name:?}");
         }
-        evals.push(load_eval(cfg, name)?);
+        let eval = load_eval(cfg, name)?;
+        total_bytes = total_bytes
+            .checked_add(eval.body.len())
+            .context("total eval size overflow")?;
+        if total_bytes > MAX_TOTAL_EVAL_BYTES {
+            bail!("assigned evals exceed {MAX_TOTAL_EVAL_BYTES} bytes in total");
+        }
+        evals.push(eval);
     }
     Ok(evals)
 }
@@ -287,10 +300,8 @@ fn load_eval(cfg: &Config, name: &str) -> Result<Eval> {
     if bytes.len() > MAX_EVAL_BYTES {
         bail!("eval {name:?} exceeds {MAX_EVAL_BYTES} bytes");
     }
-    let body = std::str::from_utf8(&bytes)
-        .context("eval must be valid UTF-8")?
-        .trim();
-    if body.is_empty() {
+    let body = std::str::from_utf8(&bytes).context("eval must be valid UTF-8")?;
+    if body.trim().is_empty() {
         bail!("eval {name:?} cannot be empty");
     }
     Ok(Eval {
@@ -941,8 +952,16 @@ impl Ledger {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
-            "UPDATE job_runs SET state = 'failed', finished_at_ms = ?2,
-                error = 'previous executor exited before completion',
+            "UPDATE job_runs
+             SET state = CASE WHEN result IS NOT NULL AND evaluation_state = 'running'
+                    THEN 'succeeded' ELSE 'failed' END,
+                finished_at_ms = ?2,
+                error = CASE WHEN result IS NOT NULL AND evaluation_state = 'running'
+                    THEN error ELSE 'previous executor exited before completion' END,
+                evaluation_state = CASE WHEN result IS NOT NULL AND evaluation_state = 'running'
+                    THEN 'error' ELSE evaluation_state END,
+                evaluation_error = CASE WHEN result IS NOT NULL AND evaluation_state = 'running'
+                    THEN 'evaluator exited before completion' ELSE evaluation_error END,
                 delivery_state = CASE WHEN owner_kind = 'gateway_scheduler'
                     THEN 'pending' ELSE delivery_state END
              WHERE job_name = ?1 AND state = 'running'",
@@ -1926,6 +1945,43 @@ mod tests {
     }
 
     #[test]
+    fn eval_markdown_is_preserved_verbatim() {
+        let jobs_dir = temp_dir("jobs-eval-verbatim");
+        let database = temp_path("jobs-eval-verbatim-db");
+        let run_dir = temp_dir("jobs-eval-verbatim-run");
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let body = "  indented criterion\n\n";
+        write_eval(&cfg, "formatting", body);
+
+        let eval = load_eval(&cfg, "formatting").unwrap();
+
+        assert_eq!(eval.body, body);
+    }
+
+    #[test]
+    fn assigned_evals_have_count_and_total_size_limits() {
+        let jobs_dir = temp_dir("jobs-eval-limits");
+        let database = temp_path("jobs-eval-limits-db");
+        let run_dir = temp_dir("jobs-eval-limits-run");
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let too_many = (0..=MAX_EVALS)
+            .map(|index| format!("eval-{index}"))
+            .collect::<Vec<_>>();
+        let error = load_evals(&cfg, &too_many).unwrap_err();
+        assert!(error.to_string().contains("at most"));
+
+        let names = (0..=MAX_TOTAL_EVAL_BYTES / MAX_EVAL_BYTES)
+            .map(|index| {
+                let name = format!("large-{index}");
+                write_eval(&cfg, &name, &"x".repeat(MAX_EVAL_BYTES));
+                name
+            })
+            .collect::<Vec<_>>();
+        let error = load_evals(&cfg, &names).unwrap_err();
+        assert!(error.to_string().contains("in total"));
+    }
+
+    #[test]
     fn daily_inbox_example_is_a_valid_scheduled_job() {
         let jobs_dir = temp_dir("inbox-example-jobs");
         let workdir = temp_dir("inbox-example-work");
@@ -2706,6 +2762,52 @@ printf '%s\n' '{"type":"thread.started","thread_id":"limited"}'
             .error
             .as_deref()
             .is_some_and(|error| error.contains("exited before completion")));
+    }
+
+    #[test]
+    fn stale_scheduled_claim_preserves_result_from_an_interrupted_evaluator() {
+        let jobs_dir = temp_dir("scheduled-eval-recovery-jobs");
+        let workdir = temp_dir("scheduled-eval-recovery-work");
+        let database = temp_path("scheduled-eval-recovery-db");
+        let run_dir = temp_dir("scheduled-eval-recovery-run");
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        write_eval(&cfg, "quality", "Check the completed work.");
+        write_job(
+            &jobs_dir,
+            "recover-eval",
+            &scheduled_job(&workdir, true).replace(
+                "backend = \"codex\"\n",
+                "backend = \"codex\"\nevals = [\"quality\"]\n",
+            ),
+        );
+        let job = Catalog::load_named(&cfg, "recover-eval").unwrap();
+        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let run_id = ledger
+            .enqueue_scheduled(&job, &job.triggers[0], 60_000, 60_000, "telegram", "7")
+            .unwrap();
+        let stale = ledger.queued_runs(1).unwrap().remove(0);
+        let Some((_, _, lock)) = ledger.claim_scheduled(&cfg, &stale, 60_000).unwrap() else {
+            panic!("scheduled run should claim");
+        };
+        ledger
+            .record_execution_result(&run_id, "completed work")
+            .unwrap();
+        drop(lock);
+
+        assert!(ledger
+            .claim_scheduled(&cfg, &stale, 61_000)
+            .unwrap()
+            .is_none());
+
+        let recovered = ledger.runs(Some("recover-eval")).unwrap().remove(0);
+        assert_eq!(recovered.state, "succeeded");
+        assert_eq!(recovered.result.as_deref(), Some("completed work"));
+        assert_eq!(recovered.evaluation_state, "error");
+        assert_eq!(
+            recovered.evaluation_error.as_deref(),
+            Some("evaluator exited before completion")
+        );
+        assert_eq!(recovered.delivery_state, "pending");
     }
 
     #[cfg(unix)]

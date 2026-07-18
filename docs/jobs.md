@@ -70,10 +70,11 @@ evals = ["writing-style", "task-completion"]
 
 Each name resolves to one non-empty regular Markdown file directly under
 `<assistant_root>/evals/`. Names use the same lowercase ASCII slug format as
-jobs. Symlinks, missing files, duplicate names, invalid UTF-8, and files larger
-than 64 KiB are rejected during job validation. Assigned eval contents are
-included in the validated job snapshot, so changing an eval changes the
-snapshot used for future claims.
+jobs. Symlinks, missing files, duplicate names, invalid UTF-8, more than 16
+assigned evals, files larger than 64 KiB, and assigned evals larger than 256 KiB
+in total are rejected during job validation. Assigned eval contents are included
+in the validated job snapshot, so changing an eval changes the snapshot used for
+future claims.
 
 For example, create `<assistant_root>/evals/writing-style.md`:
 
@@ -86,10 +87,11 @@ Fail work that uses em dashes, unsupported claims, or needlessly complex words.
 After a job returns successfully, Push starts one fresh evaluator session using
 the same backend, timeout, and work directory. The evaluator receives the
 original job, final response, and every assigned eval, then must finish with
-`VERDICT: PASS` or `VERDICT: FAIL`. Push disables evaluator tools, external MCP
-tools, extensions, browser integrations, and session persistence. The first
-version evaluates the returned response and does not inspect work-directory
-artifacts.
+`VERDICT: PASS` or `VERDICT: FAIL`. Push disables evaluator shell access,
+external MCP tools, extensions, browser integrations, and session persistence.
+Codex project instructions are also disabled. Some backends may retain
+non-mutating built-in utility tools. The first version evaluates the returned
+response and does not inspect work-directory artifacts.
 
 Evaluation is recorded separately as `running`, `passed`, `failed`, `error`, or
 `not_requested`. A failed or malformed evaluation does not rewrite the result,
