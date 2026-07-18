@@ -254,7 +254,7 @@ async fn run_scheduler(
             }
             _ = ticker.tick() => {
                 let contexts = contexts.clone();
-                if let Err(error) = scheduler.tick(now_ms(), move |channel, target, text, start_chunk| {
+                if let Err(error) = scheduler.tick(now_ms(), move |channel, target, text, start_chunk, progress| {
                     let contexts = contexts.clone();
                     async move {
                         let Some(ctx) = contexts.get(&channel) else {
@@ -274,7 +274,7 @@ async fn run_scheduler(
                                 )
                             }
                         };
-                        scheduled_reply_to(ctx, &target, &text, start_chunk).await
+                        scheduled_reply_to(ctx, &target, &text, start_chunk, progress).await
                     }
                 }).await {
                     error!("job scheduler tick failed: {error:#}");
@@ -1039,6 +1039,7 @@ async fn scheduled_reply_to(
     target: &str,
     text: &str,
     start_chunk: usize,
+    progress: jobs::DeliveryProgress,
 ) -> jobs::DeliveryAttempt {
     let chunks = ctx
         .channel
@@ -1049,18 +1050,26 @@ async fn scheduled_reply_to(
     #[cfg(test)]
     {
         let chunk_count = chunks.len();
-        let mut failures = ctx.send_failures_remaining.lock().unwrap();
-        if *failures > 0 {
-            *failures -= 1;
+        let should_fail = {
+            let mut failures = ctx.send_failures_remaining.lock().unwrap();
+            let should_fail = *failures > 0;
+            if should_fail {
+                *failures -= 1;
+            }
+            should_fail
+        };
+        if should_fail {
             return jobs::DeliveryAttempt::failed(start_chunk, "scheduled send failed");
         }
-        drop(failures);
-        ctx.sent_replies.lock().unwrap().extend(
-            chunks
-                .into_iter()
-                .skip(start_chunk)
-                .map(|chunk| (target.to_string(), chunk.text)),
-        );
+        for (index, chunk) in chunks.into_iter().enumerate().skip(start_chunk) {
+            ctx.sent_replies
+                .lock()
+                .unwrap()
+                .push((target.to_string(), chunk.text));
+            if let Err(error) = progress.checkpoint(index + 1).await {
+                return jobs::DeliveryAttempt::failed(index + 1, error.to_string());
+            }
+        }
         jobs::DeliveryAttempt::delivered(chunk_count)
     }
     #[cfg(not(test))]
@@ -1076,6 +1085,10 @@ async fn scheduled_reply_to(
                     tracing::error!("scheduled send to {target} timed out");
                     return jobs::DeliveryAttempt::failed(index, "send timed out");
                 }
+            }
+            if let Err(error) = progress.checkpoint(index + 1).await {
+                tracing::error!("persist scheduled delivery progress: {error:#}");
+                return jobs::DeliveryAttempt::failed(index + 1, error.to_string());
             }
         }
         jobs::DeliveryAttempt::delivered(chunks.len())

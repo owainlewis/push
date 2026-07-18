@@ -12,6 +12,7 @@ use chrono::{Datelike, LocalResult, TimeZone, Timelike, Utc};
 use rusqlite::{params, Connection, TransactionBehavior};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
@@ -27,6 +28,8 @@ const MAX_TOTAL_EVAL_BYTES: usize = 256 * 1024;
 const MAX_DELIVERY_ATTEMPTS: i64 = 5;
 const MAX_DELIVERY_WORKERS: usize = 4;
 const DELIVERY_CLAIM_LEASE_MS: i64 = 15 * 60 * 1_000;
+// Include worker queueing and sending while leaving a five-minute lease margin.
+const DELIVERY_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -380,6 +383,13 @@ fn validate_triggers(triggers: &[Trigger]) -> Result<()> {
             .timezone
             .parse::<chrono_tz::Tz>()
             .with_context(|| format!("invalid IANA timezone {:?}", trigger.timezone))?;
+        let spec = CronSpec::parse(trigger)?;
+        if !spec.has_possible_calendar_date() {
+            bail!(
+                "cron schedule {:?} has no possible calendar date",
+                trigger.schedule
+            );
+        }
         let _ = trigger.enabled;
     }
     Ok(())
@@ -435,6 +445,16 @@ impl CronSpec {
             candidate_ms = candidate_ms.saturating_add(60_000);
         }
         None
+    }
+
+    fn has_possible_calendar_date(&self) -> bool {
+        if self.day_of_month_wildcard || !self.day_of_week_wildcard {
+            return true;
+        }
+        const MAX_DAYS_BY_MONTH: [usize; 13] = [0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        (1..=12).any(|month| {
+            self.fields[3][month] && (1..=MAX_DAYS_BY_MONTH[month]).any(|day| self.fields[2][day])
+        })
     }
 
     fn matches(&self, local: &chrono::DateTime<chrono_tz::Tz>) -> bool {
@@ -658,6 +678,29 @@ pub struct DeliveryAttempt {
     pub next_chunk: usize,
     pub delivered: bool,
     pub error: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct DeliveryProgress {
+    checkpoints: mpsc::UnboundedSender<DeliveryCheckpoint>,
+}
+
+impl DeliveryProgress {
+    pub async fn checkpoint(&self, next_chunk: usize) -> Result<()> {
+        let (saved, saved_rx) = oneshot::channel();
+        self.checkpoints
+            .send(DeliveryCheckpoint { next_chunk, saved })
+            .map_err(|_| anyhow::anyhow!("delivery worker stopped before saving chunk progress"))?;
+        saved_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("delivery worker stopped while saving chunk progress"))?
+            .map_err(anyhow::Error::msg)
+    }
+}
+
+struct DeliveryCheckpoint {
+    next_chunk: usize,
+    saved: oneshot::Sender<std::result::Result<(), String>>,
 }
 
 impl DeliveryAttempt {
@@ -1144,6 +1187,25 @@ impl Ledger {
         Ok(())
     }
 
+    fn record_delivery_progress(
+        &mut self,
+        id: &str,
+        owner: &str,
+        next_chunk: usize,
+        now: i64,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE job_runs SET delivery_chunk_index = MAX(delivery_chunk_index, ?3),
+                delivery_claimed_at_ms = ?4
+             WHERE id = ?1 AND delivery_state = 'pending' AND delivery_claim_owner = ?2",
+            params![id, owner, next_chunk as i64, now],
+        )?;
+        if changed != 1 {
+            bail!("pending delivery {id:?} is not claimed by {owner:?}");
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     fn state(&self, id: &str) -> String {
         self.conn
@@ -1258,9 +1320,14 @@ impl Scheduler {
 
     pub async fn tick<F, Fut>(&mut self, now: i64, deliver: F) -> Result<()>
     where
-        F: Fn(String, String, String, usize) -> Fut + Clone + Send + Sync + 'static,
+        F: Fn(String, String, String, usize, DeliveryProgress) -> Fut
+            + Clone
+            + Send
+            + Sync
+            + 'static,
         Fut: Future<Output = DeliveryAttempt> + Send + 'static,
     {
+        let tick_started = Instant::now();
         while let Some(result) = self.workers.try_join_next() {
             result.context("scheduled worker task failed")??;
         }
@@ -1358,12 +1425,30 @@ impl Scheduler {
         }
 
         let delivery_slots = MAX_DELIVERY_WORKERS.saturating_sub(self.delivery_workers.len());
-        for row in ledger.claim_due_deliveries(now, &self.delivery_owner, delivery_slots)? {
+        let delivery_claimed_at = Instant::now();
+        let delivery_claimed_at_ms = now.saturating_add(
+            i64::try_from(delivery_claimed_at.duration_since(tick_started).as_millis())
+                .unwrap_or(i64::MAX),
+        );
+        for row in ledger.claim_due_deliveries(
+            delivery_claimed_at_ms,
+            &self.delivery_owner,
+            delivery_slots,
+        )? {
             let database_path = self.cfg.database_path.clone();
             let owner = self.delivery_owner.clone();
             let deliver = deliver.clone();
-            self.delivery_workers
-                .spawn(async move { run_delivery(database_path, owner, row, now, deliver).await });
+            self.delivery_workers.spawn(async move {
+                run_delivery(
+                    database_path,
+                    owner,
+                    row,
+                    delivery_claimed_at_ms,
+                    delivery_claimed_at,
+                    deliver,
+                )
+                .await
+            });
         }
         self.ledger = Some(ledger);
         Ok(())
@@ -1427,24 +1512,105 @@ async fn run_delivery<F, Fut>(
     owner: String,
     row: DeliveryRun,
     attempted_at_ms: i64,
+    claimed_at: Instant,
     deliver: F,
 ) -> Result<()>
 where
-    F: Fn(String, String, String, usize) -> Fut,
+    F: Fn(String, String, String, usize, DeliveryProgress) -> Fut,
     Fut: Future<Output = DeliveryAttempt>,
 {
-    let started = Instant::now();
+    run_delivery_with_timeout(
+        database_path,
+        owner,
+        row,
+        attempted_at_ms,
+        claimed_at,
+        deliver,
+        DELIVERY_ATTEMPT_TIMEOUT,
+    )
+    .await
+}
+
+async fn run_delivery_with_timeout<F, Fut>(
+    database_path: String,
+    owner: String,
+    row: DeliveryRun,
+    attempted_at_ms: i64,
+    claimed_at: Instant,
+    deliver: F,
+    attempt_timeout: Duration,
+) -> Result<()>
+where
+    F: Fn(String, String, String, usize, DeliveryProgress) -> Fut,
+    Fut: Future<Output = DeliveryAttempt>,
+{
+    let started = claimed_at;
+    let mut ledger = Ledger::open(&database_path)?;
+    let deadline_at = started + attempt_timeout;
+    if Instant::now() >= deadline_at {
+        let attempt = DeliveryAttempt::failed(row.chunk_index, "delivery attempt timed out");
+        let completed_at_ms = elapsed_ms_since(attempted_at_ms, started);
+        return ledger.record_delivery(&row.id, &owner, &attempt, completed_at_ms);
+    }
     let text = format_delivery(&row);
-    let attempt = deliver(
+    let (checkpoint_tx, mut checkpoint_rx) = mpsc::unbounded_channel();
+    let progress = DeliveryProgress {
+        checkpoints: checkpoint_tx,
+    };
+    let delivery = deliver(
         row.channel.clone(),
         row.target.clone(),
         text,
         row.chunk_index,
-    )
-    .await;
-    let completed_at_ms = attempted_at_ms
-        .saturating_add(i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX));
-    Ledger::open(&database_path)?.record_delivery(&row.id, &owner, &attempt, completed_at_ms)
+        progress,
+    );
+    tokio::pin!(delivery);
+    let deadline = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline_at));
+    tokio::pin!(deadline);
+    let mut next_chunk = row.chunk_index;
+    let attempt = loop {
+        tokio::select! {
+            attempt = &mut delivery => break attempt,
+            Some(checkpoint) = checkpoint_rx.recv() => {
+                next_chunk = next_chunk.max(checkpoint.next_chunk);
+                let checkpointed_at_ms = elapsed_ms_since(attempted_at_ms, started);
+                let saved = ledger
+                    .record_delivery_progress(&row.id, &owner, next_chunk, checkpointed_at_ms)
+                    .map_err(|error| format!("{error:#}"));
+                let failed = saved.as_ref().err().cloned();
+                let _ = checkpoint.saved.send(saved);
+                if let Some(error) = failed {
+                    bail!(error);
+                }
+            }
+            _ = &mut deadline => {
+                break DeliveryAttempt::failed(next_chunk, "delivery attempt timed out");
+            }
+        }
+    };
+    while let Ok(checkpoint) = checkpoint_rx.try_recv() {
+        next_chunk = next_chunk.max(checkpoint.next_chunk);
+        let checkpointed_at_ms = elapsed_ms_since(attempted_at_ms, started);
+        let saved = ledger
+            .record_delivery_progress(&row.id, &owner, next_chunk, checkpointed_at_ms)
+            .map_err(|error| format!("{error:#}"));
+        let failed = saved.as_ref().err().cloned();
+        let _ = checkpoint.saved.send(saved);
+        if let Some(error) = failed {
+            bail!(error);
+        }
+    }
+    let attempt = DeliveryAttempt {
+        next_chunk: attempt.next_chunk.max(next_chunk),
+        delivered: attempt.delivered,
+        error: attempt.error,
+    };
+    let completed_at_ms = elapsed_ms_since(attempted_at_ms, started);
+    ledger.record_delivery(&row.id, &owner, &attempt, completed_at_ms)
+}
+
+fn elapsed_ms_since(start_ms: i64, started: Instant) -> i64 {
+    start_ms.saturating_add(i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX))
 }
 
 async fn run_scheduled(cfg: Config, queued: QueuedRun) -> Result<()> {
@@ -1862,6 +2028,7 @@ mod tests {
         _target: String,
         _text: String,
         start_chunk: usize,
+        _progress: DeliveryProgress,
     ) -> DeliveryAttempt {
         DeliveryAttempt::delivered(start_chunk.saturating_add(1))
     }
@@ -1871,6 +2038,7 @@ mod tests {
         _target: String,
         _text: String,
         start_chunk: usize,
+        _progress: DeliveryProgress,
     ) -> DeliveryAttempt {
         DeliveryAttempt::failed(start_chunk, "delivery unavailable")
     }
@@ -2188,21 +2356,226 @@ mod tests {
             .claim_due_deliveries(60_000, "second", 1)
             .unwrap()
             .is_empty());
+        first
+            .record_delivery_progress(&id, "first", 2, 70_000)
+            .unwrap();
+        assert!(second
+            .claim_due_deliveries(960_000, "second", 1)
+            .unwrap()
+            .is_empty());
 
         first
             .record_delivery(
                 &id,
                 "first",
                 &DeliveryAttempt::failed(2, "third chunk failed"),
-                60_000,
+                70_000,
             )
             .unwrap();
         assert!(second
-            .claim_due_deliveries(89_999, "second", 1)
+            .claim_due_deliveries(99_999, "second", 1)
             .unwrap()
             .is_empty());
-        let retry = second.claim_due_deliveries(90_000, "second", 1).unwrap();
+        let retry = second.claim_due_deliveries(100_000, "second", 1).unwrap();
         assert_eq!(retry[0].chunk_index, 2);
+    }
+
+    #[test]
+    fn delivery_attempt_timeout_stays_below_the_claim_lease() {
+        assert!(duration_ms(DELIVERY_ATTEMPT_TIMEOUT) < DELIVERY_CLAIM_LEASE_MS);
+    }
+
+    #[tokio::test]
+    async fn delivery_claim_lease_starts_after_tick_work() {
+        let jobs_dir = temp_dir("delivery-delayed-claim-jobs");
+        let workdir = temp_dir("delivery-delayed-claim-work");
+        let database = temp_path("delivery-delayed-claim-db");
+        let run_dir = temp_dir("delivery-delayed-claim-run");
+        write_job(&jobs_dir, "delayed-claim", &scheduled_job(&workdir, true));
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let job = Catalog::load_named(&cfg, "delayed-claim").unwrap();
+        let mut first = Ledger::open(&cfg.database_path).unwrap();
+        let id = first
+            .enqueue_scheduled(&job, &job.triggers[0], 60_000, 60_000, "telegram", "7")
+            .unwrap();
+        first
+            .conn
+            .execute(
+                "UPDATE job_runs SET state = 'skipped_overlap', finished_at_ms = 60000,
+                    delivery_state = 'pending' WHERE id = ?1",
+                [&id],
+            )
+            .unwrap();
+
+        let tick_started = Instant::now();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let claimed_at_ms = elapsed_ms_since(60_000, tick_started);
+        assert!(claimed_at_ms >= 60_010);
+        assert_eq!(
+            first
+                .claim_due_deliveries(claimed_at_ms, "delayed-worker", 1)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let mut second = Ledger::open(&cfg.database_path).unwrap();
+        assert!(second
+            .claim_due_deliveries(60_000 + DELIVERY_CLAIM_LEASE_MS, "second-worker", 1,)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn delivery_checkpoints_are_durable_before_the_attempt_finishes() {
+        let jobs_dir = temp_dir("delivery-checkpoint-jobs");
+        let workdir = temp_dir("delivery-checkpoint-work");
+        let database = temp_path("delivery-checkpoint-db");
+        let run_dir = temp_dir("delivery-checkpoint-run");
+        write_job(&jobs_dir, "checkpoint", &scheduled_job(&workdir, true));
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let job = Catalog::load_named(&cfg, "checkpoint").unwrap();
+        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let id = ledger
+            .enqueue_scheduled(&job, &job.triggers[0], 60_000, 60_000, "telegram", "7")
+            .unwrap();
+        ledger
+            .conn
+            .execute(
+                "UPDATE job_runs SET state = 'skipped_overlap', finished_at_ms = 60000,
+                    delivery_state = 'pending' WHERE id = ?1",
+                [&id],
+            )
+            .unwrap();
+        let row = ledger
+            .claim_due_deliveries(60_000, "checkpoint-worker", 1)
+            .unwrap()
+            .remove(0);
+        drop(ledger);
+
+        let checkpoint_sent = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let captured_checkpoint = checkpoint_sent.clone();
+        let captured_release = release.clone();
+        let database_path = cfg.database_path.clone();
+        let claimed_at = Instant::now();
+        let task = tokio::spawn(async move {
+            run_delivery_with_timeout(
+                database_path,
+                "checkpoint-worker".to_string(),
+                row,
+                60_000,
+                claimed_at,
+                move |_, _, _, _, progress| {
+                    let checkpoint_sent = captured_checkpoint.clone();
+                    let release = captured_release.clone();
+                    async move {
+                        progress.checkpoint(2).await.unwrap();
+                        checkpoint_sent.notify_one();
+                        release.notified().await;
+                        DeliveryAttempt::delivered(3)
+                    }
+                },
+                Duration::from_secs(5),
+            )
+            .await
+        });
+        checkpoint_sent.notified().await;
+
+        let saved_chunk = Ledger::open(&cfg.database_path)
+            .unwrap()
+            .conn
+            .query_row(
+                "SELECT delivery_chunk_index FROM job_runs WHERE id = ?1",
+                [&id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(saved_chunk, 2);
+
+        release.notify_one();
+        task.await.unwrap().unwrap();
+        let ledger = Ledger::open(&cfg.database_path).unwrap();
+        let final_state = ledger
+            .conn
+            .query_row(
+                "SELECT delivery_state, delivery_chunk_index FROM job_runs WHERE id = ?1",
+                [&id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(final_state, ("delivered".to_string(), 3));
+    }
+
+    #[tokio::test]
+    async fn delivery_attempt_timeout_includes_worker_delay_and_releases_the_claim() {
+        let jobs_dir = temp_dir("delivery-attempt-timeout-jobs");
+        let workdir = temp_dir("delivery-attempt-timeout-work");
+        let database = temp_path("delivery-attempt-timeout-db");
+        let run_dir = temp_dir("delivery-attempt-timeout-run");
+        write_job(&jobs_dir, "attempt-timeout", &scheduled_job(&workdir, true));
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let job = Catalog::load_named(&cfg, "attempt-timeout").unwrap();
+        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let id = ledger
+            .enqueue_scheduled(&job, &job.triggers[0], 60_000, 60_000, "telegram", "7")
+            .unwrap();
+        ledger
+            .conn
+            .execute(
+                "UPDATE job_runs SET state = 'skipped_overlap', finished_at_ms = 60000,
+                    delivery_state = 'pending' WHERE id = ?1",
+                [&id],
+            )
+            .unwrap();
+        let row = ledger
+            .claim_due_deliveries(60_000, "timeout-worker", 1)
+            .unwrap()
+            .remove(0);
+        drop(ledger);
+        let claimed_at = Instant::now();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let invoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let captured = invoked.clone();
+
+        run_delivery_with_timeout(
+            cfg.database_path.clone(),
+            "timeout-worker".to_string(),
+            row,
+            60_000,
+            claimed_at,
+            move |_, _, _, _, _| {
+                captured.store(true, std::sync::atomic::Ordering::SeqCst);
+                async { DeliveryAttempt::delivered(1) }
+            },
+            Duration::from_millis(10),
+        )
+        .await
+        .unwrap();
+
+        let ledger = Ledger::open(&cfg.database_path).unwrap();
+        let state = ledger
+            .conn
+            .query_row(
+                "SELECT delivery_state, delivery_attempts, delivery_error,
+                        delivery_claim_owner
+                 FROM job_runs WHERE id = ?1",
+                [&id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(state.0, "pending");
+        assert_eq!(state.1, 1);
+        assert_eq!(state.2, "delivery attempt timed out");
+        assert_eq!(state.3, None);
+        assert!(!invoked.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -2237,7 +2610,8 @@ mod tests {
             "slow-worker".to_string(),
             row,
             60_000,
-            |_, _, _, chunk| async move {
+            Instant::now(),
+            |_, _, _, chunk, _| async move {
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 DeliveryAttempt::failed(chunk, "delivery unavailable")
             },
@@ -2296,7 +2670,7 @@ mod tests {
 
         tokio::time::timeout(
             Duration::from_millis(100),
-            scheduler.tick(60_000, move |_, _, _, start_chunk| {
+            scheduler.tick(60_000, move |_, _, _, start_chunk, _| {
                 let captured = captured.clone();
                 async move {
                     captured.notified().await;
@@ -2366,31 +2740,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn impossible_trigger_does_not_block_other_schedules() {
+    async fn impossible_triggers_are_rejected_without_blocking_valid_schedules() {
         let jobs_dir = temp_dir("impossible-trigger-jobs");
         let workdir = temp_dir("impossible-trigger-work");
         let database = temp_path("impossible-trigger-db");
         let run_dir = temp_dir("impossible-trigger-run");
-        write_job(
-            &jobs_dir,
-            "a-impossible",
-            &scheduled_job(&workdir, true).replace("* * * * *", "0 0 31 2 *"),
-        );
+        for index in 0..16 {
+            write_job(
+                &jobs_dir,
+                &format!("a-impossible-{index}"),
+                &scheduled_job(&workdir, true).replace("* * * * *", "0 0 31 2 *"),
+            );
+        }
         write_job(&jobs_dir, "z-valid", &scheduled_job(&workdir, true));
         let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let catalog = Catalog::load(&cfg).unwrap();
+        assert_eq!(catalog.errors.len(), 16);
+        assert!(catalog
+            .errors
+            .iter()
+            .all(|error| error.message.contains("no possible calendar date")));
         let mut scheduler = Scheduler::new(cfg, "telegram".into(), "7".into());
 
-        scheduler.tick(0, delivery_ok).await.unwrap();
+        tokio::time::timeout(Duration::from_millis(100), scheduler.tick(0, delivery_ok))
+            .await
+            .expect("invalid calendar dates must not monopolize the scheduler")
+            .unwrap();
 
-        assert_eq!(
-            scheduler.next[&("a-impossible".to_string(), "every-minute".to_string())].at_ms,
-            None
-        );
         assert!(
             scheduler.next[&("z-valid".to_string(), "every-minute".to_string())]
                 .at_ms
                 .is_some()
         );
+    }
+
+    #[test]
+    fn cron_calendar_validation_preserves_day_of_week_or_semantics() {
+        let trigger = Trigger {
+            id: "mixed-days".to_string(),
+            kind: "cron".to_string(),
+            schedule: "0 0 31 2 1".to_string(),
+            timezone: "UTC".to_string(),
+            enabled: true,
+        };
+
+        validate_triggers(&[trigger]).unwrap();
     }
 
     #[tokio::test]
@@ -2441,7 +2835,7 @@ printf '%s\n' '{{"type":"thread.started","thread_id":"scheduled"}}'
         drop(scheduler);
         let mut scheduler = Scheduler::new(cfg.clone(), "telegram".into(), "7".into());
         scheduler
-            .tick(start + 3 * 60_000 + 30_000, delivery_failed)
+            .tick(start + 3 * 60_000 + 31_000, delivery_failed)
             .await
             .unwrap();
         scheduler.shutdown().await;
@@ -2449,8 +2843,8 @@ printf '%s\n' '{{"type":"thread.started","thread_id":"scheduled"}}'
         let captured = delivered.clone();
         scheduler
             .tick(
-                start + 3 * 60_000 + 150_000,
-                move |channel, target, text, start_chunk| {
+                start + 3 * 60_000 + 152_000,
+                move |channel, target, text, start_chunk, _| {
                     let captured = captured.clone();
                     async move {
                         captured.lock().unwrap().push((channel, target, text));
@@ -2520,7 +2914,7 @@ printf '%s\n' '{{"type":"thread.started","thread_id":"restart"}}'
         restarted.tick(60_000, delivery_ok).await.unwrap();
         restarted.shutdown().await;
         write_job(&jobs_dir, "restart", &scheduled_job(&workdir, false));
-        for now in [60_000, 90_000, 210_000, 810_000, 2_610_000] {
+        for now in [60_000, 91_000, 212_000, 813_000, 2_614_000] {
             restarted.tick(now, delivery_failed).await.unwrap();
             restarted.shutdown().await;
         }
@@ -2571,7 +2965,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"delivery-only"}'
         let delivered = Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured = delivered.clone();
         scheduler
-            .tick(61_000, move |channel, target, text, start_chunk| {
+            .tick(61_000, move |channel, target, text, start_chunk, _| {
                 let captured = captured.clone();
                 async move {
                     captured.lock().unwrap().push((channel, target, text));

@@ -221,8 +221,11 @@ succeed while its delivery fails.
 Successful output is stored before delivery. Failures and timeouts produce a
 bounded diagnostic result and follow the same delivery policy. Delivery is
 attempted up to five times with bounded backoff using the already stored result;
-it never reruns the agent. Exhausted delivery remains `failed` and is visible in
-the read-only run log. Manual runs move directly to `running` in their claim
+it never reruns the agent. Each successful message chunk advances durable
+progress and renews the delivery claim. A whole-attempt timeout remains shorter
+than the claim lease, preventing another scheduler from reclaiming a live
+worker. Exhausted delivery remains `failed` and is visible in the read-only run
+log. Manual runs move directly to `running` in their claim
 transaction and are never handed to the gateway. On restart, valid scheduled
 `queued` rows remain eligible for the gateway because backend execution has not
 begun. Push only marks a `running` row interrupted after it can acquire that
