@@ -78,10 +78,11 @@ modifying it on disk:
 
 Assistant root: /resolved/path/to/assistant
 Context: /resolved/path/to/assistant/context
+Evals: /resolved/path/to/assistant/evals
 Jobs: /resolved/path/to/assistant/jobs
 
 Begin with context/README.md when user context is relevant.
-Do not modify SOUL.md or installed jobs directly.
+Do not modify SOUL.md, installed jobs, or evals directly.
 Propose job changes through Push's approval workflow.
 ```
 

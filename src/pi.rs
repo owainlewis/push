@@ -17,8 +17,25 @@ pub struct Runner {
 impl Runner {
     /// Executes one turn and returns Pi's final reply plus its stable session id.
     pub async fn run(&self, req: Request<'_>, timeout: Duration) -> Result<RunOutput, RunError> {
+        self.run_with_mode(req, timeout, false).await
+    }
+
+    pub async fn run_evaluator(
+        &self,
+        req: Request<'_>,
+        timeout: Duration,
+    ) -> Result<RunOutput, RunError> {
+        self.run_with_mode(req, timeout, true).await
+    }
+
+    async fn run_with_mode(
+        &self,
+        req: Request<'_>,
+        timeout: Duration,
+        evaluator: bool,
+    ) -> Result<RunOutput, RunError> {
         let attempt = crate::agent::output_with_retry(|| {
-            let mut cmd = self.command(&req);
+            let mut cmd = self.command(&req, evaluator);
             let prompt = req.prompt.as_bytes().to_vec();
             async move {
                 let mut child = cmd.spawn()?;
@@ -80,9 +97,17 @@ impl Runner {
         })
     }
 
-    fn command(&self, req: &Request<'_>) -> Command {
+    fn command(&self, req: &Request<'_>, evaluator: bool) -> Command {
         let mut cmd = Command::new(&self.bin);
         cmd.arg("--print").arg("--mode").arg("json");
+        if evaluator {
+            cmd.arg("--no-tools")
+                .arg("--no-extensions")
+                .arg("--no-skills")
+                .arg("--no-prompt-templates")
+                .arg("--no-context-files")
+                .arg("--no-session");
+        }
         if !req.instructions.trim().is_empty() {
             cmd.arg("--append-system-prompt")
                 .arg(req.instructions.trim());
@@ -402,6 +427,31 @@ mod tests {
             .unwrap();
 
         assert_eq!(output.reply, "recovered");
+    }
+
+    #[tokio::test]
+    async fn evaluator_disables_all_tools_and_extensions() {
+        let work_dir = temp_dir("pi-evaluator-work");
+        let args_path = temp_path("pi-evaluator-args");
+        let cli = FakeCli::new(
+            "pi",
+            &success_script(&args_path, "eval-session", "VERDICT: PASS"),
+        );
+        let runner = Runner { bin: cli.bin() };
+
+        runner
+            .run_evaluator(
+                request(work_dir.to_str().unwrap(), true),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+
+        let args = read_args(&args_path);
+        assert!(args.iter().any(|arg| arg == "--no-tools"));
+        assert!(args.iter().any(|arg| arg == "--no-extensions"));
+        assert!(args.iter().any(|arg| arg == "--no-skills"));
+        assert!(args.iter().any(|arg| arg == "--no-context-files"));
     }
 
     fn success_script(args_path: &std::path::Path, session: &str, reply: &str) -> String {

@@ -43,6 +43,7 @@ Frontmatter fields:
 | `timeout` | yes | Positive duration no greater than `jobs_max_timeout` |
 | `workdir` | yes | Existing working directory for the backend |
 | `backend` | no | `claude`, `codex`, or `pi`; defaults to `jobs_agent`, then root `agent` |
+| `evals` | no | Reusable Markdown agent eval names from `<assistant_root>/evals/` |
 | `triggers` | no | One or more cron trigger tables |
 
 Unknown fields are errors. A job work directory may not overlap the assistant
@@ -58,6 +59,44 @@ push job show repo-review
 
 Validation reports every valid and invalid file. An invalid job is disabled
 individually and does not stop messaging or other valid jobs.
+
+## Evaluate completed work
+
+Jobs can assign one or more reusable agent evals:
+
+```toml
+evals = ["writing-style", "task-completion"]
+```
+
+Each name resolves to one non-empty regular Markdown file directly under
+`<assistant_root>/evals/`. Names use the same lowercase ASCII slug format as
+jobs. Symlinks, missing files, duplicate names, invalid UTF-8, more than 16
+assigned evals, files larger than 64 KiB, and assigned evals larger than 256 KiB
+in total are rejected during job validation. Assigned eval contents are included
+in the validated job snapshot, so changing an eval changes the snapshot used for
+future claims.
+
+For example, create `<assistant_root>/evals/writing-style.md`:
+
+```markdown
+# Writing style
+
+Fail work that uses em dashes, unsupported claims, or needlessly complex words.
+```
+
+After a job returns successfully, Push starts one fresh evaluator session using
+the same backend, timeout, and work directory. The evaluator receives the
+original job, final response, and every assigned eval, then must finish with
+`VERDICT: PASS` or `VERDICT: FAIL`. Push disables evaluator shell access,
+external MCP tools, extensions, browser integrations, and session persistence.
+Codex project instructions are also disabled. Some backends may retain
+non-mutating built-in utility tools. The first version evaluates the returned
+response and does not inspect work-directory artifacts.
+
+Evaluation is recorded separately as `running`, `passed`, `failed`, `error`, or
+`not_requested`. A failed or malformed evaluation does not rewrite the result,
+rerun the job, or change a successful execution into a failed execution.
+Scheduled delivery includes the evaluation verdict and failure details.
 
 ## Run a job manually
 
@@ -129,7 +168,7 @@ and primary delivery destination.
 
 ## Execution and delivery guarantees
 
-- Every run uses a fresh backend session, without chat history.
+- Every job and evaluator run uses a fresh backend session, without chat history.
 - Jobs use the selected agent's own permission configuration.
 - Push does not retry failed or timed-out backend execution because the agent
   may have completed external side effects before failing.
@@ -143,8 +182,8 @@ and primary delivery destination.
 - Queued runs and pending delivery survive restart. Interrupted execution is
   not automatically replayed.
 
-Use `push job runs [<name>]` to inspect execution state, delivery attempts,
-destination, bounded result, and error details.
+Use `push job runs [<name>]` to inspect execution state, evaluation state,
+delivery attempts, destination, bounded results, and error details.
 
 ## Agent-drafted jobs
 

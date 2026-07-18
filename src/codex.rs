@@ -53,11 +53,28 @@ impl Drop for OutputFile {
 impl Runner {
     /// Executes one turn and returns Codex's final reply plus the Codex session id.
     pub async fn run(&self, req: Request<'_>, timeout: Duration) -> Result<RunOutput, RunError> {
+        self.run_with_mode(req, timeout, false).await
+    }
+
+    pub async fn run_evaluator(
+        &self,
+        req: Request<'_>,
+        timeout: Duration,
+    ) -> Result<RunOutput, RunError> {
+        self.run_with_mode(req, timeout, true).await
+    }
+
+    async fn run_with_mode(
+        &self,
+        req: Request<'_>,
+        timeout: Duration,
+        evaluator: bool,
+    ) -> Result<RunOutput, RunError> {
         let output_file = OutputFile::create()
             .map_err(|error| RunError::Failed(format!("prepare Codex output: {error}")))?;
         let out_path = output_file.path.as_path();
         let attempt = crate::agent::output_with_retry(|| {
-            let mut cmd = self.command(&req, out_path);
+            let mut cmd = self.command(&req, out_path, evaluator);
             async move { cmd.output().await }
         });
         let out = match tokio::time::timeout(timeout, attempt).await {
@@ -102,11 +119,44 @@ impl Runner {
         })
     }
 
-    fn command(&self, req: &Request<'_>, out_path: &Path) -> Command {
+    fn command(&self, req: &Request<'_>, out_path: &Path, evaluator: bool) -> Command {
         let mut cmd = Command::new(&self.bin);
         if !req.instructions.trim().is_empty() {
             cmd.arg("-c")
                 .arg(developer_instructions(req.instructions.trim()));
+        }
+        if evaluator {
+            cmd.arg("-c")
+                .arg("mcp_servers={}")
+                .arg("-c")
+                .arg("project_doc_max_bytes=0")
+                .arg("-c")
+                .arg("web_search=\"disabled\"");
+            for feature in [
+                "shell_tool",
+                "unified_exec",
+                "browser_use",
+                "browser_use_external",
+                "browser_use_full_cdp_access",
+                "computer_use",
+                "apps",
+                "in_app_browser",
+                "image_generation",
+                "multi_agent",
+                "code_mode",
+                "code_mode_host",
+                "standalone_web_search",
+                "hooks",
+                "plugins",
+                "plugin_sharing",
+                "workspace_dependencies",
+                "goals",
+                "request_permissions_tool",
+                "auth_elicitation",
+                "tool_call_mcp_elicitation",
+            ] {
+                cmd.arg("--disable").arg(feature);
+            }
         }
         if req.is_new {
             cmd.arg("exec")
@@ -116,6 +166,12 @@ impl Runner {
                 .arg(req.work_dir)
                 .arg("-o")
                 .arg(out_path);
+            if evaluator {
+                cmd.arg("--sandbox")
+                    .arg("read-only")
+                    .arg("--ephemeral")
+                    .arg("--ignore-user-config");
+            }
             cmd.arg(req.prompt);
         } else {
             cmd.arg("exec");
@@ -375,6 +431,33 @@ sleep 2
 
         assert_timeout(err);
         assert!(std::fs::read_dir(&work_dir).unwrap().next().is_none());
+    }
+
+    #[tokio::test]
+    async fn evaluator_disables_tools_and_user_integrations() {
+        let work_dir = temp_dir("codex-evaluator-work");
+        let args_path = temp_path("codex-evaluator-args");
+        let cli = FakeCli::new(
+            "codex",
+            &codex_success_script(&args_path, "VERDICT: PASS", Some("eval-thread")),
+        );
+        let runner = runner(cli.bin());
+
+        runner
+            .run_evaluator(request(work_dir.to_str().unwrap()), Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        let args = read_args(&args_path);
+        assert_arg_pair(&args, "--sandbox", "read-only");
+        assert!(args.iter().any(|arg| arg == "--ephemeral"));
+        assert!(args.iter().any(|arg| arg == "--ignore-user-config"));
+        assert!(args.iter().any(|arg| arg == "mcp_servers={}"));
+        assert!(args.iter().any(|arg| arg == "project_doc_max_bytes=0"));
+        assert!(args.iter().any(|arg| arg == "web_search=\"disabled\""));
+        for feature in ["shell_tool", "unified_exec"] {
+            assert!(args.windows(2).any(|pair| pair == ["--disable", feature]));
+        }
     }
 
     fn runner(bin: String) -> Runner {
