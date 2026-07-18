@@ -45,7 +45,7 @@ This Git repository contains the durable, user-owned parts of one Push assistant
 - `evals/` contains reusable agent evaluation criteria.
 - `jobs/` contains installed Push job runbooks.
 
-Push owns channels, scheduling, history, security, approvals, and delivery outside this repository. The configured agent runtime owns reasoning, tools, skills, MCP servers, and authentication.
+Push owns channels, scheduling, history, security, approvals, and delivery outside this repository. Project skills may live here, while the configured agent runtime owns discovery, execution, permissions, global skills, MCP servers, and authentication.
 "#;
 
 const CONTEXT_README: &str = r#"# Context

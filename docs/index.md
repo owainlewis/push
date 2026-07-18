@@ -41,6 +41,15 @@ to iMessage, Telegram, or Slack.
 
     [:octicons-arrow-right-24: Configure channels](configuration.md#channels)
 
+-   :material-account-cog-outline:{ .lg .middle } **Design your assistant**
+
+    ---
+
+    Shape identity, durable context, reusable skills, jobs, and evaluation
+    criteria without duplicating instructions or committing secrets.
+
+    [:octicons-arrow-right-24: Design the repository](designing-an-assistant.md)
+
 -   :material-calendar-clock:{ .lg .middle } **Automate recurring work**
 
     ---
@@ -74,16 +83,18 @@ Claude Code, Codex, or Pi: reason → use tools → produce result
 ```
 
 You own one Git-versioned assistant repository containing identity, context,
-and jobs. Push owns channels, history, scheduling, approvals, security, and
-delivery. The selected backend owns models, tools, MCP servers, skills, and
-authentication. That boundary keeps Push small and lets the backend change
-without rebuilding your assistant.
+jobs, and optional project skills. Push owns channels, history, scheduling,
+approvals, security, and delivery. The selected backend owns models, skill and
+tool execution, global skills, MCP servers, permissions, and authentication.
+That boundary keeps Push small and lets the backend change without rebuilding
+your assistant.
 
 ## Documentation map
 
 | If you need to… | Read… |
 | --- | --- |
 | install and run one working channel | [Quickstart](getting-started.md) |
+| design identity, context, skills, and jobs | [Designing an assistant](designing-an-assistant.md) |
 | understand every TOML setting | [Configuration](configuration.md) |
 | add recurring or manual work | [Jobs and schedules](jobs.md) |
 | choose backend permissions safely | [Permissions and security](security.md) |

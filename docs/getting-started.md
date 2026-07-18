@@ -15,11 +15,11 @@ You need:
 - Git for the assistant repository created by `push init`
 - `curl`, `tar`, and either `shasum` or `sha256sum` for the release installer
 
-Push uses the backend's existing login, settings, tools, MCP servers, skills,
-and backend configuration. Each chat runs from `assistant_root`, so the backend
-can discover project instructions such as `AGENTS.md` and work with the
-assistant's context directly. Confirm the selected command works before
-starting Push:
+Push uses the backend's existing login, settings, tools, MCP servers, global
+skills, and backend configuration. Each chat runs from `assistant_root`, so the
+backend can discover project instructions and repository-scoped skills and work
+with the assistant's context directly. Confirm the selected command works
+before starting Push:
 
 === "Codex"
 
@@ -79,10 +79,11 @@ instructions in `AGENTS.md`, a `CLAUDE.md` reference to those instructions,
 `README.md`, `context/`, and empty `evals/` and `jobs/` directories. It records
 the canonical root in the selected config file. A new config starts with
 Telegram, Codex, and an empty `telegram.allow_user_ids` list that you must fill
-in. Edit `SOUL.md` to define
-identity and operating style, then add durable user context under `context/`.
+in. Edit `SOUL.md` to define identity and operating style, then add durable
+user context under `context/`.
 Push reads these files at run time and never writes machine-specific paths into
-the repository.
+the repository. Read [Designing an assistant](designing-an-assistant.md) for a
+practical structure for identity, context, shared skills, jobs, and evals.
 
 ## 4. Configure a channel
 
@@ -176,6 +177,7 @@ a Telegram- or Slack-only Linux host.
 
 ## Next steps
 
+- [Design your assistant repository](designing-an-assistant.md)
 - [Configure both channels and per-thread routes](configuration.md)
 - [Create a manual or scheduled job](jobs.md)
 - [Inspect every CLI command](reference/cli.md)

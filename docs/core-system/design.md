@@ -15,8 +15,8 @@ Push is a local personal-assistant gateway. It owns channels, conversation
 history, routing, scheduling, approvals, and delivery while
 delegating reasoning and tool use to disposable agent runtimes such as Claude
 Code and Codex. The durable assistant is one user-owned Git repository with
-`SOUL.md`, `context/`, and `jobs/`. Push stores the canonical conversation
-history in SQLite outside that repository.
+`SOUL.md`, `context/`, `jobs/`, and optional project skills. Push stores the
+canonical conversation history in SQLite outside that repository.
 
 ## Goals
 
@@ -57,9 +57,9 @@ history in SQLite outside that repository.
 ### Ownership boundary
 
 ```text
-Push runtime                    Assistant repository          Agent runtime
-channels, scheduling, history   SOUL.md, context, jobs         reasoning, tools,
-security, delivery              user-owned and Git-versioned   skills, MCP, auth
+Push runtime                    Assistant repository            Agent runtime
+channels, scheduling, history   SOUL.md, context, jobs, skills   reasoning, tools,
+security, delivery              user-owned and Git-versioned     execution, global skills, MCP, auth
 ```
 
 The gateway owns durable runtime state. The user owns the assistant repository.
@@ -179,7 +179,8 @@ backend session id. The request separates:
 - working directory and timeout.
 
 Conversation history storage happens around this boundary and is independent
-of the selected backend. Agent tools, skills, MCP servers, model choice, and
+of the selected backend. Agent tools, skill discovery and execution, MCP
+servers, model choice, and
 execution loops remain backend-owned.
 
 ## Alternatives and tradeoffs

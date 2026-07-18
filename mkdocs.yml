@@ -47,6 +47,7 @@ nav:
   - Home: index.md
   - Get started:
       - Quickstart: getting-started.md
+      - Design your assistant: designing-an-assistant.md
       - Configuration: configuration.md
       - iMessage: channels/imessage.md
       - Telegram: telegram.md

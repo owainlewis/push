@@ -1,8 +1,8 @@
 # Contributing
 
 Push is a small Rust gateway. Changes should preserve that shape: durable
-assistant infrastructure belongs in Push; model reasoning, tools, MCP, skills,
-and coding workflows belong in the selected backend.
+assistant infrastructure belongs in Push; model reasoning, tool and skill
+execution, MCP, and coding workflows belong in the selected backend.
 
 ## Set up the repository
 

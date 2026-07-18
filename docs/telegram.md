@@ -144,7 +144,8 @@ Protect these files as credentials or private assistant data:
 - the bot token and configuration
 - `state.json` and the audit log
 - `push.db`
-- the private `assistant_root` repository, including `SOUL.md`, context, and jobs
+- the private `assistant_root` repository, including identity, context, jobs,
+  and optional project skills
 
 The assistant directory is intended to be versioned in its own private Git
 repository. Never put bot tokens, config secrets, state files, audit logs, or
