@@ -33,11 +33,14 @@ const AGENTS: &str = r#"# Assistant repository instructions
 - Keep secrets, sessions, databases, drafts, logs, and other runtime state outside this repository.
 "#;
 
+const CLAUDE: &str = "@AGENTS.md\n";
+
 const README: &str = r#"# Assistant
 
 This Git repository contains the durable, user-owned parts of one Push assistant.
 
 - `SOUL.md` defines the assistant's identity and working style.
+- `AGENTS.md` contains shared agent instructions; `CLAUDE.md` references it.
 - `context/` contains durable context the assistant may read and update.
 - `evals/` contains reusable agent evaluation criteria.
 - `jobs/` contains installed Push job runbooks.
@@ -346,6 +349,7 @@ fn scaffold(root: &Path) -> Result<()> {
     create_directory(&root.join("jobs"))?;
     create_file(&root.join("SOUL.md"), SOUL)?;
     create_file(&root.join("AGENTS.md"), AGENTS)?;
+    create_file(&root.join("CLAUDE.md"), CLAUDE)?;
     create_file(&root.join("README.md"), README)?;
     create_file(&root.join("context/README.md"), CONTEXT_README)?;
     Ok(())
@@ -559,6 +563,10 @@ mod tests {
         assert!(result.git_initialized);
         assert!(target.join("SOUL.md").is_file());
         assert!(target.join("AGENTS.md").is_file());
+        assert_eq!(
+            fs::read_to_string(target.join("CLAUDE.md")).unwrap(),
+            CLAUDE
+        );
         assert!(target.join("README.md").is_file());
         assert!(target.join("context/README.md").is_file());
         assert!(target.join("evals").is_dir());
@@ -581,6 +589,7 @@ mod tests {
         init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap();
         fs::write(target.join("SOUL.md"), "My identity\n").unwrap();
         fs::write(target.join("context/private.md"), "Keep me\n").unwrap();
+        fs::remove_file(target.join("CLAUDE.md")).unwrap();
         let config_before = fs::read_to_string(&config).unwrap();
 
         let result = init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap();
@@ -593,6 +602,10 @@ mod tests {
         assert_eq!(
             fs::read_to_string(target.join("context/private.md")).unwrap(),
             "Keep me\n"
+        );
+        assert_eq!(
+            fs::read_to_string(target.join("CLAUDE.md")).unwrap(),
+            CLAUDE
         );
         assert_eq!(fs::read_to_string(config).unwrap(), config_before);
         let _ = fs::remove_dir_all(parent);

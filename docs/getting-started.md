@@ -74,10 +74,12 @@ install -m 755 target/release/push ~/.local/bin/push
 push init ~/Code/assistant
 ```
 
-Push creates one Git-versioned repository containing `SOUL.md`, `AGENTS.md`,
-`README.md`, `context/`, and empty `evals/` and `jobs/` directories. It records the canonical root in
-the selected config file. A new config starts with Telegram, Codex, and an empty
-`telegram.allow_user_ids` list that you must fill in. Edit `SOUL.md` to define
+Push creates one Git-versioned repository containing `SOUL.md`, shared
+instructions in `AGENTS.md`, a `CLAUDE.md` reference to those instructions,
+`README.md`, `context/`, and empty `evals/` and `jobs/` directories. It records
+the canonical root in the selected config file. A new config starts with
+Telegram, Codex, and an empty `telegram.allow_user_ids` list that you must fill
+in. Edit `SOUL.md` to define
 identity and operating style, then add durable user context under `context/`.
 Push reads these files at run time and never writes machine-specific paths into
 the repository.
