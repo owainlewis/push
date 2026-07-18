@@ -47,7 +47,10 @@ settings from the current shell.
 `push init` accepts an empty target, the selected config by itself, or a
 complete existing assistant layout. It refuses unrelated and partial non-empty
 directories, never overwrites an existing assistant file, persists one
-canonical `assistant_root`, and initializes Git when needed.
+canonical `assistant_root`, and initializes Git when needed. A new assistant
+also gets an enabled `morning-ai-brief` job scheduled for 8:00 each day in the
+machine's local IANA timezone. Delivery starts after `primary_delivery` is
+configured.
 
 ## Commands sent in chat
 
