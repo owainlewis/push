@@ -200,7 +200,7 @@ impl VoiceProvider for OpenAiVoice {
                     "model": SPEECH_MODEL,
                     "voice": self.voice_name,
                     "input": text,
-                    "instructions": "Speak in a natural, clear, concise male voice.",
+                    "instructions": "Speak naturally, clearly, and concisely.",
                     "response_format": "opus"
                 }))
                 .send()
@@ -427,7 +427,7 @@ mod tests {
         assert_eq!(payload["voice"], "onyx");
         assert_eq!(
             payload["instructions"],
-            "Speak in a natural, clear, concise male voice."
+            "Speak naturally, clearly, and concisely."
         );
         assert_eq!(payload["response_format"], "opus");
         assert_eq!(payload["input"], "hello");
