@@ -303,9 +303,19 @@ async fn run_job_command(config_path: &str, command: JobCommand) -> Result<()> {
                     .or(run.error)
                     .unwrap_or_default()
                     .replace('\n', " ");
+                let evaluation_detail =
+                    if run.evaluation_result.is_none() && run.evaluation_error.is_none() {
+                        String::new()
+                    } else {
+                        jobs::format_evaluation_detail(
+                            run.evaluation_result.as_deref(),
+                            run.evaluation_error.as_deref(),
+                        )
+                        .replace('\n', " ")
+                    };
                 let delivery_error = run.delivery_error.unwrap_or_default().replace('\n', " ");
                 println!(
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                     run.id,
                     run.job_name,
                     run.state,
@@ -316,6 +326,8 @@ async fn run_job_command(config_path: &str, command: JobCommand) -> Result<()> {
                     delivery,
                     destination,
                     execution_detail,
+                    run.evaluation_state,
+                    evaluation_detail,
                     delivery_error,
                 );
             }
