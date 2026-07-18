@@ -18,6 +18,7 @@ mod imessage;
 mod jobs;
 mod pi;
 mod rehydration;
+mod restart;
 mod soul;
 mod store;
 mod telegram;
@@ -29,6 +30,25 @@ mod voice;
 use anyhow::{bail, Context, Result};
 
 const DEFAULT_CONFIG_PATH: &str = "~/.push/config.toml";
+const HELP: &str = "Push turns coding agents into a personal assistant you can text.
+
+Usage: push [OPTIONS] [COMMAND]
+
+Commands:
+  help              Print this help
+  init [path]       Create an assistant repository (default: ./assistant)
+  doctor            Validate the configuration and dependencies
+  restart           Restart the installed gateway service
+  job validate      Validate all installed jobs
+  job list          List installed jobs
+  job show <name>   Show an installed job
+  job run <name>    Run an installed job
+  job runs [name]   Show job run history
+
+Options:
+  --config <path>   Use a configuration file (default: ~/.push/config.toml)
+  -h, --help        Print help
+";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -36,6 +56,10 @@ async fn main() -> Result<()> {
 
     let args = Args::parse(std::env::args().skip(1).collect())?;
     match args.command {
+        Command::Help => {
+            print!("{HELP}");
+            Ok(())
+        }
         Command::Init(path) => {
             let result = assistant::init(&path, &args.config_path)?;
             println!("Initialized assistant at {}", result.root.display());
@@ -63,6 +87,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Doctor => doctor::doctor(&args.config_path),
+        Command::Restart => restart::gateway(),
         Command::Job(command) => run_job_command(&args.config_path, command).await,
         Command::Run => {
             let cfg = load_run_config(&args.config_path)?;
@@ -119,9 +144,11 @@ struct Args {
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
+    Help,
     Run,
     Init(String),
     Doctor,
+    Restart,
     Job(JobCommand),
 }
 
@@ -136,6 +163,16 @@ enum JobCommand {
 
 impl Args {
     fn parse(args: Vec<String>) -> Result<Self> {
+        if args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
+        {
+            return Ok(Self {
+                command: Command::Help,
+                config_path: DEFAULT_CONFIG_PATH.to_string(),
+            });
+        }
+
         let mut config_path = DEFAULT_CONFIG_PATH.to_string();
         let mut positional = Vec::new();
         let mut i = 0;
@@ -156,9 +193,11 @@ impl Args {
         }
         let command = match positional.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
             [] => Command::Run,
+            ["help"] => Command::Help,
             ["init"] => Command::Init("./assistant".to_string()),
             ["init", path] => Command::Init((*path).to_string()),
             ["doctor"] => Command::Doctor,
+            ["restart"] => Command::Restart,
             ["job", "validate"] => Command::Job(JobCommand::Validate),
             ["job", "list"] => Command::Job(JobCommand::List),
             ["job", "show", name] => Command::Job(JobCommand::Show((*name).to_string())),
@@ -166,7 +205,7 @@ impl Args {
             ["job", "runs"] => Command::Job(JobCommand::Runs(None)),
             ["job", "runs", name] => Command::Job(JobCommand::Runs(Some((*name).to_string()))),
             _ => bail!(
-                "unknown command; expected init [path], doctor, job validate, job list, job show <name>, job run <name>, job runs [<name>], or --config <path>"
+                "unknown command; expected help, init [path], doctor, restart, job validate, job list, job show <name>, job run <name>, job runs [<name>], or --config <path>"
             ),
         };
         Ok(Self {
@@ -307,6 +346,48 @@ mod tests {
     }
 
     #[test]
+    fn parses_restart_with_config_path() {
+        let args = Args::parse(vec![
+            "--config".to_string(),
+            "custom.toml".to_string(),
+            "restart".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            args,
+            Args {
+                command: Command::Restart,
+                config_path: "custom.toml".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_help_without_treating_it_as_a_command_argument() {
+        assert_eq!(
+            Args::parse(vec!["help".into()]).unwrap(),
+            Args {
+                command: Command::Help,
+                config_path: DEFAULT_CONFIG_PATH.to_string(),
+            }
+        );
+        assert_eq!(
+            Args::parse(vec!["--help".into()]).unwrap(),
+            Args {
+                command: Command::Help,
+                config_path: DEFAULT_CONFIG_PATH.to_string(),
+            }
+        );
+        assert_eq!(
+            Args::parse(vec!["job".into(), "--help".into()])
+                .unwrap()
+                .command,
+            Command::Help
+        );
+    }
+
+    #[test]
     fn parses_all_job_commands_with_config_anywhere() {
         assert_eq!(
             Args::parse(vec!["job".into(), "validate".into()])
@@ -413,7 +494,6 @@ mod tests {
         assert!(cfg.channels.is_empty());
         assert!(cfg.primary_delivery.is_none());
         assert_eq!(cfg.agent, "codex");
-        assert_eq!(cfg.telegram_bot_token_env, "TELEGRAM_BOT_TOKEN");
         assert_eq!(
             cfg.telegram_bot_token.as_deref(),
             Some("replace-with-the-token-from-BotFather")
@@ -625,7 +705,7 @@ mod tests {
         let error = Config::load(path.to_str().unwrap()).unwrap_err();
 
         assert!(error.to_string().contains("inline Telegram token"));
-        assert!(error.to_string().contains("telegram.bot_token_env"));
+        assert!(error.to_string().contains("TELEGRAM_BOT_TOKEN"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -661,7 +741,6 @@ db_path = "/tmp/messages.db"
 self_handles = ["me@example.com"]
 
 [telegram]
-bot_token_env = "PUSH_TEST_TOKEN"
 allow_user_ids = [7]
 allow_chat_ids = [9]
 
@@ -675,7 +754,6 @@ openai_api_key = "config-openai-key"
 
         assert_eq!(cfg.db_path, "/tmp/messages.db");
         assert_eq!(cfg.self_handles, ["me@example.com"]);
-        assert_eq!(cfg.telegram_bot_token_env, "PUSH_TEST_TOKEN");
         assert_eq!(cfg.telegram_allow_user_ids, [7]);
         assert_eq!(cfg.telegram_allow_chat_ids, [9]);
         assert_eq!(
@@ -745,24 +823,34 @@ allow_user_ids = [9]
     }
 
     #[test]
-    fn legacy_flat_telegram_settings_remain_supported() {
-        let path = temp_path("legacy-flat-telegram-config");
+    fn removed_runtime_settings_fail_with_migration_help() {
+        let path = temp_path("removed-runtime-setting-config");
+        for (key, replacement) in [
+            ("claude_bin", "service PATH"),
+            ("codex_bin", "service PATH"),
+            ("pi_bin", "service PATH"),
+            ("codex_model", "configure the model in Codex"),
+            ("sessions_dir", "remove this key"),
+            ("reply_marker", "remove this key"),
+        ] {
+            std::fs::write(&path, format!("{key} = 'legacy-value'\n")).unwrap();
+
+            let error = Config::load(path.to_str().unwrap()).unwrap_err();
+
+            assert!(error.to_string().contains(key));
+            assert!(error.to_string().contains("no longer configurable"));
+            assert!(error.to_string().contains(replacement));
+        }
         std::fs::write(
             &path,
-            r#"channel = "telegram"
-agent = "codex"
-telegram_bot_token_env = "LEGACY_TOKEN"
-telegram_allow_user_ids = [7]
-telegram_allow_chat_ids = [9]
-"#,
+            "[telegram]\nbot_token_env = 'LEGACY_TOKEN'\nallow_user_ids = [7]\n",
         )
         .unwrap();
 
-        let cfg = Config::load(path.to_str().unwrap()).unwrap();
+        let error = Config::load(path.to_str().unwrap()).unwrap_err();
 
-        assert_eq!(cfg.telegram_bot_token_env, "LEGACY_TOKEN");
-        assert_eq!(cfg.telegram_allow_user_ids, [7]);
-        assert_eq!(cfg.telegram_allow_chat_ids, [9]);
+        assert!(error.to_string().contains("telegram.bot_token_env"));
+        assert!(error.to_string().contains("TELEGRAM_BOT_TOKEN"));
         let _ = std::fs::remove_file(path);
     }
 

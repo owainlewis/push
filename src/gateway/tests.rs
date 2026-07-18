@@ -2207,7 +2207,7 @@ fn draft_test_job(row_id: i64, target: &str, origin: AnswerOrigin) -> Job {
     }
 }
 
-fn test_config(state_path: &str, sessions_dir: &str, assistant_dir: &str) -> Config {
+fn test_config(state_path: &str, _sessions_dir: &str, assistant_dir: &str) -> Config {
     Config {
         channel: "imessage".to_string(),
         channels: Vec::new(),
@@ -2218,7 +2218,6 @@ fn test_config(state_path: &str, sessions_dir: &str, assistant_dir: &str) -> Con
         self_handles: vec!["me@icloud.com".to_string()],
         allow_from: vec!["+15551234567".to_string()],
         telegram_bot_token: None,
-        telegram_bot_token_env: "TELEGRAM_BOT_TOKEN".to_string(),
         telegram_allow_user_ids: Vec::new(),
         telegram_allow_chat_ids: Vec::new(),
         voice_openai_api_key: None,
@@ -2231,18 +2230,13 @@ fn test_config(state_path: &str, sessions_dir: &str, assistant_dir: &str) -> Con
         jobs_max_timeout: "30m".to_string(),
         jobs_run_dir: format!("{state_path}.run"),
         jobs_max_workers: 2,
-        claude_bin: "claude".to_string(),
-        codex_bin: "codex".to_string(),
-        codex_model: None,
-        pi_bin: "pi".to_string(),
-        sessions_dir: sessions_dir.to_string(),
         state_path: state_path.to_string(),
         audit_log_path: format!("{state_path}.audit.jsonl"),
         database_path: format!("{state_path}.db"),
         audit_log_content: false,
         config_path: String::new(),
+        agent_commands: crate::config::AgentCommands::default(),
         assistant_dir: assistant_dir.to_string(),
-        reply_marker: "\n\n-- sent by push".to_string(),
     }
 }
 

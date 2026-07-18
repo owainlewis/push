@@ -5,7 +5,7 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::future::Future;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use chrono::{Datelike, LocalResult, TimeZone, Timelike, Utc};
@@ -21,6 +21,9 @@ use crate::util::{expand_home, now_ms, restrict_permissions, same_file};
 use crate::{history::History, soul};
 
 const MAX_STORED_RESULT_BYTES: usize = 64 * 1024;
+const MAX_DELIVERY_ATTEMPTS: i64 = 5;
+const MAX_DELIVERY_WORKERS: usize = 4;
+const DELIVERY_CLAIM_LEASE_MS: i64 = 15 * 60 * 1_000;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -298,7 +301,7 @@ impl Trigger {
     pub fn next_after_ms(&self, after_ms: i64) -> Result<i64> {
         let spec = CronSpec::parse(self)?;
         spec.next_after_ms(after_ms)
-            .context("cron schedule has no occurrence within two years")
+            .context("cron schedule has no occurrence within eight years")
     }
 }
 
@@ -324,7 +327,9 @@ impl CronSpec {
 
     fn next_after_ms(&self, after_ms: i64) -> Option<i64> {
         let mut candidate_ms = after_ms.div_euclid(60_000) * 60_000 + 60_000;
-        let limit = candidate_ms.saturating_add(2 * 366 * 24 * 60 * 60_000);
+        // Eight years covers the leap-day gap across a non-leap century.
+        // Impossible calendar combinations remain isolated to their trigger.
+        let limit = candidate_ms.saturating_add(8 * 366 * 24 * 60 * 60_000);
         while candidate_ms <= limit {
             let utc = chrono::DateTime::<Utc>::from_timestamp_millis(candidate_ms)?;
             let local = utc.with_timezone(&self.timezone);
@@ -543,6 +548,32 @@ pub struct DeliveryRun {
     pub target: String,
     pub attempts: i64,
     pub last_attempt_ms: Option<i64>,
+    pub chunk_index: usize,
+}
+
+#[derive(Debug)]
+pub struct DeliveryAttempt {
+    pub next_chunk: usize,
+    pub delivered: bool,
+    pub error: Option<String>,
+}
+
+impl DeliveryAttempt {
+    pub fn delivered(next_chunk: usize) -> Self {
+        Self {
+            next_chunk,
+            delivered: true,
+            error: None,
+        }
+    }
+
+    pub fn failed(next_chunk: usize, error: impl Into<String>) -> Self {
+        Self {
+            next_chunk,
+            delivered: false,
+            error: Some(error.into()),
+        }
+    }
 }
 
 impl Ledger {
@@ -863,15 +894,29 @@ impl Ledger {
         Ok(())
     }
 
-    pub fn due_deliveries(&self, now: i64) -> Result<Vec<DeliveryRun>> {
-        let mut statement = self.conn.prepare(
+    pub fn claim_due_deliveries(
+        &mut self,
+        now: i64,
+        owner: &str,
+        limit: usize,
+    ) -> Result<Vec<DeliveryRun>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let stale_before = now.saturating_sub(DELIVERY_CLAIM_LEASE_MS);
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut statement = tx.prepare(
             "SELECT id, job_name, state, result, error, delivery_channel,
-                    delivery_target, delivery_attempts, delivery_last_attempt_ms
+                    delivery_target, delivery_attempts, delivery_last_attempt_ms,
+                    delivery_chunk_index
              FROM job_runs WHERE delivery_state = 'pending'
+               AND (delivery_claim_owner IS NULL OR delivery_claimed_at_ms <= ?1)
              ORDER BY finished_at_ms, id",
         )?;
         let rows = statement
-            .query_map([], |row| {
+            .query_map([stale_before], |row| {
                 Ok(DeliveryRun {
                     id: row.get(0)?,
                     job_name: row.get(1)?,
@@ -882,35 +927,65 @@ impl Ledger {
                     target: row.get(6)?,
                     attempts: row.get(7)?,
                     last_attempt_ms: row.get(8)?,
+                    chunk_index: row.get::<_, i64>(9)?.max(0) as usize,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows
+        drop(statement);
+        let candidates = rows
             .into_iter()
             .filter(|row| {
-                row.attempts < 3
+                row.attempts < MAX_DELIVERY_ATTEMPTS
                     && row.last_attempt_ms.is_none_or(|last| {
                         now.saturating_sub(last) >= delivery_backoff_ms(row.attempts)
                     })
             })
-            .collect())
+            .take(limit)
+            .collect::<Vec<_>>();
+        let mut claimed = Vec::with_capacity(candidates.len());
+        for row in candidates {
+            let changed = tx.execute(
+                "UPDATE job_runs SET delivery_claim_owner = ?2, delivery_claimed_at_ms = ?3
+                 WHERE id = ?1 AND delivery_state = 'pending'
+                   AND (delivery_claim_owner IS NULL OR delivery_claimed_at_ms <= ?4)",
+                params![row.id, owner, now, stale_before],
+            )?;
+            if changed == 1 {
+                claimed.push(row);
+            }
+        }
+        tx.commit()?;
+        Ok(claimed)
     }
 
     pub fn record_delivery(
         &mut self,
         id: &str,
-        delivered: bool,
-        error: Option<&str>,
+        owner: &str,
+        attempt: &DeliveryAttempt,
         now: i64,
     ) -> Result<()> {
-        self.conn.execute(
+        let changed = self.conn.execute(
             "UPDATE job_runs SET delivery_attempts = delivery_attempts + 1,
                 delivery_last_attempt_ms = ?2, delivery_error = ?3,
-                delivery_state = CASE WHEN ?4 THEN 'delivered'
-                    WHEN delivery_attempts + 1 >= 3 THEN 'failed' ELSE 'pending' END
-             WHERE id = ?1 AND delivery_state = 'pending'",
-            params![id, now, error.map(bound_result), delivered],
+                delivery_chunk_index = ?4,
+                delivery_state = CASE WHEN ?5 THEN 'delivered'
+                    WHEN delivery_attempts + 1 >= ?6 THEN 'failed' ELSE 'pending' END,
+                delivery_claim_owner = NULL, delivery_claimed_at_ms = NULL
+             WHERE id = ?1 AND delivery_state = 'pending' AND delivery_claim_owner = ?7",
+            params![
+                id,
+                now,
+                attempt.error.as_deref().map(bound_result),
+                attempt.next_chunk as i64,
+                attempt.delivered,
+                MAX_DELIVERY_ATTEMPTS,
+                owner,
+            ],
         )?;
+        if changed != 1 {
+            bail!("pending delivery {id:?} is not claimed by {owner:?}");
+        }
         Ok(())
     }
 
@@ -964,8 +1039,10 @@ fn duration_ms(duration: Duration) -> i64 {
 fn delivery_backoff_ms(attempts: i64) -> i64 {
     match attempts {
         0 => 0,
-        1 => 1_000,
-        _ => 5_000,
+        1 => 30_000,
+        2 => 2 * 60_000,
+        3 => 10 * 60_000,
+        _ => 30 * 60_000,
     }
 }
 
@@ -974,7 +1051,7 @@ struct NextOccurrence {
     schedule: String,
     timezone: String,
     snapshot_hash: String,
-    at_ms: i64,
+    at_ms: Option<i64>,
 }
 
 pub struct Scheduler {
@@ -983,6 +1060,10 @@ pub struct Scheduler {
     delivery_target: String,
     next: HashMap<(String, String), NextOccurrence>,
     workers: JoinSet<Result<()>>,
+    delivery_workers: JoinSet<Result<()>>,
+    delivery_owner: String,
+    validation_errors: HashMap<String, String>,
+    validation_initialized: bool,
     scheduling_enabled: bool,
     ledger: Option<Ledger>,
 }
@@ -995,6 +1076,10 @@ impl Scheduler {
             delivery_target,
             next: HashMap::new(),
             workers: JoinSet::new(),
+            delivery_workers: JoinSet::new(),
+            delivery_owner: Uuid::new_v4().to_string(),
+            validation_errors: HashMap::new(),
+            validation_initialized: false,
             scheduling_enabled: true,
             ledger: None,
         }
@@ -1007,6 +1092,10 @@ impl Scheduler {
             delivery_target: String::new(),
             next: HashMap::new(),
             workers: JoinSet::new(),
+            delivery_workers: JoinSet::new(),
+            delivery_owner: Uuid::new_v4().to_string(),
+            validation_errors: HashMap::new(),
+            validation_initialized: false,
             scheduling_enabled: false,
             ledger: None,
         }
@@ -1014,11 +1103,18 @@ impl Scheduler {
 
     pub async fn tick<F, Fut>(&mut self, now: i64, deliver: F) -> Result<()>
     where
-        F: Fn(String, String, String) -> Fut,
-        Fut: Future<Output = Result<()>>,
+        F: Fn(String, String, String, usize) -> Fut + Clone + Send + Sync + 'static,
+        Fut: Future<Output = DeliveryAttempt> + Send + 'static,
     {
         while let Some(result) = self.workers.try_join_next() {
             result.context("scheduled worker task failed")??;
+        }
+        while let Some(result) = self.delivery_workers.try_join_next() {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::error!("scheduled delivery worker failed: {error:#}"),
+                Err(error) => tracing::error!("scheduled delivery task failed: {error}"),
+            }
         }
         // Reuse one connection across ticks. Any error drops it, so the next
         // tick starts from a freshly opened ledger.
@@ -1029,6 +1125,7 @@ impl Scheduler {
         ledger.recover_stale_runs(&self.cfg, now)?;
 
         let catalog = Catalog::load(&self.cfg)?;
+        self.report_catalog_errors(&catalog);
         let mut seen = HashSet::new();
         for job in catalog.jobs.values().filter(|_| self.scheduling_enabled) {
             for trigger in job.triggers.iter().filter(|trigger| trigger.enabled) {
@@ -1040,13 +1137,24 @@ impl Scheduler {
                         || existing.snapshot_hash != job.snapshot_hash
                 });
                 if changed {
+                    let at_ms = match trigger.next_after_ms(now) {
+                        Ok(at_ms) => Some(at_ms),
+                        Err(error) => {
+                            tracing::error!(
+                                "job {:?} trigger {:?} disabled: {error:#}",
+                                job.name,
+                                trigger.id
+                            );
+                            None
+                        }
+                    };
                     self.next.insert(
                         key,
                         NextOccurrence {
                             schedule: trigger.schedule.clone(),
                             timezone: trigger.timezone.clone(),
                             snapshot_hash: job.snapshot_hash.clone(),
-                            at_ms: trigger.next_after_ms(now)?,
+                            at_ms,
                         },
                     );
                     continue;
@@ -1054,10 +1162,13 @@ impl Scheduler {
                 let due = self
                     .next
                     .get(&key)
-                    .map(|next| next.at_ms <= now)
+                    .and_then(|next| next.at_ms)
+                    .map(|at_ms| at_ms <= now)
                     .unwrap_or(false);
                 if due {
-                    let scheduled_at = self.next[&key].at_ms;
+                    let scheduled_at = self.next[&key]
+                        .at_ms
+                        .expect("due occurrence has a scheduled time");
                     ledger.enqueue_scheduled(
                         job,
                         trigger,
@@ -1067,7 +1178,17 @@ impl Scheduler {
                         &self.delivery_target,
                     )?;
                     if let Some(next) = self.next.get_mut(&key) {
-                        next.at_ms = trigger.next_after_ms(now)?;
+                        next.at_ms = match trigger.next_after_ms(now) {
+                            Ok(at_ms) => Some(at_ms),
+                            Err(error) => {
+                                tracing::error!(
+                                    "job {:?} trigger {:?} disabled: {error:#}",
+                                    job.name,
+                                    trigger.id
+                                );
+                                None
+                            }
+                        };
                     }
                 }
             }
@@ -1081,14 +1202,13 @@ impl Scheduler {
                 .spawn(async move { run_scheduled(cfg, queued).await });
         }
 
-        for row in ledger.due_deliveries(now)? {
-            let text = format_delivery(&row);
-            match deliver(row.channel.clone(), row.target.clone(), text).await {
-                Ok(()) => ledger.record_delivery(&row.id, true, None, now)?,
-                Err(error) => {
-                    ledger.record_delivery(&row.id, false, Some(&error.to_string()), now)?
-                }
-            }
+        let delivery_slots = MAX_DELIVERY_WORKERS.saturating_sub(self.delivery_workers.len());
+        for row in ledger.claim_due_deliveries(now, &self.delivery_owner, delivery_slots)? {
+            let database_path = self.cfg.database_path.clone();
+            let owner = self.delivery_owner.clone();
+            let deliver = deliver.clone();
+            self.delivery_workers
+                .spawn(async move { run_delivery(database_path, owner, row, now, deliver).await });
         }
         self.ledger = Some(ledger);
         Ok(())
@@ -1106,7 +1226,70 @@ impl Scheduler {
                 }
             }
         }
+        while let Some(result) = self.delivery_workers.join_next().await {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::error!("delivery worker failed during shutdown: {error:#}")
+                }
+                Err(error) => {
+                    tracing::error!("delivery task failed during shutdown: {error}")
+                }
+            }
+        }
     }
+
+    fn report_catalog_errors(&mut self, catalog: &Catalog) {
+        let current = catalog
+            .errors
+            .iter()
+            .map(|error| {
+                (
+                    error.path.to_string_lossy().to_string(),
+                    format!("{}: {}", error.name, error.message),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        for (path, message) in &current {
+            if !self.validation_initialized || self.validation_errors.get(path) != Some(message) {
+                tracing::warn!("job disabled ({path}): {message}");
+            }
+        }
+        if self.validation_initialized {
+            for path in self.validation_errors.keys() {
+                if !current.contains_key(path) {
+                    tracing::info!("job validation recovered ({path})");
+                }
+            }
+        }
+        self.validation_errors = current;
+        self.validation_initialized = true;
+    }
+}
+
+async fn run_delivery<F, Fut>(
+    database_path: String,
+    owner: String,
+    row: DeliveryRun,
+    attempted_at_ms: i64,
+    deliver: F,
+) -> Result<()>
+where
+    F: Fn(String, String, String, usize) -> Fut,
+    Fut: Future<Output = DeliveryAttempt>,
+{
+    let started = Instant::now();
+    let text = format_delivery(&row);
+    let attempt = deliver(
+        row.channel.clone(),
+        row.target.clone(),
+        text,
+        row.chunk_index,
+    )
+    .await;
+    let completed_at_ms = attempted_at_ms
+        .saturating_add(i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX));
+    Ledger::open(&database_path)?.record_delivery(&row.id, &owner, &attempt, completed_at_ms)
 }
 
 async fn run_scheduled(cfg: Config, queued: QueuedRun) -> Result<()> {
@@ -1253,7 +1436,22 @@ pub fn format_job(job: &Job) -> String {
 mod tests {
     use super::*;
     use crate::test_support::{sh_arg, temp_dir, temp_path, FakeCli};
-    use std::sync::Arc;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[cfg(unix)]
     #[test]
@@ -1306,6 +1504,24 @@ mod tests {
         )
     }
 
+    async fn delivery_ok(
+        _channel: String,
+        _target: String,
+        _text: String,
+        start_chunk: usize,
+    ) -> DeliveryAttempt {
+        DeliveryAttempt::delivered(start_chunk.saturating_add(1))
+    }
+
+    async fn delivery_failed(
+        _channel: String,
+        _target: String,
+        _text: String,
+        start_chunk: usize,
+    ) -> DeliveryAttempt {
+        DeliveryAttempt::failed(start_chunk, "delivery unavailable")
+    }
+
     #[test]
     fn loads_valid_jobs_and_isolates_invalid_files() {
         let jobs_dir = temp_dir("jobs-load");
@@ -1321,6 +1537,25 @@ mod tests {
         assert!(catalog.jobs.contains_key("valid-job"));
         assert_eq!(catalog.errors.len(), 1);
         assert!(catalog.errors[0].message.contains("lowercase ASCII slug"));
+    }
+
+    #[test]
+    fn daily_inbox_example_is_a_valid_scheduled_job() {
+        let jobs_dir = temp_dir("inbox-example-jobs");
+        let workdir = temp_dir("inbox-example-work");
+        let database = temp_path("inbox-example-db");
+        let run_dir = temp_dir("inbox-example-run");
+        let contents = include_str!("../examples/assistant/jobs/daily-inbox-triage.md").replace(
+            "~/.push/workspaces/daily-inbox-triage",
+            &workdir.to_string_lossy(),
+        );
+        write_job(&jobs_dir, "daily-inbox-triage", &contents);
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+
+        let job = Catalog::load_named(&cfg, "daily-inbox-triage").unwrap();
+
+        assert_eq!(job.triggers.len(), 1);
+        assert!(!job.triggers[0].enabled);
     }
 
     #[test]
@@ -1470,6 +1705,250 @@ mod tests {
             autumn.next_after_ms(first).unwrap(),
             utc(2026, 10, 26, 1, 30)
         );
+
+        let leap_day = trigger("0 9 29 2 *");
+        assert_eq!(
+            leap_day.next_after_ms(utc(2026, 3, 1, 0, 0)).unwrap(),
+            utc(2028, 2, 29, 9, 0)
+        );
+        assert_eq!(
+            leap_day.next_after_ms(utc(2097, 1, 1, 0, 0)).unwrap(),
+            utc(2104, 2, 29, 9, 0)
+        );
+    }
+
+    #[test]
+    fn delivery_claim_is_atomic_and_preserves_partial_progress() {
+        let jobs_dir = temp_dir("delivery-claim-jobs");
+        let workdir = temp_dir("delivery-claim-work");
+        let database = temp_path("delivery-claim-db");
+        let run_dir = temp_dir("delivery-claim-run");
+        write_job(&jobs_dir, "claim", &scheduled_job(&workdir, true));
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let job = Catalog::load_named(&cfg, "claim").unwrap();
+        let mut first = Ledger::open(&cfg.database_path).unwrap();
+        let id = first
+            .enqueue_scheduled(&job, &job.triggers[0], 60_000, 60_000, "telegram", "7")
+            .unwrap();
+        first
+            .conn
+            .execute(
+                "UPDATE job_runs SET state = 'skipped_overlap', finished_at_ms = 60000,
+                    delivery_state = 'pending' WHERE id = ?1",
+                [&id],
+            )
+            .unwrap();
+        let mut second = Ledger::open(&cfg.database_path).unwrap();
+
+        let claimed = first.claim_due_deliveries(60_000, "first", 1).unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert!(second
+            .claim_due_deliveries(60_000, "second", 1)
+            .unwrap()
+            .is_empty());
+
+        first
+            .record_delivery(
+                &id,
+                "first",
+                &DeliveryAttempt::failed(2, "third chunk failed"),
+                60_000,
+            )
+            .unwrap();
+        assert!(second
+            .claim_due_deliveries(89_999, "second", 1)
+            .unwrap()
+            .is_empty());
+        let retry = second.claim_due_deliveries(90_000, "second", 1).unwrap();
+        assert_eq!(retry[0].chunk_index, 2);
+    }
+
+    #[tokio::test]
+    async fn delivery_retry_backoff_starts_when_slow_attempt_finishes() {
+        let jobs_dir = temp_dir("delivery-backoff-jobs");
+        let workdir = temp_dir("delivery-backoff-work");
+        let database = temp_path("delivery-backoff-db");
+        let run_dir = temp_dir("delivery-backoff-run");
+        write_job(&jobs_dir, "backoff", &scheduled_job(&workdir, true));
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let job = Catalog::load_named(&cfg, "backoff").unwrap();
+        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let id = ledger
+            .enqueue_scheduled(&job, &job.triggers[0], 60_000, 60_000, "telegram", "7")
+            .unwrap();
+        ledger
+            .conn
+            .execute(
+                "UPDATE job_runs SET state = 'skipped_overlap', finished_at_ms = 60000,
+                    delivery_state = 'pending' WHERE id = ?1",
+                [&id],
+            )
+            .unwrap();
+        let row = ledger
+            .claim_due_deliveries(60_000, "slow-worker", 1)
+            .unwrap()
+            .remove(0);
+        drop(ledger);
+
+        run_delivery(
+            cfg.database_path.clone(),
+            "slow-worker".to_string(),
+            row,
+            60_000,
+            |_, _, _, chunk| async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                DeliveryAttempt::failed(chunk, "delivery unavailable")
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let completed_at_ms = ledger
+            .conn
+            .query_row(
+                "SELECT delivery_last_attempt_ms FROM job_runs WHERE id = ?1",
+                [&id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert!(completed_at_ms > 60_000);
+        assert!(ledger
+            .claim_due_deliveries(90_000, "retry-worker", 1)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            ledger
+                .claim_due_deliveries(120_000, "retry-worker", 1)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn slow_delivery_does_not_block_scheduler_ticks() {
+        let jobs_dir = temp_dir("slow-delivery-jobs");
+        let workdir = temp_dir("slow-delivery-work");
+        let database = temp_path("slow-delivery-db");
+        let run_dir = temp_dir("slow-delivery-run");
+        write_job(&jobs_dir, "slow", &scheduled_job(&workdir, false));
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let job = Catalog::load_named(&cfg, "slow").unwrap();
+        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let id = ledger
+            .enqueue_scheduled(&job, &job.triggers[0], 60_000, 60_000, "telegram", "7")
+            .unwrap();
+        ledger
+            .conn
+            .execute(
+                "UPDATE job_runs SET state = 'skipped_overlap', finished_at_ms = 60000,
+                    delivery_state = 'pending' WHERE id = ?1",
+                [&id],
+            )
+            .unwrap();
+        drop(ledger);
+        let release = Arc::new(tokio::sync::Notify::new());
+        let captured = release.clone();
+        let mut scheduler = Scheduler::delivery_only(cfg);
+
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            scheduler.tick(60_000, move |_, _, _, start_chunk| {
+                let captured = captured.clone();
+                async move {
+                    captured.notified().await;
+                    DeliveryAttempt::delivered(start_chunk)
+                }
+            }),
+        )
+        .await
+        .expect("tick must not await delivery")
+        .unwrap();
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            scheduler.tick(61_000, delivery_ok),
+        )
+        .await
+        .expect("later ticks must remain responsive")
+        .unwrap();
+
+        release.notify_one();
+        scheduler.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_job_validation_state_tracks_failure_and_recovery() {
+        let jobs_dir = temp_dir("runtime-validation-jobs");
+        let workdir = temp_dir("runtime-validation-work");
+        let database = temp_path("runtime-validation-db");
+        let run_dir = temp_dir("runtime-validation-run");
+        write_job(&jobs_dir, "runtime", &scheduled_job(&workdir, true));
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let mut scheduler = Scheduler::new(cfg, "telegram".into(), "7".into());
+
+        scheduler.tick(0, delivery_ok).await.unwrap();
+        assert!(scheduler.validation_errors.is_empty());
+        write_job(&jobs_dir, "runtime", "invalid");
+        scheduler.tick(1_000, delivery_ok).await.unwrap();
+        assert_eq!(scheduler.validation_errors.len(), 1);
+        write_job(&jobs_dir, "runtime", &scheduled_job(&workdir, true));
+        scheduler.tick(2_000, delivery_ok).await.unwrap();
+        assert!(scheduler.validation_errors.is_empty());
+    }
+
+    #[test]
+    fn runtime_job_validation_logs_errors_on_first_pass() {
+        let jobs_dir = temp_dir("startup-validation-jobs");
+        let database = temp_path("startup-validation-db");
+        let run_dir = temp_dir("startup-validation-run");
+        write_job(&jobs_dir, "broken", "invalid");
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let catalog = Catalog::load(&cfg).unwrap();
+        let mut scheduler = Scheduler::new(cfg, "telegram".into(), "7".into());
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let captured = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || LogWriter(captured.clone()))
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            scheduler.report_catalog_errors(&catalog);
+        });
+
+        let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(logs.contains("job disabled"));
+        assert!(logs.contains("broken"));
+    }
+
+    #[tokio::test]
+    async fn impossible_trigger_does_not_block_other_schedules() {
+        let jobs_dir = temp_dir("impossible-trigger-jobs");
+        let workdir = temp_dir("impossible-trigger-work");
+        let database = temp_path("impossible-trigger-db");
+        let run_dir = temp_dir("impossible-trigger-run");
+        write_job(
+            &jobs_dir,
+            "a-impossible",
+            &scheduled_job(&workdir, true).replace("* * * * *", "0 0 31 2 *"),
+        );
+        write_job(&jobs_dir, "z-valid", &scheduled_job(&workdir, true));
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let mut scheduler = Scheduler::new(cfg, "telegram".into(), "7".into());
+
+        scheduler.tick(0, delivery_ok).await.unwrap();
+
+        assert_eq!(
+            scheduler.next[&("a-impossible".to_string(), "every-minute".to_string())].at_ms,
+            None
+        );
+        assert!(
+            scheduler.next[&("z-valid".to_string(), "every-minute".to_string())]
+                .at_ms
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -1496,7 +1975,7 @@ printf '%s\n' '{{"type":"thread.started","thread_id":"scheduled"}}'
         let cli = FakeCli::new("codex", &script);
         write_job(&jobs_dir, "scheduled", &scheduled_job(&workdir, true));
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
-        cfg.codex_bin = cli.bin();
+        cfg.agent_commands.codex = cli.bin();
         let mut scheduler = Scheduler::new(cfg.clone(), "telegram".into(), "7".into());
         let start = Utc
             .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
@@ -1504,43 +1983,42 @@ printf '%s\n' '{{"type":"thread.started","thread_id":"scheduled"}}'
             .unwrap()
             .timestamp_millis();
 
+        scheduler.tick(start, delivery_ok).await.unwrap();
         scheduler
-            .tick(start, |_, _, _| async { Ok(()) })
-            .await
-            .unwrap();
-        scheduler
-            .tick(start + 3 * 60_000, |_, _, _| async { Ok(()) })
+            .tick(start + 3 * 60_000, delivery_ok)
             .await
             .unwrap();
         scheduler.shutdown().await;
         write_job(&jobs_dir, "scheduled", &scheduled_job(&workdir, false));
 
         scheduler
-            .tick(start + 3 * 60_000, |_, _, _| async {
-                bail!("temporary delivery failure")
-            })
+            .tick(start + 3 * 60_000, delivery_failed)
             .await
             .unwrap();
+        scheduler.shutdown().await;
         drop(scheduler);
         let mut scheduler = Scheduler::new(cfg.clone(), "telegram".into(), "7".into());
         scheduler
-            .tick(start + 3 * 60_000 + 1_000, |_, _, _| async {
-                bail!("temporary delivery failure")
-            })
+            .tick(start + 3 * 60_000 + 30_000, delivery_failed)
             .await
             .unwrap();
+        scheduler.shutdown().await;
         let delivered = Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured = delivered.clone();
         scheduler
-            .tick(start + 3 * 60_000 + 6_000, move |channel, target, text| {
-                let captured = captured.clone();
-                async move {
-                    captured.lock().unwrap().push((channel, target, text));
-                    Ok(())
-                }
-            })
+            .tick(
+                start + 3 * 60_000 + 150_000,
+                move |channel, target, text, start_chunk| {
+                    let captured = captured.clone();
+                    async move {
+                        captured.lock().unwrap().push((channel, target, text));
+                        DeliveryAttempt::delivered(start_chunk)
+                    }
+                },
+            )
             .await
             .unwrap();
+        scheduler.shutdown().await;
 
         let rows = Ledger::open(&cfg.database_path)
             .unwrap()
@@ -1583,7 +2061,7 @@ printf '%s\n' '{{"type":"thread.started","thread_id":"restart"}}'
         let cli = FakeCli::new("codex", &script);
         write_job(&jobs_dir, "restart", &scheduled_job(&workdir, true));
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
-        cfg.codex_bin = cli.bin();
+        cfg.agent_commands.codex = cli.bin();
         let job = Catalog::load_named(&cfg, "restart").unwrap();
         let mut ledger = Ledger::open(&cfg.database_path).unwrap();
         let first_id = ledger
@@ -1597,18 +2075,12 @@ printf '%s\n' '{{"type":"thread.started","thread_id":"restart"}}'
         drop(ledger);
 
         let mut restarted = Scheduler::new(cfg.clone(), "telegram".into(), "7".into());
-        restarted
-            .tick(60_000, |_, _, _| async { Ok(()) })
-            .await
-            .unwrap();
+        restarted.tick(60_000, delivery_ok).await.unwrap();
         restarted.shutdown().await;
-        for now in [60_000, 61_000, 66_000] {
-            restarted
-                .tick(now, |_, _, _| async {
-                    bail!("delivery remains unavailable")
-                })
-                .await
-                .unwrap();
+        write_job(&jobs_dir, "restart", &scheduled_job(&workdir, false));
+        for now in [60_000, 90_000, 210_000, 810_000, 2_610_000] {
+            restarted.tick(now, delivery_failed).await.unwrap();
+            restarted.shutdown().await;
         }
 
         let rows = Ledger::open(&cfg.database_path)
@@ -1618,7 +2090,7 @@ printf '%s\n' '{{"type":"thread.started","thread_id":"restart"}}'
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].state, "succeeded");
         assert_eq!(rows[0].delivery_state, "failed");
-        assert_eq!(rows[0].delivery_attempts, 3);
+        assert_eq!(rows[0].delivery_attempts, 5);
         assert_eq!(
             std::fs::read_to_string(args_path).unwrap().lines().count(),
             1
@@ -1644,31 +2116,29 @@ printf '%s\n' '{"type":"thread.started","thread_id":"delivery-only"}'
         let cli = FakeCli::new("codex", script);
         write_job(&jobs_dir, "delivery-only", &scheduled_job(&workdir, true));
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
-        cfg.codex_bin = cli.bin();
+        cfg.agent_commands.codex = cli.bin();
         let job = Catalog::load_named(&cfg, "delivery-only").unwrap();
         Ledger::open(&cfg.database_path)
             .unwrap()
             .enqueue_scheduled(&job, &job.triggers[0], 60_000, 60_000, "telegram", "7")
             .unwrap();
         let mut scheduler = Scheduler::delivery_only(cfg.clone());
-        scheduler
-            .tick(60_000, |_, _, _| async { Ok(()) })
-            .await
-            .unwrap();
+        scheduler.tick(60_000, delivery_ok).await.unwrap();
         scheduler.shutdown().await;
 
         let delivered = Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured = delivered.clone();
         scheduler
-            .tick(61_000, move |channel, target, text| {
+            .tick(61_000, move |channel, target, text, start_chunk| {
                 let captured = captured.clone();
                 async move {
                     captured.lock().unwrap().push((channel, target, text));
-                    Ok(())
+                    DeliveryAttempt::delivered(start_chunk)
                 }
             })
             .await
             .unwrap();
+        scheduler.shutdown().await;
 
         let row = Ledger::open(&cfg.database_path)
             .unwrap()
@@ -1693,7 +2163,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"delivery-only"}'
             &scheduled_job(&workdir, true).replace("timeout = \"5s\"", "timeout = \"10ms\""),
         );
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
-        cfg.codex_bin = slow.bin();
+        cfg.agent_commands.codex = slow.bin();
         let job = Catalog::load_named(&cfg, "timeout").unwrap();
         Ledger::open(&cfg.database_path)
             .unwrap()
@@ -1701,10 +2171,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"delivery-only"}'
             .unwrap();
         let mut scheduler = Scheduler::new(cfg.clone(), "telegram".into(), "7".into());
 
-        scheduler
-            .tick(60_000, |_, _, _| async { Ok(()) })
-            .await
-            .unwrap();
+        scheduler.tick(60_000, delivery_ok).await.unwrap();
         scheduler.shutdown().await;
 
         let rows = Ledger::open(&cfg.database_path)
@@ -1728,7 +2195,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"delivery-only"}'
         let failed = FakeCli::new("codex", "#!/bin/sh\nprintf '%s\n' boom >&2\nexit 1\n");
         write_job(&jobs_dir, "failure", &scheduled_job(&workdir, true));
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
-        cfg.codex_bin = failed.bin();
+        cfg.agent_commands.codex = failed.bin();
         let job = Catalog::load_named(&cfg, "failure").unwrap();
         Ledger::open(&cfg.database_path)
             .unwrap()
@@ -1736,10 +2203,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"delivery-only"}'
             .unwrap();
         let mut scheduler = Scheduler::new(cfg.clone(), "telegram".into(), "7".into());
 
-        scheduler
-            .tick(60_000, |_, _, _| async { Ok(()) })
-            .await
-            .unwrap();
+        scheduler.tick(60_000, delivery_ok).await.unwrap();
         scheduler.shutdown().await;
 
         let row = Ledger::open(&cfg.database_path)
@@ -1777,7 +2241,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"limited"}'
         write_job(&jobs_dir, "first", &scheduled_job(&workdir, true));
         write_job(&jobs_dir, "second", &scheduled_job(&workdir, true));
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
-        cfg.codex_bin = cli.bin();
+        cfg.agent_commands.codex = cli.bin();
         cfg.jobs_max_workers = 1;
         let catalog = Catalog::load(&cfg).unwrap();
         let mut ledger = Ledger::open(&cfg.database_path).unwrap();
@@ -1788,10 +2252,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"limited"}'
         }
         let mut scheduler = Scheduler::new(cfg.clone(), "telegram".into(), "7".into());
 
-        scheduler
-            .tick(60_000, |_, _, _| async { Ok(()) })
-            .await
-            .unwrap();
+        scheduler.tick(60_000, delivery_ok).await.unwrap();
         assert_eq!(scheduler.workers.len(), 1);
         for _ in 0..100 {
             if Ledger::open(&cfg.database_path)
@@ -1814,10 +2275,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"limited"}'
             1
         );
         scheduler.shutdown().await;
-        scheduler
-            .tick(61_000, |_, _, _| async { Ok(()) })
-            .await
-            .unwrap();
+        scheduler.tick(61_000, delivery_ok).await.unwrap();
         assert_eq!(scheduler.workers.len(), 1);
         scheduler.shutdown().await;
 
@@ -1888,13 +2346,10 @@ printf '%s\n' '{"type":"thread.started","thread_id":"after-crash"}'
         let cli = FakeCli::new("codex", script);
         write_job(&jobs_dir, "cli-live", &scheduled_job(&workdir, true));
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
-        cfg.codex_bin = cli.bin();
+        cfg.agent_commands.codex = cli.bin();
         let start = 1_800_000_000_000i64;
         let mut before_restart = Scheduler::new(cfg.clone(), "telegram".into(), "7".into());
-        before_restart
-            .tick(start, |_, _, _| async { Ok(()) })
-            .await
-            .unwrap();
+        before_restart.tick(start, delivery_ok).await.unwrap();
         drop(before_restart);
 
         let mut child = Command::new(std::env::current_exe().unwrap())
@@ -1919,14 +2374,8 @@ printf '%s\n' '{"type":"thread.started","thread_id":"after-crash"}'
         assert!(child.try_wait().unwrap().is_none());
 
         let mut restarted = Scheduler::new(cfg.clone(), "telegram".into(), "7".into());
-        restarted
-            .tick(start + 60_000, |_, _, _| async { Ok(()) })
-            .await
-            .unwrap();
-        restarted
-            .tick(start + 120_000, |_, _, _| async { Ok(()) })
-            .await
-            .unwrap();
+        restarted.tick(start + 60_000, delivery_ok).await.unwrap();
+        restarted.tick(start + 120_000, delivery_ok).await.unwrap();
         let live_rows = Ledger::open(&cfg.database_path)
             .unwrap()
             .runs(Some("cli-live"))
@@ -1936,10 +2385,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"after-crash"}'
 
         child.kill().unwrap();
         child.wait().unwrap();
-        restarted
-            .tick(start + 180_000, |_, _, _| async { Ok(()) })
-            .await
-            .unwrap();
+        restarted.tick(start + 180_000, delivery_ok).await.unwrap();
         restarted.shutdown().await;
 
         let rows = Ledger::open(&cfg.database_path)
@@ -2154,7 +2600,7 @@ printf '%s\n' '{{"type":"thread.started","thread_id":"fresh-thread"}}'
         let cli = FakeCli::new("codex", &script);
         write_job(&jobs_dir, "execute", &valid_job(&workdir));
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
-        cfg.codex_bin = cli.bin();
+        cfg.agent_commands.codex = cli.bin();
 
         let first = run_manual(&cfg, Catalog::load_named(&cfg, "execute").unwrap())
             .await
@@ -2192,7 +2638,7 @@ printf '%s\n' '{{"type":"thread.started","thread_id":"fresh-thread"}}'
             &valid_job(&workdir).replace("timeout = \"5s\"", "timeout = \"10ms\""),
         );
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
-        cfg.codex_bin = slow.bin();
+        cfg.agent_commands.codex = slow.bin();
         let job = Catalog::load_named(&cfg, "timeout").unwrap();
 
         assert!(run_manual(&cfg, job).await.is_err());
@@ -2218,7 +2664,7 @@ printf '%s\n' ok > {}
             sh_arg(&args_path)
         );
         let success = FakeCli::new("codex", &script);
-        cfg.codex_bin = success.bin();
+        cfg.agent_commands.codex = success.bin();
         write_job(&jobs_dir, "timeout", &valid_job(&workdir));
         let output = run_manual(&cfg, Catalog::load_named(&cfg, "timeout").unwrap())
             .await
@@ -2247,7 +2693,7 @@ printf '%s\n' ok > {}
         let runbook = valid_job(&workdir).replace("backend = \"codex\"", "backend = \"claude\"");
         write_job(&jobs_dir, "claude-job", &runbook);
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
-        cfg.claude_bin = cli.bin();
+        cfg.agent_commands.claude = cli.bin();
 
         let output = run_manual(&cfg, Catalog::load_named(&cfg, "claude-job").unwrap())
             .await
@@ -2276,7 +2722,7 @@ printf '%s\n' ok > {}
         let runbook = valid_job(&workdir).replace("backend = \"codex\"", "backend = \"pi\"");
         write_job(&jobs_dir, "pi-job", &runbook);
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
-        cfg.pi_bin = cli.bin();
+        cfg.agent_commands.pi = cli.bin();
 
         let output = run_manual(&cfg, Catalog::load_named(&cfg, "pi-job").unwrap())
             .await

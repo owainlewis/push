@@ -5,13 +5,17 @@ assistant_root = "~/Code/assistant"
 
 # Pi is also supported. Install and authenticate it first, then use:
 # agent = "pi"
-# pi_bin = "pi"
 
 [telegram]
 # Paste the token from BotFather here. Keep this file private.
 bot_token = "replace-with-the-token-from-BotFather"
 # Replace this once with your numeric Telegram user ID.
 allow_user_ids = [123456789]
+
+# Required when a job contains an enabled cron trigger.
+# [primary_delivery]
+# channel = "telegram"
+# target = "123456789"
 
 [voice]
 # Optional. Uncomment to enable voice transcription and spoken replies.

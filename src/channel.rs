@@ -9,6 +9,8 @@ use crate::imessage::{Poller as IMessagePoller, Sender as IMessageSender};
 use crate::telegram::Telegram;
 use crate::voice::AudioClip;
 
+pub(crate) const REPLY_MARKER: &str = "\n\n-- sent by push";
+
 #[derive(Debug, Clone)]
 pub struct InboundVoice {
     /// Channel-owned file identifier. The voice layer treats this as opaque.
@@ -76,7 +78,7 @@ impl Channel {
                     .iter()
                     .map(|value| (normalize_handle(value), thread_handle(value)))
                     .collect(),
-                reply_marker: cfg.reply_marker.clone(),
+                reply_marker: REPLY_MARKER.to_string(),
             }),
             ChannelKind::Telegram => Ok(Self::Telegram(Telegram::new(
                 cfg.telegram_token()
@@ -279,6 +281,19 @@ impl Channel {
         }
     }
 
+    pub fn scheduled_outbound_chunks(&self, text: &str, marker: &str) -> Vec<OutboundChunk> {
+        match self {
+            Self::Telegram(_) => crate::telegram::split_text(text)
+                .into_iter()
+                .map(|text| OutboundChunk {
+                    text,
+                    rich_markdown: false,
+                })
+                .collect(),
+            Self::IMessage { .. } => self.outbound_chunks(text, marker),
+        }
+    }
+
     #[cfg_attr(test, allow(dead_code))]
     pub async fn send_chunk(&self, target: &str, chunk: &OutboundChunk) -> Result<()> {
         match self {
@@ -427,6 +442,23 @@ mod tests {
         assert!(long
             .iter()
             .all(|chunk| { chunk.text.encode_utf16().count() <= crate::telegram::TEXT_LIMIT }));
+    }
+
+    #[test]
+    fn scheduled_telegram_output_uses_persistable_plain_chunk_boundaries() {
+        let text = "x".repeat(crate::telegram::TEXT_LIMIT + 1);
+
+        let chunks = telegram().scheduled_outbound_chunks(&text, "ignored");
+
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks.iter().all(|chunk| !chunk.rich_markdown));
+        assert_eq!(
+            chunks
+                .into_iter()
+                .map(|chunk| chunk.text)
+                .collect::<String>(),
+            text
+        );
     }
 
     #[test]

@@ -5,18 +5,21 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
-use crate::{config, drafts, history, jobs};
+use crate::{channel::Channel, config, drafts, history, jobs};
+use config::TELEGRAM_BOT_TOKEN_ENV;
 
 /// Fails fast with actionable messages when the environment is not ready.
 pub fn preflight(cfg: &config::Config) -> Result<()> {
     let report = run_checks(cfg);
-    if report.is_ok() {
+    if report.preflight_is_ok() {
         return Ok(());
     }
     let failed = report
         .checks
         .into_iter()
-        .find(|check| matches!(check.status, CheckStatus::Fail))
+        .find(|check| {
+            matches!(check.status, CheckStatus::Fail) && check.name != "scheduled delivery"
+        })
         .expect("failed report has at least one failure");
     bail!("{}: {}", failed.name, failed.message);
 }
@@ -75,9 +78,74 @@ fn run_checks(cfg: &config::Config) -> CheckReport {
         }
         Err(e) => checks.push(Check::fail("channels", e.to_string())),
     }
+    check_scheduled_delivery(cfg, &mut checks);
     check_bins(cfg, &mut checks);
     check_voice(cfg, &mut checks);
     CheckReport { checks }
+}
+
+fn check_scheduled_delivery(cfg: &config::Config, checks: &mut Vec<Check>) {
+    let catalog = match jobs::Catalog::load(cfg) {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            checks.push(Check::fail(
+                "scheduled delivery",
+                format!("cannot inspect installed jobs: {error}"),
+            ));
+            return;
+        }
+    };
+    if !catalog.errors.is_empty() {
+        checks.push(Check::fail(
+            "scheduled delivery",
+            format!(
+                "{} invalid installed job(s); run `push job validate` for details before relying on schedules",
+                catalog.errors.len()
+            ),
+        ));
+        return;
+    }
+    let enabled_triggers = catalog
+        .jobs
+        .values()
+        .flat_map(|job| &job.triggers)
+        .filter(|trigger| trigger.enabled)
+        .count();
+    if enabled_triggers == 0 {
+        checks.push(Check::pass(
+            "scheduled delivery",
+            "no enabled scheduled triggers",
+        ));
+        return;
+    }
+    let Some(primary) = cfg.primary_delivery.as_ref() else {
+        checks.push(Check::fail(
+            "scheduled delivery",
+            format!(
+                "{enabled_triggers} enabled trigger(s) require [primary_delivery] with an enabled, allowlisted channel target"
+            ),
+        ));
+        return;
+    };
+    let result = (|| {
+        let kind = config::ChannelKind::parse(&primary.channel)?;
+        if !cfg.enabled_channel_kinds()?.contains(&kind) {
+            anyhow::bail!("primary channel {:?} is not enabled", primary.channel);
+        }
+        let channel = Channel::new_for(cfg, kind)?;
+        channel.primary_target(&primary.target)?;
+        Ok::<_, anyhow::Error>(())
+    })();
+    match result {
+        Ok(()) => checks.push(Check::pass(
+            "scheduled delivery",
+            format!("{enabled_triggers} enabled trigger(s) have a valid primary destination"),
+        )),
+        Err(error) => checks.push(Check::fail(
+            "scheduled delivery",
+            format!("{enabled_triggers} enabled trigger(s) cannot run: {error}"),
+        )),
+    }
 }
 
 fn check_voice(cfg: &config::Config, checks: &mut Vec<Check>) {
@@ -247,14 +315,14 @@ fn check_telegram_config(cfg: &config::Config, checks: &mut Vec<Check>) {
     if cfg.telegram_token().is_some() {
         checks.push(Check::pass(
             "Telegram bot token",
-            format!("loaded from config or {}", cfg.telegram_bot_token_env),
+            format!("loaded from config or {TELEGRAM_BOT_TOKEN_ENV}"),
         ));
     } else {
         checks.push(Check::fail(
             "Telegram bot token",
             format!(
                 "not configured. Set {} or telegram.bot_token without printing the token.",
-                cfg.telegram_bot_token_env
+                TELEGRAM_BOT_TOKEN_ENV
             ),
         ));
     }
@@ -328,6 +396,12 @@ impl CheckReport {
             .iter()
             .filter(|check| matches!(check.status, CheckStatus::Fail))
             .count()
+    }
+
+    fn preflight_is_ok(&self) -> bool {
+        self.checks.iter().all(|check| {
+            !matches!(check.status, CheckStatus::Fail) || check.name == "scheduled delivery"
+        })
     }
 }
 
@@ -523,11 +597,11 @@ claude_tools = []
         let mut checks = Vec::new();
 
         check_bins_with(&cfg, &mut checks, |bin| {
-            (bin == "/fake/codex").then(|| PathBuf::from(bin))
+            (bin == "codex").then(|| PathBuf::from(bin))
         });
 
         assert!(checks.iter().any(|check| {
-            check.name == "binary /fake/codex" && matches!(check.status, CheckStatus::Pass)
+            check.name == "binary codex" && matches!(check.status, CheckStatus::Pass)
         }));
         assert!(checks.iter().any(|check| {
             check.name == "binary osascript" && matches!(check.status, CheckStatus::Fail)
@@ -538,7 +612,7 @@ claude_tools = []
     fn binary_checks_use_configured_pi_binary_when_pi_is_active() {
         let mut cfg = test_config();
         cfg.agent = "pi".to_string();
-        cfg.pi_bin = "/custom/pi".to_string();
+        cfg.agent_commands.pi = "/custom/pi".to_string();
         let mut checks = Vec::new();
 
         check_bins_with(&cfg, &mut checks, |bin| {
@@ -559,7 +633,7 @@ claude_tools = []
         let jobs_dir = temp_dir("doctor-pi-job");
         let workdir = temp_dir("doctor-pi-job-work");
         cfg.jobs_dir = jobs_dir.to_string_lossy().to_string();
-        cfg.pi_bin = "/custom/pi".to_string();
+        cfg.agent_commands.pi = "/custom/pi".to_string();
         std::fs::write(
             jobs_dir.join("pi-job.md"),
             format!(
@@ -571,7 +645,7 @@ claude_tools = []
         let mut checks = Vec::new();
 
         check_bins_with(&cfg, &mut checks, |bin| {
-            (bin == "/fake/codex" || bin == "osascript").then(|| PathBuf::from(bin))
+            (bin == "codex" || bin == "osascript").then(|| PathBuf::from(bin))
         });
 
         assert!(checks.iter().any(|check| {
@@ -594,11 +668,11 @@ claude_tools = []
         let mut checks = Vec::new();
 
         check_bins_with(&cfg, &mut checks, |bin| {
-            (bin == "/fake/codex").then(|| PathBuf::from(bin))
+            (bin == "codex").then(|| PathBuf::from(bin))
         });
 
         assert!(checks.iter().any(|check| {
-            check.name == "binary /fake/codex" && matches!(check.status, CheckStatus::Pass)
+            check.name == "binary codex" && matches!(check.status, CheckStatus::Pass)
         }));
         assert!(!checks
             .iter()
@@ -684,6 +758,63 @@ claude_tools = []
         let _ = std::fs::remove_file(state_path);
         let _ = std::fs::remove_file(cfg.audit_log_path);
         let _ = std::fs::remove_file(cfg.database_path);
+    }
+
+    #[test]
+    fn enabled_schedules_require_a_valid_primary_destination() {
+        let jobs_dir = temp_dir("doctor-scheduled-jobs");
+        let workdir = temp_dir("doctor-scheduled-work");
+        let mut cfg = test_config();
+        cfg.jobs_dir = jobs_dir.to_string_lossy().to_string();
+        std::fs::write(
+            jobs_dir.join("daily.md"),
+            format!(
+                "+++\nversion = 1\ntimeout = \"5m\"\nworkdir = {:?}\n\n[[triggers]]\nid = \"daily\"\nkind = \"cron\"\nschedule = \"0 8 * * *\"\ntimezone = \"Europe/London\"\nenabled = true\n+++\n\nRun.\n",
+                workdir.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let mut checks = Vec::new();
+
+        check_scheduled_delivery(&cfg, &mut checks);
+        assert!(matches!(checks[0].status, CheckStatus::Fail));
+        assert!(checks[0].message.contains("require [primary_delivery]"));
+
+        cfg.primary_delivery = Some(config::PrimaryDeliveryConfig {
+            channel: "imessage".to_string(),
+            target: "me@icloud.com".to_string(),
+        });
+        checks.clear();
+        check_scheduled_delivery(&cfg, &mut checks);
+        assert!(matches!(checks[0].status, CheckStatus::Pass));
+    }
+
+    #[test]
+    fn scheduled_delivery_diagnostic_does_not_stop_gateway_preflight() {
+        let scheduled_only = CheckReport {
+            checks: vec![Check::fail("scheduled delivery", "missing destination")],
+        };
+        assert!(scheduled_only.preflight_is_ok());
+
+        let gateway_failure = CheckReport {
+            checks: vec![Check::fail("conversation database", "unavailable")],
+        };
+        assert!(!gateway_failure.preflight_is_ok());
+    }
+
+    #[test]
+    fn invalid_jobs_do_not_report_that_no_schedules_are_enabled() {
+        let jobs_dir = temp_dir("doctor-invalid-scheduled-job");
+        let mut cfg = test_config();
+        cfg.jobs_dir = jobs_dir.to_string_lossy().to_string();
+        std::fs::write(jobs_dir.join("daily.md"), "invalid").unwrap();
+        let mut checks = Vec::new();
+
+        check_scheduled_delivery(&cfg, &mut checks);
+
+        assert!(matches!(checks[0].status, CheckStatus::Fail));
+        assert!(checks[0].message.contains("push job validate"));
+        assert!(!checks[0].message.contains("no enabled"));
     }
 
     #[test]

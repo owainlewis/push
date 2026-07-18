@@ -54,11 +54,11 @@ complete its authentication as the same user that runs Push. Confirm `pi
 
 ```toml
 agent = "pi"
-pi_bin = "pi"
 ```
 
-Push runs `pi --print --mode json`, stores the session ID from Pi's JSON event
-stream, and resumes it with `--session`. Clearing a conversation discards that
+Push finds `pi` through `PATH`, runs `pi --print --mode json`, and stores the
+session ID from Pi's JSON event stream. It resumes the session with `--session`.
+Clearing a conversation discards that
 mapping, so the next turn creates a fresh Pi session. Push appends `SOUL.md` as
 system instructions, separate from the user message. Pi is not required unless
 the default backend, an enabled route, or `jobs_agent` selects it.
@@ -87,9 +87,9 @@ allow_chat_ids = []
 ```
 
 At least one stable numeric user or chat ID is required. Keep the config file
-private. `push init` creates new config files with mode `0600` on Unix. The
-`bot_token_env` setting remains available when an environment variable is a
-better fit. See the [Telegram guide](telegram.md).
+private. `push init` creates new config files with mode `0600` on Unix. Set
+`TELEGRAM_BOT_TOKEN` when an environment variable is a better fit. See the
+[Telegram guide](telegram.md).
 
 Telegram voice notes are optional. Configure the shared voice provider with:
 
@@ -177,18 +177,12 @@ the selected agent and review [permissions and security](security.md).
 | `agent` | `"claude"` | Default backend |
 | `poll_interval` | `"3s"` | Delay between channel polls |
 | `run_timeout` | `"10m"` | Maximum chat backend run time |
-| `claude_bin` | `"claude"` | Claude Code executable |
-| `codex_bin` | `"codex"` | Codex executable |
-| `codex_model` | unset | Optional Codex model override |
-| `pi_bin` | `"pi"` | Pi coding agent executable |
-| `reply_marker` | `"\n\n-- sent by push"` | iMessage loop-prevention marker |
 
 ### Local state
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `assistant_root` | required for new setups | Canonical root of the one assistant repository; `SOUL.md`, `context/`, and `jobs/` are derived |
-| `sessions_dir` | `~/.push/sessions` | Legacy compatibility setting; chat work directories use `assistant_root` |
 | `state_path` | `~/.push/state.json` | Channel cursors and backend session IDs |
 | `database_path` | `~/.push/push.db` | Canonical conversation, approval, and job history |
 | `audit_log_path` | `~/.push/audit.jsonl` | Structured local audit log |
@@ -204,7 +198,7 @@ the selected agent and review [permissions and security](security.md).
 | `jobs_run_dir` | `~/.push/run` | Local advisory locks |
 | `jobs_max_workers` | `2` | Concurrent scheduled job workers |
 
-Push validates that state, sessions, the assistant root, drafts, locks, the
+Push validates that state, the assistant root, drafts, locks, the
 loaded config file, and job work directories do not overlap in unsafe ways.
 Runtime state and secrets must stay outside the Git-versioned assistant
 repository.
@@ -239,6 +233,10 @@ Legacy flat channel fields remain accepted for migration, but new
 configurations should use `[imessage]` and `[telegram]`. JSON configuration and
 gateway permission fields are no longer supported. Configure permissions in
 the selected agent instead.
+
+Push resolves `claude`, `codex`, and `pi` through the service `PATH`. Configure
+the backend's model in that backend rather than in Push. Telegram environment
+tokens always use `TELEGRAM_BOT_TOKEN`; the iMessage reply marker is internal.
 
 Legacy `assistant_dir` and `jobs_dir` settings remain compatible only when the
 jobs path is exactly `<assistant_dir>/jobs`. For separate legacy paths, move

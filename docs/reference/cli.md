@@ -6,9 +6,11 @@ The default is `~/.push/config.toml`.
 
 | Command | Purpose |
 | --- | --- |
+| `push help`, `push --help` | Print command and option help without loading config or changing files |
 | `push init [path]` | Create and Git-initialize the one assistant repository; defaults to `./assistant` |
 | `push` | Start the configured channel gateway and scheduler |
 | `push doctor` | Validate config, paths, channel requirements, and required backend binaries |
+| `push restart` | Restart the managed gateway to load updated config |
 | `push job validate` | Validate every installed job; exits non-zero if any are invalid |
 | `push job list` | List valid and invalid jobs with backend or error |
 | `push job show <name>` | Print the parsed installed job |
@@ -19,15 +21,24 @@ Examples:
 
 ```sh
 push init ~/Code/assistant
+push help
 push doctor
 push
+push restart
 push job validate
 push job run repo-review
 push job runs repo-review
 ```
 
 Unknown commands and missing values fail with the accepted command forms. The
-CLI does not currently provide shell completion or a generated `--help` page.
+CLI does not currently provide shell completion.
+
+`push restart` targets the service definitions documented by Push:
+`com.owainlewis.push` under launchd on macOS and the `push.service` user unit
+under systemd on Linux. The service definition controls its config path,
+environment, and executable; `--config` does not override the service definition
+for this command. Run `push doctor` separately when you want to validate those
+settings from the current shell.
 
 `push init` accepts an empty target, the selected config by itself, or a
 complete existing assistant layout. It refuses unrelated and partial non-empty

@@ -9,6 +9,27 @@ use serde::Deserialize;
 
 use crate::util::expand_home;
 
+pub const TELEGRAM_BOT_TOKEN_ENV: &str = "TELEGRAM_BOT_TOKEN";
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct AgentCommands {
+    pub claude: String,
+    pub codex: String,
+    pub pi: String,
+}
+
+#[cfg(test)]
+impl Default for AgentCommands {
+    fn default() -> Self {
+        Self {
+            claude: "claude".to_string(),
+            codex: "codex".to_string(),
+            pi: "pi".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     #[serde(default = "default_channel")]
@@ -29,8 +50,6 @@ pub struct Config {
     pub allow_from: Vec<String>,
     #[serde(default)]
     pub telegram_bot_token: Option<String>,
-    #[serde(default = "default_telegram_bot_token_env")]
-    pub telegram_bot_token_env: String,
     #[serde(default)]
     pub telegram_allow_user_ids: Vec<i64>,
     #[serde(default)]
@@ -57,16 +76,6 @@ pub struct Config {
     pub jobs_run_dir: String,
     #[serde(default = "default_jobs_max_workers")]
     pub jobs_max_workers: usize,
-    #[serde(default = "default_claude_bin")]
-    pub claude_bin: String,
-    #[serde(default = "default_codex_bin")]
-    pub codex_bin: String,
-    #[serde(default)]
-    pub codex_model: Option<String>,
-    #[serde(default = "default_pi_bin")]
-    pub pi_bin: String,
-    #[serde(default = "default_sessions_dir")]
-    pub sessions_dir: String,
     #[serde(default = "default_state_path")]
     pub state_path: String,
     #[serde(default = "default_audit_log_path")]
@@ -78,11 +87,13 @@ pub struct Config {
     /// Derived from `assistant_root`. Parsed only for legacy migration.
     #[serde(default = "default_assistant_dir")]
     pub assistant_dir: String,
-    #[serde(default = "default_reply_marker")]
-    pub reply_marker: String,
     /// Canonical path of the loaded config file. Set by `load`, never parsed.
     #[serde(skip)]
     pub config_path: String,
+    /// Test-only command injection point. Never parsed from user configuration.
+    #[cfg(test)]
+    #[serde(skip)]
+    pub(crate) agent_commands: AgentCommands,
 }
 
 impl Config {
@@ -140,6 +151,28 @@ impl Config {
                 );
             }
         }
+        let has_removed_telegram_token_env = root.contains_key("telegram_bot_token_env")
+            || root
+                .get("telegram")
+                .and_then(toml::Value::as_table)
+                .is_some_and(|telegram| telegram.contains_key("bot_token_env"));
+        if has_removed_telegram_token_env {
+            bail!(
+                "telegram_bot_token_env / telegram.bot_token_env is no longer configurable; set TELEGRAM_BOT_TOKEN or remove this key from Push config"
+            );
+        }
+        for (removed, replacement) in [
+            ("claude_bin", "put claude on the service PATH instead"),
+            ("codex_bin", "put codex on the service PATH instead"),
+            ("pi_bin", "put pi on the service PATH instead"),
+            ("codex_model", "configure the model in Codex instead"),
+            ("sessions_dir", "remove this key from Push config"),
+            ("reply_marker", "remove this key from Push config"),
+        ] {
+            if root.contains_key(removed) {
+                bail!("{removed} is no longer configurable; {replacement}");
+            }
+        }
         if root.contains_key("job_permission_profiles") {
             bail!(
                 "job_permission_profiles is no longer supported; jobs run with the backend's own permission configuration, so remove this key"
@@ -167,7 +200,6 @@ impl Config {
             "telegram",
             &[
                 ("bot_token", "telegram_bot_token"),
-                ("bot_token_env", "telegram_bot_token_env"),
                 ("allow_user_ids", "telegram_allow_user_ids"),
                 ("allow_chat_ids", "telegram_allow_chat_ids"),
             ],
@@ -177,7 +209,6 @@ impl Config {
         let config_path = std::fs::canonicalize(&expanded_path)
             .with_context(|| format!("resolve config {expanded_path}"))?;
         c.db_path = expand_home(&c.db_path);
-        c.sessions_dir = expand_home(&c.sessions_dir);
         c.state_path = expand_home(&c.state_path);
         c.audit_log_path = expand_home(&c.audit_log_path);
         c.database_path = expand_home(&c.database_path);
@@ -295,7 +326,7 @@ impl Config {
             .filter(|token| !token.is_empty())
             .map(str::to_string)
             .or_else(|| {
-                std::env::var(&self.telegram_bot_token_env)
+                std::env::var(TELEGRAM_BOT_TOKEN_ENV)
                     .ok()
                     .map(|token| token.trim().to_string())
                     .filter(|token| !token.is_empty())
@@ -342,7 +373,6 @@ impl Config {
         let workdir = resolved_absolute("job workdir", workdir)?;
         let protected_paths = [
             ("assistant_root", self.assistant_root.as_str()),
-            ("sessions_dir", self.sessions_dir.as_str()),
             ("jobs_dir", self.jobs_dir.as_str()),
             ("drafts_dir", self.drafts_dir.as_str()),
             ("jobs_run_dir", self.jobs_run_dir.as_str()),
@@ -396,10 +426,17 @@ impl Config {
     }
 
     pub fn agent_bin(&self, backend: AgentBackend) -> &str {
-        match backend {
-            AgentBackend::Claude => self.claude_bin.as_str(),
-            AgentBackend::Codex => self.codex_bin.as_str(),
-            AgentBackend::Pi => self.pi_bin.as_str(),
+        #[cfg(test)]
+        {
+            match backend {
+                AgentBackend::Claude => self.agent_commands.claude.as_str(),
+                AgentBackend::Codex => self.agent_commands.codex.as_str(),
+                AgentBackend::Pi => self.agent_commands.pi.as_str(),
+            }
+        }
+        #[cfg(not(test))]
+        {
+            backend.as_str()
         }
     }
 
@@ -432,9 +469,6 @@ impl Config {
                         .is_some_and(|v| v.trim().is_empty())
                     {
                         bail!("telegram.bot_token cannot be empty");
-                    }
-                    if self.telegram_bot_token_env.trim().is_empty() {
-                        bail!("telegram.bot_token_env cannot be empty");
                     }
                 }
             }
@@ -474,25 +508,11 @@ impl Config {
 }
 
 fn validate_protected_paths(cfg: &Config) -> Result<()> {
-    let sessions = resolved_absolute("sessions_dir", Path::new(&cfg.sessions_dir))?;
     let jobs = resolved_absolute("jobs_dir", Path::new(&cfg.jobs_dir))?;
     let drafts = resolved_absolute("drafts_dir", Path::new(&cfg.drafts_dir))?;
-    let run = resolved_absolute("jobs_run_dir", Path::new(&cfg.jobs_run_dir))?;
     let assistant = resolved_absolute("assistant_root", Path::new(&cfg.assistant_root))?;
     if paths_overlap(&jobs, &drafts) {
         bail!("jobs_dir and drafts_dir must not overlap");
-    }
-    for (label, path) in [
-        ("jobs_dir", &jobs),
-        ("drafts_dir", &drafts),
-        ("jobs_run_dir", &run),
-    ] {
-        if paths_overlap(&sessions, path) {
-            bail!("sessions_dir and {label} must not overlap");
-        }
-    }
-    if assistant.starts_with(&sessions) {
-        bail!("assistant_root must not be inside sessions_dir");
     }
     if assistant.starts_with(&drafts) {
         bail!("assistant_root must not be inside drafts_dir");
@@ -503,9 +523,6 @@ fn validate_protected_paths(cfg: &Config) -> Result<()> {
         ("audit_log_path", cfg.audit_log_path.as_str()),
     ] {
         let path = resolved_absolute(label, Path::new(value))?;
-        if path.starts_with(&sessions) {
-            bail!("{label} must not be inside sessions_dir");
-        }
         if path.starts_with(&drafts) {
             bail!("{label} must not be inside drafts_dir");
         }
@@ -516,7 +533,6 @@ fn validate_protected_paths(cfg: &Config) -> Result<()> {
 fn validate_runtime_outside_assistant(cfg: &Config) -> Result<()> {
     let assistant = resolved_absolute("assistant_root", Path::new(&cfg.assistant_root))?;
     for (label, value) in [
-        ("sessions_dir", cfg.sessions_dir.as_str()),
         ("drafts_dir", cfg.drafts_dir.as_str()),
         ("jobs_run_dir", cfg.jobs_run_dir.as_str()),
     ] {
@@ -547,7 +563,7 @@ pub(crate) fn validate_inline_token_location(
         && config_path.starts_with(assistant_root)
     {
         bail!(
-            "config {} contains an inline Telegram token inside the Git-versioned assistant repository. Move the config outside the assistant or use telegram.bot_token_env.",
+            "config {} contains an inline Telegram token inside the Git-versioned assistant repository. Move the config outside the assistant or use TELEGRAM_BOT_TOKEN.",
             config_path.display()
         );
     }
@@ -568,18 +584,8 @@ pub(crate) fn validate_inline_voice_key_location(
     Ok(())
 }
 
-#[cfg(test)]
-fn validate_config_path(path: &str, cfg: &Config) -> Result<String> {
-    let config = std::fs::canonicalize(path).with_context(|| format!("resolve config {path}"))?;
-    validate_resolved_config_path(config, cfg)
-}
-
 fn validate_resolved_config_path(config: PathBuf, cfg: &Config) -> Result<String> {
-    let sessions = resolved_absolute("sessions_dir", Path::new(&cfg.sessions_dir))?;
     let drafts = resolved_absolute("drafts_dir", Path::new(&cfg.drafts_dir))?;
-    if config.starts_with(&sessions) {
-        bail!("config file must not be inside sessions_dir");
-    }
     if config.starts_with(&drafts) {
         bail!("config file must not be inside drafts_dir");
     }
@@ -781,9 +787,6 @@ fn default_db_path() -> String {
 fn default_channel() -> String {
     "imessage".to_string()
 }
-fn default_telegram_bot_token_env() -> String {
-    "TELEGRAM_BOT_TOKEN".to_string()
-}
 fn default_poll_interval() -> String {
     "3s".to_string()
 }
@@ -792,15 +795,6 @@ fn default_run_timeout() -> String {
 }
 fn default_agent() -> String {
     "claude".to_string()
-}
-fn default_claude_bin() -> String {
-    "claude".to_string()
-}
-fn default_codex_bin() -> String {
-    "codex".to_string()
-}
-fn default_pi_bin() -> String {
-    "pi".to_string()
 }
 fn default_jobs_dir() -> String {
     "~/.push/jobs".to_string()
@@ -818,9 +812,6 @@ fn default_jobs_run_dir() -> String {
 fn default_jobs_max_workers() -> usize {
     2
 }
-fn default_sessions_dir() -> String {
-    "~/.push/sessions".to_string()
-}
 fn default_state_path() -> String {
     "~/.push/state.json".to_string()
 }
@@ -833,10 +824,6 @@ fn default_database_path() -> String {
 fn default_assistant_dir() -> String {
     "~/.push".to_string()
 }
-fn default_reply_marker() -> String {
-    "\n\n-- sent by push".to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -854,7 +841,6 @@ mod tests {
             self_handles: vec!["me@example.com".to_string()],
             allow_from: Vec::new(),
             telegram_bot_token: None,
-            telegram_bot_token_env: "TELEGRAM_BOT_TOKEN".to_string(),
             telegram_allow_user_ids: Vec::new(),
             telegram_allow_chat_ids: Vec::new(),
             voice_openai_api_key: None,
@@ -867,18 +853,13 @@ mod tests {
             jobs_max_timeout: "30m".to_string(),
             jobs_run_dir: root.join("run").to_string_lossy().to_string(),
             jobs_max_workers: 2,
-            claude_bin: "claude".to_string(),
-            codex_bin: "codex".to_string(),
-            codex_model: None,
-            pi_bin: "pi".to_string(),
-            sessions_dir: root.join("sessions").to_string_lossy().to_string(),
             state_path: root.join("state.json").to_string_lossy().to_string(),
             audit_log_path: root.join("audit.jsonl").to_string_lossy().to_string(),
             database_path: root.join("push.db").to_string_lossy().to_string(),
             audit_log_content: false,
             config_path: String::new(),
+            agent_commands: AgentCommands::default(),
             assistant_dir: root.to_string_lossy().to_string(),
-            reply_marker: String::new(),
         }
     }
 
@@ -911,7 +892,7 @@ mod tests {
         let cfg: Config = toml::from_str("agent = 'pi'").unwrap();
 
         assert_eq!(cfg.agent_backend().unwrap(), AgentBackend::Pi);
-        assert_eq!(cfg.pi_bin, "pi");
+        assert_eq!(cfg.agent_bin(AgentBackend::Pi), "pi");
     }
 
     #[test]
@@ -958,29 +939,12 @@ mod tests {
             .contains("must not overlap"));
 
         let mut cfg = config();
-        cfg.assistant_root = format!("{}/identity", cfg.sessions_dir);
-        assert!(cfg
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("assistant_root must not be inside sessions_dir"));
-
-        let mut cfg = config();
         cfg.assistant_root = format!("{}/identity", cfg.drafts_dir);
         assert!(cfg
             .validate()
             .unwrap_err()
             .to_string()
             .contains("assistant_root must not be inside drafts_dir"));
-
-        let cfg = config();
-        std::fs::create_dir_all(&cfg.sessions_dir).unwrap();
-        let config_path = Path::new(&cfg.sessions_dir).join("config.toml");
-        std::fs::write(&config_path, "channel = 'imessage'").unwrap();
-        assert!(validate_config_path(config_path.to_str().unwrap(), &cfg)
-            .unwrap_err()
-            .to_string()
-            .contains("config file must not be inside sessions_dir"));
     }
 
     #[test]
