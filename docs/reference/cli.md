@@ -33,7 +33,9 @@ push job runs repo-review
 ```
 
 Unknown commands and missing values fail with the accepted command forms. The
-CLI does not currently provide shell completion.
+CLI does not currently provide shell completion or separate help pages for
+subcommands. A `--help` flag anywhere in the argument list prints the global
+help shown by `push --help`.
 
 `push reload` and its `push restart` alias target the service definitions documented by Push:
 `com.owainlewis.push` under launchd on macOS and the `push.service` user unit

@@ -1,5 +1,12 @@
 # Push Strategy
 
+!!! info "Strategy and shipped behavior"
+
+    This page describes durable product choices and possible future work. It is
+    not a list of shipped features. See the [documentation home](index.md) for
+    current behavior and the [GitHub releases](https://github.com/owainlewis/push/releases)
+    for released versions.
+
 ## The Bet
 
 The agent runtime is becoming the commodity layer.
@@ -137,23 +144,22 @@ This means Push can be smaller and more durable:
 - When another agent becomes better, Push can add an adapter instead of
   rewriting the product.
 
-## Current Direction
+## Durable Direction
 
 Lock in these choices:
 
-- Keep iMessage as the first channel, not the whole product.
-- Keep markdown memory as the first memory model.
-- Support multiple runtimes early so the architecture does not harden around
-  one agent.
+- Keep messaging channels replaceable and channel state isolated.
+- Keep Markdown as the first user-owned context model.
+- Keep multiple runtimes behind a narrow backend contract.
 - Avoid a plugin system in the gateway.
 - Avoid a custom agent loop.
 - Treat runtime config as adapter-specific.
 - Keep the core gateway state backend-neutral.
 
-## Next Actions
+## Roadmap
 
-1. Add a second channel after the backend seam has settled.
-2. Add memory write-back only with an audit trail and explicit user review.
-3. Add richer runtime routing, such as task-type routing.
-4. Publish and test the first binary release.
-5. Add a Homebrew formula after release assets are stable.
+These are possible future additions, not shipped behavior or commitments:
+
+1. Add memory write-back only with an audit trail and explicit user review.
+2. Add richer runtime routing, such as task-type routing.
+3. Add a Homebrew formula after release assets are stable.

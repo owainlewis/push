@@ -1,6 +1,12 @@
 # Jobs as Runbooks with Separate Triggers
 
-**Status:** Draft
+**Status:** Historical design, implemented and superseded by the current jobs guide
+
+!!! warning "Historical record"
+
+    This file preserves the design proposal and rollout plan. It is not the
+    current jobs documentation or roadmap. See [Jobs and schedules](../jobs.md)
+    for shipped behavior.
 
 **Author:** Owain Lewis  **Date:** 2026-07-12
 

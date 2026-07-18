@@ -52,7 +52,7 @@ can ask the agent to use any capability allowed by that agent's configuration.
 - tapbacks and Messages system rows
 - blank messages
 - messages from handles outside the allowlist
-- Push's own replies containing the configured marker
+- Push's own replies containing the built-in Push reply marker
 
 The channel expects a recent macOS Messages schema. `push doctor` and runtime
 logs report database access or query failures rather than silently accepting
@@ -72,6 +72,10 @@ agent = "claude"
 See [configuration](../configuration.md#routing) for route precedence.
 
 ## Restart behavior
+
+On the first iMessage start, Push records the newest existing Messages row
+without running it. Send a new message after the gateway starts. Later starts
+continue after the last completed row stored in `state.json`.
 
 Push stores the last completed Messages row in `state.json` and accepted
 conversation turns in `push.db`. It advances the cursor only after a row is
