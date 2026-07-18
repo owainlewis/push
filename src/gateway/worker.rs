@@ -1,12 +1,13 @@
 //! Per-thread worker: runs one message through an agent backend, records the
 //! outcome in canonical history, and delivers the reply.
 
-use std::future::Future;
+use std::future::{pending, Future};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
 use crate::agent::{Request, RunError};
@@ -17,7 +18,7 @@ use crate::soul;
 use crate::util::now_ms;
 use crate::voice::MAX_AUDIO_BYTES;
 
-use super::{audit, complete_row, reply_to, Ctx, Job};
+use super::{audit, complete_row, reply_to, Ctx, Job, WorkerState};
 
 const TYPING_REFRESH: Duration = Duration::from_secs(4);
 pub(super) const DELIVERY_ATTEMPTS: usize = 3;
@@ -27,13 +28,41 @@ pub(super) const DRAFT_SETUP_FAILURE: &str =
     "Push could not prepare its draft workspace. Check the local logs, then resend.";
 
 /// Processes one thread's jobs strictly in order, exiting when the queue closes.
-pub(super) async fn run(ctx: Ctx, mut rx: mpsc::Receiver<Job>) {
+pub(super) async fn run(
+    ctx: Ctx,
+    mut rx: mpsc::Receiver<Job>,
+    mut cancel: watch::Receiver<i64>,
+    state: Arc<std::sync::Mutex<WorkerState>>,
+) {
     while let Some(job) = rx.recv().await {
-        handle(&ctx, job).await;
+        let row_id = job.row_id;
+        {
+            let mut state = state.lock().unwrap();
+            state.current_row = Some(row_id);
+            state.retained_rows.remove(&row_id);
+        }
+        handle_with_interrupt(&ctx, job, interrupt(&mut cancel, row_id)).await;
+        let completed = !ctx.ack.lock().unwrap().in_flight.contains(&row_id);
+        let mut state = state.lock().unwrap();
+        state.current_row = None;
+        if completed {
+            state.pending.retain(|job| job.row_id != row_id);
+            state.retained_rows.remove(&row_id);
+        } else {
+            state.retained_rows.insert(row_id);
+        }
     }
 }
 
-pub(super) async fn handle(ctx: &Ctx, mut job: Job) {
+#[cfg(test)]
+pub(super) async fn handle(ctx: &Ctx, job: Job) {
+    handle_with_interrupt(ctx, job, pending()).await;
+}
+
+async fn handle_with_interrupt<I>(ctx: &Ctx, mut job: Job, interrupt: I)
+where
+    I: Future<Output = ()>,
+{
     let existing_outbound = match ctx.history.lock().unwrap().outbound_for(job.inbound_id) {
         Ok(outbound) => outbound,
         Err(error) => {
@@ -362,27 +391,35 @@ pub(super) async fn handle(ctx: &Ctx, mut job: Job) {
         }
         result
     };
-    let result = if ctx.channel.supports_typing() {
-        let channel = ctx.channel.clone();
-        let target = job.target.clone();
-        let thread = job.thread.clone();
-        run_with_periodic_activity(run, TYPING_REFRESH, move || {
-            let channel = channel.clone();
-            let target = target.clone();
-            let thread = thread.clone();
-            async move {
-                if let Err(e) = channel.send_typing(&target).await {
-                    warn!("[{thread}] Telegram typing update failed: {e}");
+    let run = async {
+        if ctx.channel.supports_typing() {
+            let channel = ctx.channel.clone();
+            let target = job.target.clone();
+            let thread = job.thread.clone();
+            run_with_periodic_activity(run, TYPING_REFRESH, move || {
+                let channel = channel.clone();
+                let target = target.clone();
+                let thread = thread.clone();
+                async move {
+                    if let Err(e) = channel.send_typing(&target).await {
+                        warn!("[{thread}] Telegram typing update failed: {e}");
+                    }
                 }
-            }
-        })
-        .await
-    } else {
-        run.await
+            })
+            .await
+        } else {
+            run.await
+        }
+    };
+    tokio::pin!(run);
+    tokio::pin!(interrupt);
+    let result = tokio::select! {
+        result = &mut run => Some(result),
+        _ = &mut interrupt => None,
     };
 
     match result {
-        Ok(out) => {
+        Some(Ok(out)) => {
             info!(
                 "[{}] {} completed; reply_chars={}",
                 job.thread,
@@ -456,7 +493,7 @@ pub(super) async fn handle(ctx: &Ctx, mut job: Job) {
                 "deliver backend reply",
             );
         }
-        Err(RunError::Timeout) => {
+        Some(Err(RunError::Timeout)) => {
             warn!("[{}] {} run timed out", job.thread, runner.label());
             audit(
                 ctx,
@@ -483,7 +520,33 @@ pub(super) async fn handle(ctx: &Ctx, mut job: Job) {
             )
             .await;
         }
-        Err(RunError::Failed(msg) | RunError::SessionMissing(msg)) => {
+        None => {
+            warn!("[{}] {} run interrupted", job.thread, runner.label());
+            audit(
+                ctx,
+                ctx.audit.failed(
+                    "backend_run_interrupted",
+                    job.row_id,
+                    &job.thread,
+                    Some(job.backend),
+                    format!("{} run interrupted by user", runner.label()),
+                ),
+            );
+            finish_run_with_gateway_reply(
+                ctx,
+                &job,
+                draft_directory.as_deref(),
+                "Stopped the current request.",
+                ReplyLabels {
+                    record: "record interrupted reply",
+                    present: "present interrupted run drafts",
+                    deliver: "deliver interrupted reply",
+                    completion: "interrupted",
+                },
+            )
+            .await;
+        }
+        Some(Err(RunError::Failed(msg) | RunError::SessionMissing(msg))) => {
             error!("[{}] {} error: {msg}", job.thread, runner.label());
             audit(
                 ctx,
@@ -509,6 +572,14 @@ pub(super) async fn handle(ctx: &Ctx, mut job: Job) {
                 },
             )
             .await;
+        }
+    }
+}
+
+async fn interrupt(cancel: &mut watch::Receiver<i64>, row_id: i64) {
+    while *cancel.borrow() != row_id {
+        if cancel.changed().await.is_err() {
+            pending::<()>().await;
         }
     }
 }
@@ -810,9 +881,10 @@ fn command(ctx: &Ctx, job: &Job) -> Option<String> {
             Ok(()) => Some("Started a fresh conversation.".to_string()),
             Err(_) => Some("Couldn't reset the conversation.".to_string()),
         },
-        "/help" => {
-            Some("Commands:\n/clear - start a fresh conversation\n/help - this message".to_string())
-        }
+        "/help" => Some(
+            "Commands:\n/clear - start a fresh conversation\n/stop - stop the active request\n/help - this message"
+                .to_string(),
+        ),
         _ => None,
     }
 }
@@ -836,6 +908,35 @@ pub(super) async fn record_and_deliver(
         text,
     )?;
     deliver_stored(ctx, job, &outbound).await
+}
+
+/// Records an outbound reply and tries delivery once. Control-path replies use
+/// this so a channel outage cannot block the polling loop indefinitely.
+pub(super) async fn record_and_deliver_once(
+    ctx: &Ctx,
+    job: &Job,
+    origin: OutboundOrigin,
+    text: &str,
+) -> Result<bool> {
+    let outbound = ctx.history.lock().unwrap().record_outbound(
+        job.inbound_id,
+        origin,
+        Some(job.backend.as_str()),
+        text,
+    )?;
+    if outbound.status == DeliveryStatus::Delivered {
+        return Ok(true);
+    }
+    let delivered = reply_to(ctx, &job.target, &outbound.content).await;
+    ctx.history.lock().unwrap().mark_delivery(
+        outbound.id,
+        if delivered {
+            DeliveryStatus::Delivered
+        } else {
+            DeliveryStatus::Failed
+        },
+    )?;
+    Ok(delivered)
 }
 
 async fn deliver_stored(

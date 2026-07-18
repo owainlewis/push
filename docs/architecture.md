@@ -341,6 +341,10 @@ The backend still owns tools, skills, MCP, authentication, and execution.
 One worker task exists per conversation thread. Messages in the same thread run
 in order. Different threads can run in parallel.
 
+`/stop` cancels the active backend subprocess for one conversation without
+discarding messages already queued behind it. A closed worker queue is replaced
+and the message that discovered it is retried once.
+
 This prevents two messages in the same conversation from racing against the same
 backend session.
 
