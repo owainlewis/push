@@ -20,3 +20,5 @@ allow_user_ids = [123456789]
 [voice]
 # Optional. Uncomment to enable voice transcription and spoken replies.
 # openai_api_key = "replace-with-your-openai-api-key"
+# Optional. Spoken replies default to the Cedar voice.
+# name = "cedar"
