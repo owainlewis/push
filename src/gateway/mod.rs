@@ -1004,37 +1004,55 @@ fn audit(ctx: &Ctx, event: AuditEvent) {
 
 async fn reply_to(ctx: &Ctx, target: &str, text: &str) -> bool {
     let chunks = ctx.channel.outbound_chunks(text, &ctx.reply_marker);
-    #[cfg(test)]
-    {
-        let mut failures = ctx.send_failures_remaining.lock().unwrap();
-        if *failures > 0 {
-            *failures -= 1;
+    for chunk in chunks {
+        if let Err(error) = send_reply_chunk(ctx, target, &chunk).await {
+            error!("send error to {target}: {error}");
             return false;
         }
-        drop(failures);
-        ctx.sent_replies.lock().unwrap().extend(
-            chunks
-                .into_iter()
-                .map(|chunk| (target.to_string(), chunk.text)),
-        );
-        true
     }
-    #[cfg(not(test))]
+    true
+}
+
+async fn send_reply_chunk(
+    ctx: &Ctx,
+    target: &str,
+    chunk: &crate::channel::OutboundChunk,
+) -> Result<()> {
+    #[cfg(test)]
     {
-        for chunk in chunks {
-            match tokio::time::timeout(SEND_TIMEOUT, ctx.channel.send_chunk(target, &chunk)).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    error!("send error to {target}: {e}");
-                    return false;
-                }
-                Err(_) => {
-                    error!("send to {target} timed out");
-                    return false;
+        let should_fail = {
+            let mut failures = ctx.send_failures_remaining.lock().unwrap();
+            if *failures > 0 {
+                *failures -= 1;
+                true
+            } else {
+                let mut after = ctx.send_failure_after.lock().unwrap();
+                match after.as_mut() {
+                    Some(remaining) if *remaining == 0 => {
+                        *after = None;
+                        true
+                    }
+                    Some(remaining) => {
+                        *remaining -= 1;
+                        false
+                    }
+                    None => false,
                 }
             }
+        };
+        if should_fail {
+            anyhow::bail!("send failed");
         }
-        true
+        ctx.sent_replies
+            .lock()
+            .unwrap()
+            .push((target.to_string(), chunk.text.clone()));
+        Ok(())
+    }
+    #[cfg(not(test))]
+    match tokio::time::timeout(SEND_TIMEOUT, ctx.channel.send_chunk(target, chunk)).await {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!("send timed out"),
     }
 }
 
@@ -1069,44 +1087,7 @@ async fn send_scheduled_chunk(
     target: &str,
     chunk: &crate::channel::OutboundChunk,
 ) -> Result<()> {
-    #[cfg(test)]
-    {
-        let should_fail = {
-            let mut failures = ctx.send_failures_remaining.lock().unwrap();
-            if *failures > 0 {
-                *failures -= 1;
-                true
-            } else {
-                let mut after = ctx.send_failure_after.lock().unwrap();
-                match after.as_mut() {
-                    Some(remaining) if *remaining == 0 => {
-                        *after = None;
-                        true
-                    }
-                    Some(remaining) => {
-                        *remaining -= 1;
-                        false
-                    }
-                    None => false,
-                }
-            }
-        };
-        if should_fail {
-            anyhow::bail!("scheduled send failed");
-        }
-        ctx.sent_replies
-            .lock()
-            .unwrap()
-            .push((target.to_string(), chunk.text.clone()));
-        Ok(())
-    }
-    #[cfg(not(test))]
-    {
-        match tokio::time::timeout(SEND_TIMEOUT, ctx.channel.send_chunk(target, chunk)).await {
-            Ok(result) => result,
-            Err(_) => anyhow::bail!("send timed out"),
-        }
-    }
+    send_reply_chunk(ctx, target, chunk).await
 }
 
 fn complete_row(store: &Arc<Mutex<Store>>, ack: &Arc<Mutex<AckState>>, channel: &str, row_id: i64) {
