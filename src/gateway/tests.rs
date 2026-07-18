@@ -1746,10 +1746,12 @@ async fn closed_worker_queue_is_recovered_without_another_message() {
         thread.to_string(),
         WorkerQueue {
             jobs,
-            pending: Arc::new(Mutex::new(VecDeque::from([lost_job]))),
-            cancel_generation: Arc::new(AtomicU64::new(0)),
+            state: Arc::new(Mutex::new(WorkerState {
+                pending: VecDeque::from([lost_job]),
+                current_row: None,
+                retained_rows: BTreeSet::new(),
+            })),
             cancel,
-            active: Arc::new(AtomicBool::new(false)),
         },
     );
 
@@ -1812,11 +1814,7 @@ async fn stop_interrupts_active_run_and_preserves_queued_messages() {
         .await;
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if gateway
-                .queues
-                .get("imessage:self:me@icloud.com")
-                .is_some_and(|worker| worker.active.load(Ordering::SeqCst))
-            {
+            if !calls.lock().unwrap().is_empty() {
                 break;
             }
             tokio::task::yield_now().await;
@@ -1871,6 +1869,272 @@ async fn stop_interrupts_active_run_and_preserves_queued_messages() {
         .iter()
         .any(|(_, reply)| reply.contains(r#"{"role":"user","content":"queued"}"#)));
     assert_eq!(gateway.store.lock().unwrap().last_row(), 3);
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stop_interrupts_a_worker_queued_in_the_same_poll_batch() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("same-batch-stop-sessions");
+    let assistant_dir = temp_path("same-batch-stop-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mut gateway = Gateway::new(test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    ))
+    .unwrap();
+    let mut runners = HashMap::new();
+    runners.insert(
+        AgentBackend::Codex,
+        Runner::Fake(FakeRunner {
+            backend: AgentBackend::Codex,
+            session_id: "fake-session".to_string(),
+            calls: calls.clone(),
+            before_return: None,
+            wait_for_release: Some(release.clone()),
+            failure: None,
+            resume_missing_once: None,
+        }),
+    );
+    gateway.ctx.runners = Arc::new(runners);
+
+    gateway
+        .tick_fake(vec![
+            message(1, "me@icloud.com", "", true, "slow"),
+            message(2, "me@icloud.com", "", true, "/stop"),
+        ])
+        .await;
+    let interrupted = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if gateway
+                .ctx
+                .sent_replies
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, reply)| reply.contains("Stopped the current request"))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    release.notify_one();
+    gateway.queues.clear();
+    gateway.drain_workers().await;
+    interrupted.expect("a request queued before /stop in the same batch should be interrupted");
+
+    let replies = gateway.ctx.sent_replies.lock().unwrap();
+    assert!(replies
+        .iter()
+        .any(|(_, reply)| reply.contains("Stop requested")));
+    assert!(!replies
+        .iter()
+        .any(|(_, reply)| reply.contains("Nothing is currently running")));
+    assert_eq!(gateway.store.lock().unwrap().last_row(), 2);
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stale_stop_signal_does_not_interrupt_a_later_row() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("stale-stop-sessions");
+    let assistant_dir = temp_path("stale-stop-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut gateway = Gateway::new(test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    ))
+    .unwrap();
+    gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+    let thread = "imessage:self:me@icloud.com";
+
+    gateway
+        .tick_fake(vec![message(1, "me@icloud.com", "", true, "first")])
+        .await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if gateway.store.lock().unwrap().last_row() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first row should complete");
+    gateway.queues.get(thread).unwrap().cancel.send(1).unwrap();
+
+    run_messages(
+        &mut gateway,
+        vec![message(2, "me@icloud.com", "", true, "second")],
+    )
+    .await;
+
+    let prompts = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|call| call.prompt.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(prompts.len(), 2);
+    assert!(prompts[1].contains("second"));
+    assert_eq!(gateway.store.lock().unwrap().last_row(), 2);
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stop_targets_the_current_row_ahead_of_retained_failures() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("current-row-stop-sessions");
+    let assistant_dir = temp_path("current-row-stop-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let mut gateway = Gateway::new(test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    ))
+    .unwrap();
+    let thread = "imessage:self:me@icloud.com";
+    let make_job = |row_id, inbound_id, text: &str| Job {
+        row_id,
+        inbound_id,
+        thread: thread.to_string(),
+        target: "me@icloud.com".to_string(),
+        backend: AgentBackend::Codex,
+        approval_origin: AnswerOrigin {
+            channel: "imessage".to_string(),
+            thread_key: thread.to_string(),
+            sender_key: "me@icloud.com".to_string(),
+            chat_key: "me@icloud.com".to_string(),
+        },
+        text: text.to_string(),
+        reply_with_voice: false,
+        voice_attachment: None,
+    };
+    let inbound_ids = ["failed", "active", "/stop"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, text)| {
+            gateway
+                .ctx
+                .history
+                .lock()
+                .unwrap()
+                .record_inbound("imessage", thread, &format!("imessage:{}", index + 1), text)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let retained = make_job(1, inbound_ids[0], "failed");
+    let active = make_job(2, inbound_ids[1], "active");
+    let stop = make_job(3, inbound_ids[2], "/stop");
+    let (jobs, _jobs_rx) = mpsc::channel(QUEUE_DEPTH);
+    let (cancel, cancel_rx) = watch::channel(0);
+    gateway.queues.insert(
+        thread.to_string(),
+        WorkerQueue {
+            jobs,
+            state: Arc::new(Mutex::new(WorkerState {
+                pending: VecDeque::from([retained, active]),
+                current_row: Some(2),
+                retained_rows: BTreeSet::from([1]),
+            })),
+            cancel,
+        },
+    );
+
+    assert!(gateway.stop(stop).await);
+
+    assert_eq!(*cancel_rx.borrow(), 2);
+    assert!(gateway
+        .ctx
+        .sent_replies
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(_, reply)| reply.contains("Stop requested")));
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn failed_stop_history_write_retries_before_later_rows() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("stop-history-failure-sessions");
+    let assistant_dir = temp_path("stop-history-failure-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut gateway = Gateway::new(test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    ))
+    .unwrap();
+    gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+    gateway.ctx.history.lock().unwrap().execute_batch_for_test(
+        "CREATE TRIGGER fail_stop_outbound
+         BEFORE INSERT ON messages
+         WHEN NEW.direction = 'outbound'
+          AND NEW.content = 'Nothing is currently running in this conversation.'
+         BEGIN
+           SELECT RAISE(FAIL, 'forced stop acknowledgement failure');
+         END;",
+    );
+    let batch = vec![
+        message(1, "me@icloud.com", "", true, "/stop"),
+        message(2, "me@icloud.com", "", true, "later"),
+    ];
+
+    gateway.tick_fake(batch.clone()).await;
+
+    assert!(calls.lock().unwrap().is_empty());
+    assert!(gateway.queues.is_empty());
+    assert_eq!(gateway.store.lock().unwrap().cursor("imessage"), 0);
+
+    gateway
+        .ctx
+        .history
+        .lock()
+        .unwrap()
+        .execute_batch_for_test("DROP TRIGGER fail_stop_outbound;");
+    run_messages(&mut gateway, batch).await;
+
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(gateway.store.lock().unwrap().last_row(), 2);
+    let replies = gateway.ctx.sent_replies.lock().unwrap();
+    let stop_reply = replies
+        .iter()
+        .position(|(_, reply)| reply.contains("Nothing is currently running in this conversation."))
+        .expect("failed stop acknowledgement should be delivered on retry");
+    let later_reply = replies
+        .iter()
+        .position(|(_, reply)| reply.contains("later"))
+        .expect("later backend reply should be delivered");
+    assert!(stop_reply < later_reply);
 
     let _ = std::fs::remove_file(&state_path);
     let _ = std::fs::remove_file(format!("{state_path}.db"));

@@ -1,10 +1,8 @@
 //! Per-thread worker: runs one message through an agent backend, records the
 //! outcome in canonical history, and delivers the reply.
 
-use std::collections::VecDeque;
 use std::future::{pending, Future};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,7 +18,7 @@ use crate::soul;
 use crate::util::now_ms;
 use crate::voice::MAX_AUDIO_BYTES;
 
-use super::{audit, complete_row, reply_to, Ctx, Job};
+use super::{audit, complete_row, reply_to, Ctx, Job, WorkerState};
 
 const TYPING_REFRESH: Duration = Duration::from_secs(4);
 pub(super) const DELIVERY_ATTEMPTS: usize = 3;
@@ -33,29 +31,35 @@ pub(super) const DRAFT_SETUP_FAILURE: &str =
 pub(super) async fn run(
     ctx: Ctx,
     mut rx: mpsc::Receiver<Job>,
-    mut cancel: watch::Receiver<u64>,
-    active: Arc<AtomicBool>,
-    pending_jobs: Arc<std::sync::Mutex<VecDeque<Job>>>,
+    mut cancel: watch::Receiver<i64>,
+    state: Arc<std::sync::Mutex<WorkerState>>,
 ) {
     while let Some(job) = rx.recv().await {
         let row_id = job.row_id;
-        let generation = *cancel.borrow_and_update();
-        handle_with_interrupt(&ctx, job, interrupt(&mut cancel, generation), &active).await;
-        if !ctx.ack.lock().unwrap().in_flight.contains(&row_id) {
-            pending_jobs
-                .lock()
-                .unwrap()
-                .retain(|job| job.row_id != row_id);
+        {
+            let mut state = state.lock().unwrap();
+            state.current_row = Some(row_id);
+            state.retained_rows.remove(&row_id);
+        }
+        handle_with_interrupt(&ctx, job, interrupt(&mut cancel, row_id)).await;
+        let completed = !ctx.ack.lock().unwrap().in_flight.contains(&row_id);
+        let mut state = state.lock().unwrap();
+        state.current_row = None;
+        if completed {
+            state.pending.retain(|job| job.row_id != row_id);
+            state.retained_rows.remove(&row_id);
+        } else {
+            state.retained_rows.insert(row_id);
         }
     }
 }
 
 #[cfg(test)]
 pub(super) async fn handle(ctx: &Ctx, job: Job) {
-    handle_with_interrupt(ctx, job, pending(), &Arc::new(AtomicBool::new(false))).await;
+    handle_with_interrupt(ctx, job, pending()).await;
 }
 
-async fn handle_with_interrupt<I>(ctx: &Ctx, mut job: Job, interrupt: I, active: &Arc<AtomicBool>)
+async fn handle_with_interrupt<I>(ctx: &Ctx, mut job: Job, interrupt: I)
 where
     I: Future<Output = ()>,
 {
@@ -407,14 +411,12 @@ where
             run.await
         }
     };
-    let _active = ActiveRun::new(active);
     tokio::pin!(run);
     tokio::pin!(interrupt);
     let result = tokio::select! {
         result = &mut run => Some(result),
         _ = &mut interrupt => None,
     };
-    drop(_active);
 
     match result {
         Some(Ok(out)) => {
@@ -574,23 +576,8 @@ where
     }
 }
 
-struct ActiveRun<'a>(&'a AtomicBool);
-
-impl<'a> ActiveRun<'a> {
-    fn new(active: &'a AtomicBool) -> Self {
-        active.store(true, Ordering::SeqCst);
-        Self(active)
-    }
-}
-
-impl Drop for ActiveRun<'_> {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
-    }
-}
-
-async fn interrupt(cancel: &mut watch::Receiver<u64>, generation: u64) {
-    while *cancel.borrow() == generation {
+async fn interrupt(cancel: &mut watch::Receiver<i64>, row_id: i64) {
+    while *cancel.borrow() != row_id {
         if cancel.changed().await.is_err() {
             pending::<()>().await;
         }

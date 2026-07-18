@@ -8,7 +8,6 @@
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -104,10 +103,14 @@ struct AckState {
 
 struct WorkerQueue {
     jobs: mpsc::Sender<Job>,
-    pending: Arc<Mutex<VecDeque<Job>>>,
-    cancel_generation: Arc<AtomicU64>,
-    cancel: watch::Sender<u64>,
-    active: Arc<AtomicBool>,
+    state: Arc<Mutex<WorkerState>>,
+    cancel: watch::Sender<i64>,
+}
+
+struct WorkerState {
+    pending: VecDeque<Job>,
+    current_row: Option<i64>,
+    retained_rows: BTreeSet<i64>,
 }
 
 impl GatewayGroup {
@@ -640,7 +643,9 @@ impl Gateway {
                     voice_attachment: m.voice.clone(),
                 };
                 if job.text.trim().eq_ignore_ascii_case("/stop") {
-                    self.stop(job).await;
+                    if !self.stop(job).await {
+                        return;
+                    }
                     continue;
                 }
                 if !self.route(job).await {
@@ -667,9 +672,10 @@ impl Gateway {
         self.queues
             .get(&thread)
             .unwrap()
-            .pending
+            .state
             .lock()
             .unwrap()
+            .pending
             .push_back(job.clone());
         let enqueue = self.queues.get(&thread).unwrap().jobs.try_send(job.clone());
         match enqueue {
@@ -682,9 +688,10 @@ impl Gateway {
                 self.queues
                     .get(&thread)
                     .unwrap()
-                    .pending
+                    .state
                     .lock()
                     .unwrap()
+                    .pending
                     .retain(|pending| pending.row_id != row_id);
                 warn!("[{thread}] queue full, asking sender to resend");
                 self.audit(self.ctx.audit.failed(
@@ -744,29 +751,24 @@ impl Gateway {
     fn spawn_worker(&mut self, thread: String, initial_jobs: Vec<Job>) {
         let (jobs, rx) = mpsc::channel::<Job>(QUEUE_DEPTH.max(initial_jobs.len()));
         let (cancel, cancel_rx) = watch::channel(0);
-        let cancel_generation = Arc::new(AtomicU64::new(0));
-        let active = Arc::new(AtomicBool::new(false));
-        let pending = Arc::new(Mutex::new(initial_jobs.iter().cloned().collect()));
+        let state = Arc::new(Mutex::new(WorkerState {
+            pending: initial_jobs.iter().cloned().collect(),
+            current_row: None,
+            retained_rows: BTreeSet::new(),
+        }));
         for job in initial_jobs {
             jobs.try_send(job)
                 .expect("initial worker queue capacity must fit recovery jobs");
         }
         let ctx = self.ctx.clone();
-        self.handles.push(tokio::spawn(worker::run(
-            ctx,
-            rx,
-            cancel_rx,
-            active.clone(),
-            pending.clone(),
-        )));
+        self.handles
+            .push(tokio::spawn(worker::run(ctx, rx, cancel_rx, state.clone())));
         self.queues.insert(
             thread,
             WorkerQueue {
                 jobs,
-                pending,
-                cancel_generation,
+                state,
                 cancel,
-                active,
             },
         );
     }
@@ -787,7 +789,13 @@ impl Gateway {
         let Some(worker) = self.queues.remove(thread) else {
             return;
         };
-        let pending = worker.pending.lock().unwrap().drain(..).collect::<Vec<_>>();
+        let pending = worker
+            .state
+            .lock()
+            .unwrap()
+            .pending
+            .drain(..)
+            .collect::<Vec<_>>();
         let Some(first) = pending.first() else {
             return;
         };
@@ -805,15 +813,19 @@ impl Gateway {
         self.spawn_worker(thread.to_string(), pending);
     }
 
-    async fn stop(&self, job: Job) {
+    async fn stop(&self, job: Job) -> bool {
         let row_id = job.row_id;
         self.ack.lock().unwrap().in_flight.insert(row_id);
         let stopped = self.queues.get(&job.thread).is_some_and(|worker| {
-            if !worker.active.load(Ordering::SeqCst) {
-                return false;
-            }
-            let generation = worker.cancel_generation.fetch_add(1, Ordering::SeqCst) + 1;
-            worker.cancel.send(generation).is_ok()
+            let state = worker.state.lock().unwrap();
+            let target_row = state.current_row.or_else(|| {
+                state
+                    .pending
+                    .iter()
+                    .find(|pending| !state.retained_rows.contains(&pending.row_id))
+                    .map(|pending| pending.row_id)
+            });
+            target_row.is_some_and(|row_id| worker.cancel.send(row_id).is_ok())
         });
         let reply = if stopped {
             "Stop requested. Queued messages will continue."
@@ -848,6 +860,7 @@ impl Gateway {
                         "nothing_to_stop"
                     },
                 );
+                true
             }
             Err(error) => {
                 error!("[{}] stop reply failed: {error:#}", job.thread);
@@ -859,6 +872,7 @@ impl Gateway {
                     error.to_string(),
                 ));
                 self.ack.lock().unwrap().in_flight.remove(&row_id);
+                false
             }
         }
     }
