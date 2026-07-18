@@ -251,30 +251,23 @@ impl Telegram {
     }
 
     pub async fn send_rich(&self, target: &str, text: &str) -> Result<()> {
-        let mut payload = target_payload(target);
-        payload["rich_message"] = json!({"markdown": text});
-        let transport_response = self
-            .post_with_topic_fallback("sendRichMessage", payload)
-            .await?;
-        let response: ApiResponse<Value> = serde_json::from_value(transport_response.body)
-            .map_err(|_| {
-                anyhow::anyhow!("Telegram sendRichMessage returned an invalid response")
-            })?;
-        if !response.ok {
-            if transport_response.status == 400 {
-                return self.send_plain_chunks(target, text).await;
-            }
-            bail!(
-                "Telegram sendRichMessage returned HTTP {}",
-                transport_response.status
-            );
-        }
-        Ok(())
-    }
-
-    async fn send_plain_chunks(&self, target: &str, text: &str) -> Result<()> {
         for chunk in split_text(text) {
-            self.send_plain(target, &chunk).await?;
+            let html = crate::markdown::to_telegram_html(&chunk);
+            let mut payload = target_payload(target);
+            payload["text"] = json!(html);
+            payload["parse_mode"] = json!("HTML");
+            let transport_response = self
+                .post_with_topic_fallback("sendMessage", payload)
+                .await?;
+            let response: ApiResponse<Value> = serde_json::from_value(transport_response.body)
+                .map_err(|_| {
+                    anyhow::anyhow!("Telegram sendMessage returned an invalid response")
+                })?;
+            if !response.ok {
+                // Rendered HTML Telegram rejects (for example a parse error)
+                // still reaches the user as plain text.
+                self.send_plain(target, &chunk).await?;
+            }
         }
         Ok(())
     }
@@ -872,16 +865,17 @@ mod tests {
         let telegram =
             Telegram::with_transport("do-not-log".to_string(), vec![7], vec![], fake.clone());
 
-        telegram.send_rich("7", "reply").await.unwrap();
+        telegram.send_rich("7", "**reply**").await.unwrap();
 
         let calls = fake.calls.lock().unwrap();
         assert_eq!(
             calls.as_slice(),
             [(
-                "sendRichMessage".to_string(),
+                "sendMessage".to_string(),
                 json!({
                     "chat_id": "7",
-                    "rich_message": {"markdown": "reply"}
+                    "text": "<b>reply</b>",
+                    "parse_mode": "HTML"
                 })
             )]
         );
@@ -902,14 +896,20 @@ mod tests {
         telegram.send_rich("7", &text).await.unwrap();
 
         let calls = fake.calls.lock().unwrap();
-        assert_eq!(calls[0].0, "sendRichMessage");
+        // First chunk: HTML send rejected, then plain fallback for the same
+        // chunk. Second chunk: HTML send accepted.
+        assert_eq!(calls[0].0, "sendMessage");
+        assert_eq!(calls[0].1["parse_mode"], "HTML");
         assert_eq!(calls[1].0, "sendMessage");
+        assert!(calls[1].1.get("parse_mode").is_none());
         assert_eq!(calls[2].0, "sendMessage");
+        assert_eq!(calls[2].1["parse_mode"], "HTML");
         assert_eq!(
-            calls[1..]
-                .iter()
-                .map(|(_, body)| body["text"].as_str().unwrap())
-                .collect::<String>(),
+            format!(
+                "{}{}",
+                calls[1].1["text"].as_str().unwrap(),
+                calls[2].1["text"].as_str().unwrap()
+            ),
             text
         );
     }
@@ -938,7 +938,8 @@ mod tests {
             json!({
                 "chat_id": "7",
                 "message_thread_id": 99,
-                "rich_message": {"markdown": "reply"}
+                "text": "reply",
+                "parse_mode": "HTML"
             })
         );
         assert_eq!(
@@ -1005,7 +1006,8 @@ mod tests {
         telegram.send_rich("7:99", "reply").await.unwrap();
 
         let calls = fake.calls.lock().unwrap();
-        assert_eq!(calls[0].0, "sendRichMessage");
+        assert_eq!(calls[0].0, "sendMessage");
+        assert_eq!(calls[0].1["parse_mode"], "HTML");
         assert_eq!(
             calls[1].1,
             json!({"chat_id": "7", "message_thread_id": 99, "text": "reply"})

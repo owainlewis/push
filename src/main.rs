@@ -16,6 +16,7 @@ mod gateway;
 mod history;
 mod imessage;
 mod jobs;
+mod markdown;
 mod pi;
 mod rehydration;
 mod restart;
