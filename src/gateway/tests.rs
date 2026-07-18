@@ -987,6 +987,7 @@ async fn missing_backend_session_rotates_and_rehydrates_once() {
             session_id: "fake-session".to_string(),
             calls: calls.clone(),
             before_return: None,
+            wait_for_release: None,
             failure: None,
             resume_missing_once: Some(missing),
         }),
@@ -1060,6 +1061,7 @@ async fn backend_switch_and_clear_start_fresh_sessions_with_history() {
             session_id: "codex-session".to_string(),
             calls: codex_calls.clone(),
             before_return: None,
+            wait_for_release: None,
             failure: None,
             resume_missing_once: None,
         }),
@@ -1071,6 +1073,7 @@ async fn backend_switch_and_clear_start_fresh_sessions_with_history() {
             session_id: "claude-session".to_string(),
             calls: claude_calls.clone(),
             before_return: None,
+            wait_for_release: None,
             failure: None,
             resume_missing_once: None,
         }),
@@ -1696,6 +1699,227 @@ async fn slow_voice_transcription_does_not_block_another_telegram_thread() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn closed_worker_queue_is_recovered_without_another_message() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("closed-worker-sessions");
+    let assistant_dir = temp_path("closed-worker-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut gateway = Gateway::new(test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    ))
+    .unwrap();
+    gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+
+    let thread = "imessage:self:me@icloud.com";
+    let lost_inbound_id = gateway
+        .ctx
+        .history
+        .lock()
+        .unwrap()
+        .record_inbound("imessage", thread, "imessage:1", "recover older")
+        .unwrap();
+    gateway.ack.lock().unwrap().in_flight.insert(1);
+    let lost_job = Job {
+        row_id: 1,
+        inbound_id: lost_inbound_id,
+        thread: thread.to_string(),
+        target: "me@icloud.com".to_string(),
+        backend: AgentBackend::Codex,
+        approval_origin: AnswerOrigin {
+            channel: "imessage".to_string(),
+            thread_key: thread.to_string(),
+            sender_key: "me@icloud.com".to_string(),
+            chat_key: "me@icloud.com".to_string(),
+        },
+        text: "recover older".to_string(),
+        reply_with_voice: false,
+        voice_attachment: None,
+    };
+
+    let (jobs, rx) = mpsc::channel(QUEUE_DEPTH);
+    drop(rx);
+    let (cancel, _) = watch::channel(0);
+    gateway.queues.insert(
+        thread.to_string(),
+        WorkerQueue {
+            jobs,
+            pending: Arc::new(Mutex::new(VecDeque::from([lost_job]))),
+            cancel_generation: Arc::new(AtomicU64::new(0)),
+            cancel,
+            active: Arc::new(AtomicBool::new(false)),
+        },
+    );
+
+    gateway.process_messages(Vec::new()).await;
+    gateway.queues.clear();
+    gateway.drain_workers().await;
+
+    let prompts = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|call| call.prompt.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0], "recover older");
+    assert_eq!(gateway.store.lock().unwrap().last_row(), 1);
+    let events = audit_events(&format!("{state_path}.audit.jsonl"));
+    assert!(events
+        .iter()
+        .any(|event| event.event == "message_queue_recovered"));
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stop_interrupts_active_run_and_preserves_queued_messages() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("interrupt-sessions");
+    let assistant_dir = temp_path("interrupt-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mut gateway = Gateway::new(test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    ))
+    .unwrap();
+    let mut runners = HashMap::new();
+    runners.insert(
+        AgentBackend::Codex,
+        Runner::Fake(FakeRunner {
+            backend: AgentBackend::Codex,
+            session_id: "fake-session".to_string(),
+            calls: calls.clone(),
+            before_return: None,
+            wait_for_release: Some(release.clone()),
+            failure: None,
+            resume_missing_once: None,
+        }),
+    );
+    gateway.ctx.runners = Arc::new(runners);
+
+    gateway
+        .tick_fake(vec![message(1, "me@icloud.com", "", true, "slow")])
+        .await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if gateway
+                .queues
+                .get("imessage:self:me@icloud.com")
+                .is_some_and(|worker| worker.active.load(Ordering::SeqCst))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first run should become active");
+
+    gateway
+        .tick_fake(vec![
+            message(2, "me@icloud.com", "", true, "queued"),
+            message(3, "me@icloud.com", "", true, "/stop"),
+        ])
+        .await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let interrupted = gateway
+                .ctx
+                .sent_replies
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, reply)| reply.contains("Stopped the current request"));
+            if interrupted && calls.lock().unwrap().len() == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("active run should stop before the queued run starts");
+    release.notify_one();
+    gateway.queues.clear();
+    gateway.drain_workers().await;
+
+    let prompts = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|call| call.prompt.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(prompts[0], "slow");
+    assert!(prompts[1].contains(r#"{"role":"user","content":"queued"}"#));
+    let replies = gateway.ctx.sent_replies.lock().unwrap();
+    assert!(replies
+        .iter()
+        .any(|(_, reply)| reply.contains("Stop requested")));
+    assert!(replies
+        .iter()
+        .any(|(_, reply)| reply.contains("Stopped the current request")));
+    assert!(replies
+        .iter()
+        .any(|(_, reply)| reply.contains(r#"{"role":"user","content":"queued"}"#)));
+    assert_eq!(gateway.store.lock().unwrap().last_row(), 3);
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn failed_stop_acknowledgement_does_not_block_later_messages() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("stop-delivery-failure-sessions");
+    let assistant_dir = temp_path("stop-delivery-failure-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut gateway = Gateway::new(test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    ))
+    .unwrap();
+    gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+    *gateway.ctx.send_failures_remaining.lock().unwrap() = 1;
+
+    gateway
+        .tick_fake(vec![message(1, "me@icloud.com", "", true, "/stop")])
+        .await;
+    run_messages(
+        &mut gateway,
+        vec![message(2, "me@icloud.com", "", true, "still works")],
+    )
+    .await;
+
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(gateway.store.lock().unwrap().last_row(), 2);
+    let events = audit_events(&format!("{state_path}.audit.jsonl"));
+    assert!(events.iter().any(|event| {
+        event.event == "reply_failed"
+            && event.error.as_deref() == Some("stop acknowledgement delivery failed")
+    }));
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn primary_delivery_is_scoped_validated_and_non_fatal_when_missing_or_invalid() {
     let state_path = temp_state_path();
     let sessions_dir = temp_path("primary-sessions");
@@ -2079,6 +2303,7 @@ async fn failed_run_and_recovered_outbound_still_reconcile_origin_drafts() {
             session_id: "failed-session".to_string(),
             calls: calls.clone(),
             before_return: Some(hook),
+            wait_for_release: None,
             failure: Some("boom".to_string()),
             resume_missing_once: None,
         }),
@@ -2272,6 +2497,7 @@ fn fake_runners_with_hook(
             session_id: "fake-session".to_string(),
             calls,
             before_return,
+            wait_for_release: None,
             failure: None,
             resume_missing_once: None,
         }),

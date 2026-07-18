@@ -6,8 +6,9 @@
 //! short-lived locks. Each channel-qualified thread gets its own worker task,
 //! which serializes that thread's messages.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -79,7 +80,7 @@ pub struct Gateway {
     ctx: Ctx,
     cfg: Config,
     poll_interval: Duration,
-    queues: HashMap<String, mpsc::Sender<Job>>,
+    queues: HashMap<String, WorkerQueue>,
     handles: Vec<JoinHandle<()>>,
 }
 
@@ -99,6 +100,14 @@ pub struct PrimaryDestination {
 struct AckState {
     in_flight: BTreeSet<i64>,
     completed: BTreeSet<i64>,
+}
+
+struct WorkerQueue {
+    jobs: mpsc::Sender<Job>,
+    pending: Arc<Mutex<VecDeque<Job>>>,
+    cancel_generation: Arc<AtomicU64>,
+    cancel: watch::Sender<u64>,
+    active: Arc<AtomicBool>,
 }
 
 impl GatewayGroup {
@@ -506,6 +515,7 @@ impl Gateway {
     }
 
     async fn process_messages(&mut self, msgs: Vec<RawMessage>) {
+        self.recover_closed_workers();
         let since = self.store.lock().unwrap().cursor(self.channel.id());
         for m in &msgs {
             if m.row_id <= since {
@@ -629,6 +639,10 @@ impl Gateway {
                     reply_with_voice,
                     voice_attachment: m.voice.clone(),
                 };
+                if job.text.trim().eq_ignore_ascii_case("/stop") {
+                    self.stop(job).await;
+                    continue;
+                }
                 if !self.route(job).await {
                     return;
                 }
@@ -644,59 +658,209 @@ impl Gateway {
         let thread = job.thread.clone();
         let target = job.target.clone();
         let backend = job.backend;
+        self.ack.lock().unwrap().in_flight.insert(row_id);
         if !self.queues.contains_key(&thread) {
-            let (tx, rx) = mpsc::channel::<Job>(QUEUE_DEPTH);
-            let ctx = self.ctx.clone();
-            self.handles.push(tokio::spawn(worker::run(ctx, rx)));
-            self.queues.insert(thread.clone(), tx);
+            self.spawn_worker(thread, vec![job]);
+            return true;
         }
 
-        let full = matches!(
-            self.queues.get(&thread).unwrap().try_send(job.clone()),
-            Err(mpsc::error::TrySendError::Full(_))
-        );
-        if full {
-            self.ack.lock().unwrap().in_flight.insert(row_id);
-            warn!("[{thread}] queue full, asking sender to resend");
-            self.audit(self.ctx.audit.failed(
-                "message_queue_failed",
-                row_id,
-                &thread,
-                Some(backend),
-                "queue full",
-            ));
-            let reply = "I'm a bit behind on this thread - resend that in a moment.";
-            match worker::record_and_deliver(&self.ctx, &job, OutboundOrigin::Gateway, reply).await
-            {
-                Ok(
-                    worker::DeliveryOutcome::Delivered | worker::DeliveryOutcome::AlreadyDelivered,
-                ) => {
-                    self.audit(self.ctx.audit.reply_sent(
-                        row_id,
-                        &thread,
-                        &target,
-                        Some(backend),
-                        reply,
-                    ));
-                    self.complete_row(row_id, "queue_full");
-                }
-                Err(error) => {
-                    error!("[{thread}] canonical history write failed: {error}");
-                    self.audit(self.ctx.audit.failed(
-                        "message_history_failed",
-                        row_id,
-                        &thread,
-                        Some(backend),
-                        error.to_string(),
-                    ));
-                    self.ack.lock().unwrap().in_flight.remove(&row_id);
-                    return false;
+        self.queues
+            .get(&thread)
+            .unwrap()
+            .pending
+            .lock()
+            .unwrap()
+            .push_back(job.clone());
+        let enqueue = self.queues.get(&thread).unwrap().jobs.try_send(job.clone());
+        match enqueue {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.recover_closed_worker(&thread);
+                true
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.queues
+                    .get(&thread)
+                    .unwrap()
+                    .pending
+                    .lock()
+                    .unwrap()
+                    .retain(|pending| pending.row_id != row_id);
+                warn!("[{thread}] queue full, asking sender to resend");
+                self.audit(self.ctx.audit.failed(
+                    "message_queue_failed",
+                    row_id,
+                    &thread,
+                    Some(backend),
+                    "queue full",
+                ));
+                let reply = "I'm a bit behind on this thread - resend that in a moment.";
+                match worker::record_and_deliver_once(
+                    &self.ctx,
+                    &job,
+                    OutboundOrigin::Gateway,
+                    reply,
+                )
+                .await
+                {
+                    Ok(delivered) => {
+                        if delivered {
+                            self.audit(self.ctx.audit.reply_sent(
+                                row_id,
+                                &thread,
+                                &target,
+                                Some(backend),
+                                reply,
+                            ));
+                        } else {
+                            self.audit(self.ctx.audit.reply_failed(
+                                row_id,
+                                &thread,
+                                &target,
+                                Some(backend),
+                                "queue-full reply delivery failed",
+                            ));
+                        }
+                        self.complete_row(row_id, "queue_full");
+                        true
+                    }
+                    Err(error) => {
+                        error!("[{thread}] canonical history write failed: {error}");
+                        self.audit(self.ctx.audit.failed(
+                            "message_history_failed",
+                            row_id,
+                            &thread,
+                            Some(backend),
+                            error.to_string(),
+                        ));
+                        self.ack.lock().unwrap().in_flight.remove(&row_id);
+                        false
+                    }
                 }
             }
-        } else {
-            self.ack.lock().unwrap().in_flight.insert(row_id);
         }
-        true
+    }
+
+    fn spawn_worker(&mut self, thread: String, initial_jobs: Vec<Job>) {
+        let (jobs, rx) = mpsc::channel::<Job>(QUEUE_DEPTH.max(initial_jobs.len()));
+        let (cancel, cancel_rx) = watch::channel(0);
+        let cancel_generation = Arc::new(AtomicU64::new(0));
+        let active = Arc::new(AtomicBool::new(false));
+        let pending = Arc::new(Mutex::new(initial_jobs.iter().cloned().collect()));
+        for job in initial_jobs {
+            jobs.try_send(job)
+                .expect("initial worker queue capacity must fit recovery jobs");
+        }
+        let ctx = self.ctx.clone();
+        self.handles.push(tokio::spawn(worker::run(
+            ctx,
+            rx,
+            cancel_rx,
+            active.clone(),
+            pending.clone(),
+        )));
+        self.queues.insert(
+            thread,
+            WorkerQueue {
+                jobs,
+                pending,
+                cancel_generation,
+                cancel,
+                active,
+            },
+        );
+    }
+
+    fn recover_closed_workers(&mut self) {
+        let closed = self
+            .queues
+            .iter()
+            .filter(|(_, worker)| worker.jobs.is_closed())
+            .map(|(thread, _)| thread.clone())
+            .collect::<Vec<_>>();
+        for thread in closed {
+            self.recover_closed_worker(&thread);
+        }
+    }
+
+    fn recover_closed_worker(&mut self, thread: &str) {
+        let Some(worker) = self.queues.remove(thread) else {
+            return;
+        };
+        let pending = worker.pending.lock().unwrap().drain(..).collect::<Vec<_>>();
+        let Some(first) = pending.first() else {
+            return;
+        };
+        warn!("[{thread}] worker queue closed unexpectedly; replaying retained jobs");
+        self.audit(self.ctx.audit.failed(
+            "message_queue_recovered",
+            first.row_id,
+            thread,
+            Some(first.backend),
+            format!(
+                "worker queue closed; replaying {} retained jobs",
+                pending.len()
+            ),
+        ));
+        self.spawn_worker(thread.to_string(), pending);
+    }
+
+    async fn stop(&self, job: Job) {
+        let row_id = job.row_id;
+        self.ack.lock().unwrap().in_flight.insert(row_id);
+        let stopped = self.queues.get(&job.thread).is_some_and(|worker| {
+            if !worker.active.load(Ordering::SeqCst) {
+                return false;
+            }
+            let generation = worker.cancel_generation.fetch_add(1, Ordering::SeqCst) + 1;
+            worker.cancel.send(generation).is_ok()
+        });
+        let reply = if stopped {
+            "Stop requested. Queued messages will continue."
+        } else {
+            "Nothing is currently running in this conversation."
+        };
+        match worker::record_and_deliver_once(&self.ctx, &job, OutboundOrigin::Gateway, reply).await
+        {
+            Ok(delivered) => {
+                if delivered {
+                    self.audit(self.ctx.audit.reply_sent(
+                        row_id,
+                        &job.thread,
+                        &job.target,
+                        Some(job.backend),
+                        reply,
+                    ));
+                } else {
+                    self.audit(self.ctx.audit.reply_failed(
+                        row_id,
+                        &job.thread,
+                        &job.target,
+                        Some(job.backend),
+                        "stop acknowledgement delivery failed",
+                    ));
+                }
+                self.complete_row(
+                    row_id,
+                    if stopped {
+                        "stop_requested"
+                    } else {
+                        "nothing_to_stop"
+                    },
+                );
+            }
+            Err(error) => {
+                error!("[{}] stop reply failed: {error:#}", job.thread);
+                self.audit(self.ctx.audit.failed(
+                    "message_history_failed",
+                    row_id,
+                    &job.thread,
+                    Some(job.backend),
+                    error.to_string(),
+                ));
+                self.ack.lock().unwrap().in_flight.remove(&row_id);
+            }
+        }
     }
 
     fn complete_row(&self, row_id: i64, reason: &str) {
