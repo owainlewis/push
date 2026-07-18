@@ -1,3 +1,4 @@
+use std::io::{self, Write};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
@@ -7,6 +8,10 @@ const SYSTEMD_UNIT: &str = "push.service";
 
 pub fn gateway() -> Result<()> {
     let command = platform_command()?;
+    println!("Restarting gateway...");
+    io::stdout()
+        .flush()
+        .context("flush gateway restart status")?;
     let message = execute(&command, |command| {
         let mut process = Command::new(command.program);
         process.args(&command.args);
@@ -52,7 +57,7 @@ fn execute(
             status.description
         );
     }
-    Ok("Restarted the Push gateway.")
+    Ok("Gateway restarted.")
 }
 
 fn platform_command() -> Result<PlatformCommand> {
@@ -155,7 +160,7 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(message, "Restarted the Push gateway.");
+        assert_eq!(message, "Gateway restarted.");
     }
 
     #[test]

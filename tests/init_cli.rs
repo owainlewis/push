@@ -240,7 +240,7 @@ fn restart_invokes_the_platform_service_manager() {
     let manager_path = bin_dir.join(manager);
     std::fs::write(
         &manager_path,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$PUSH_RESTART_ARGS_PATH\"\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$PUSH_RESTART_ARGS_PATH\"\nprintf 'Service manager ran.\\n'\n",
     )
     .unwrap();
     let mut permissions = std::fs::metadata(&manager_path).unwrap().permissions();
@@ -267,7 +267,7 @@ fn restart_invokes_the_platform_service_manager() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout).trim(),
-        "Restarted the Push gateway."
+        "Restarting gateway...\nService manager ran.\nGateway restarted."
     );
     let args = std::fs::read_to_string(args_path).unwrap();
     if cfg!(target_os = "macos") {
@@ -298,7 +298,7 @@ fn reload_invokes_the_platform_service_manager() {
     let manager_path = bin_dir.join(manager);
     std::fs::write(
         &manager_path,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$PUSH_RESTART_ARGS_PATH\"\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$PUSH_RESTART_ARGS_PATH\"\nprintf 'Service manager ran.\\n'\n",
     )
     .unwrap();
     let mut permissions = std::fs::metadata(&manager_path).unwrap().permissions();
@@ -322,7 +322,7 @@ fn reload_invokes_the_platform_service_manager() {
     assert!(args_path.is_file());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout).trim(),
-        "Restarted the Push gateway."
+        "Restarting gateway...\nService manager ran.\nGateway restarted."
     );
     let _ = std::fs::remove_dir_all(root);
 }
