@@ -16,6 +16,9 @@ pub fn to_telegram_html(markdown: &str) -> String {
     let mut out = String::with_capacity(markdown.len());
     // Stack of ordered-list counters; `None` marks an unordered list.
     let mut list_stack: Vec<Option<u64>> = Vec::new();
+    // Tracks whether each active list item has emitted content. Loose-list
+    // paragraphs must not separate the marker from their first text event.
+    let mut item_stack: Vec<bool> = Vec::new();
     let mut code_block_has_lang = false;
 
     for event in parser {
@@ -25,16 +28,19 @@ pub fn to_telegram_html(markdown: &str) -> String {
                 Tag::Emphasis => out.push_str("<i>"),
                 Tag::Strikethrough => out.push_str("<s>"),
                 Tag::Heading { .. } => {
-                    ensure_blank_line(&mut out);
+                    ensure_block_start(&mut out, &item_stack);
                     out.push_str("<b>");
                 }
-                Tag::Paragraph => ensure_blank_line(&mut out),
+                Tag::Paragraph => match item_stack.last_mut() {
+                    Some(has_content) if !*has_content => *has_content = true,
+                    _ => ensure_blank_line(&mut out),
+                },
                 Tag::BlockQuote(_) => {
-                    ensure_blank_line(&mut out);
+                    ensure_block_start(&mut out, &item_stack);
                     out.push_str("<blockquote>");
                 }
                 Tag::CodeBlock(kind) => {
-                    ensure_blank_line(&mut out);
+                    ensure_block_start(&mut out, &item_stack);
                     code_block_has_lang = false;
                     match kind {
                         CodeBlockKind::Fenced(lang) if !lang.is_empty() => {
@@ -62,6 +68,7 @@ pub fn to_telegram_html(markdown: &str) -> String {
                         }
                         _ => out.push_str("• "),
                     }
+                    item_stack.push(false);
                 }
                 Tag::Link { dest_url, .. } => {
                     out.push_str(&format!("<a href=\"{}\">", escape(&dest_url)));
@@ -93,12 +100,23 @@ pub fn to_telegram_html(markdown: &str) -> String {
                     list_stack.pop();
                     out.push('\n');
                 }
-                TagEnd::Item => ensure_newline(&mut out),
+                TagEnd::Item => {
+                    item_stack.pop();
+                    ensure_newline(&mut out);
+                }
                 TagEnd::Link => out.push_str("</a>"),
                 _ => {}
             },
-            Event::Text(text) => out.push_str(&escape(&text)),
+            Event::Text(text) => {
+                if let Some(has_content) = item_stack.last_mut() {
+                    *has_content = true;
+                }
+                out.push_str(&escape(&text));
+            }
             Event::Code(code) => {
+                if let Some(has_content) = item_stack.last_mut() {
+                    *has_content = true;
+                }
                 out.push_str("<code>");
                 out.push_str(&escape(&code));
                 out.push_str("</code>");
@@ -144,6 +162,12 @@ fn ensure_blank_line(out: &mut String) {
     }
 }
 
+fn ensure_block_start(out: &mut String, item_stack: &[bool]) {
+    if !matches!(item_stack.last(), Some(false)) {
+        ensure_blank_line(out);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,6 +203,33 @@ mod tests {
     fn renders_ordered_lists_with_numbers() {
         let html = to_telegram_html("1. first\n2. second");
         assert_eq!(html, "1. first\n2. second");
+    }
+
+    #[test]
+    fn keeps_loose_list_markers_attached_to_the_first_paragraph() {
+        let html = to_telegram_html("- first paragraph\n\n  second paragraph\n- next");
+
+        assert!(html.starts_with("• first paragraph"));
+        assert!(!html.contains("• \n\nfirst paragraph"));
+        assert!(html.contains("• next"));
+    }
+
+    #[test]
+    fn keeps_nested_list_markers_attached_to_their_text() {
+        let html = to_telegram_html("- parent\n  - child");
+
+        assert_eq!(html, "• parent\n  • child");
+    }
+
+    #[test]
+    fn keeps_list_markers_attached_to_block_content() {
+        let quote = to_telegram_html("- > quoted");
+        let code = to_telegram_html("- ```\ncode\n```");
+
+        assert!(quote.starts_with("• <blockquote>"));
+        assert!(!quote.contains("• \n\n<blockquote>"));
+        assert!(code.starts_with("• <pre>"));
+        assert!(!code.contains("• \n\n<pre>"));
     }
 
     #[test]

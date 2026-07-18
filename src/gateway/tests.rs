@@ -231,6 +231,7 @@ fn setup_failure_ctx(
         sent_replies: Arc::new(Mutex::new(Vec::new())),
         sent_voice_replies: Arc::new(Mutex::new(Vec::new())),
         send_failures_remaining: Arc::new(Mutex::new(0)),
+        send_failure_after: Arc::new(Mutex::new(None)),
     }
 }
 
@@ -2372,6 +2373,68 @@ async fn primary_delivery_is_scoped_validated_and_non_fatal_when_missing_or_inva
     );
 
     let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test]
+async fn scheduled_telegram_retry_resumes_at_the_first_unsent_rich_chunk() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("scheduled-rich-retry-sessions");
+    let assistant_dir = temp_path("scheduled-rich-retry-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let mut cfg = test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    );
+    cfg.channel = "telegram".to_string();
+    cfg.telegram_bot_token = Some("secret".to_string());
+    cfg.telegram_allow_user_ids = vec![7];
+    let gateway = Gateway::new(cfg).unwrap();
+    *gateway.ctx.send_failure_after.lock().unwrap() = Some(1);
+    let checkpoints = Arc::new(Mutex::new(Vec::new()));
+    let text = "x".repeat(crate::telegram::TEXT_LIMIT + 1);
+
+    let first = scheduled_reply_to(
+        &gateway.ctx,
+        "7",
+        &text,
+        0,
+        jobs::DeliveryProgress::accepting_for_test(checkpoints.clone()),
+    )
+    .await;
+
+    assert!(!first.delivered);
+    assert_eq!(first.next_chunk, 1);
+    assert_eq!(gateway.ctx.sent_replies.lock().unwrap().len(), 1);
+    assert_eq!(checkpoints.lock().unwrap().as_slice(), [1]);
+
+    let second = scheduled_reply_to(
+        &gateway.ctx,
+        "7",
+        &text,
+        first.next_chunk,
+        jobs::DeliveryProgress::accepting_for_test(checkpoints.clone()),
+    )
+    .await;
+
+    assert!(second.delivered);
+    assert_eq!(second.next_chunk, 2);
+    let replies = gateway.ctx.sent_replies.lock().unwrap();
+    assert_eq!(replies.len(), 2);
+    assert_eq!(
+        replies
+            .iter()
+            .map(|(_, chunk)| chunk.as_str())
+            .collect::<String>(),
+        text
+    );
+    assert_eq!(checkpoints.lock().unwrap().as_slice(), [1, 2]);
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
     let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
     let _ = std::fs::remove_dir_all(sessions_dir);
     let _ = std::fs::remove_dir_all(assistant_dir);
