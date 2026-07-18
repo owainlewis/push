@@ -85,6 +85,7 @@ flowchart LR
     sender -->|osascript| db
     sender -->|sendMessage| tg
     db -->|reply| user
+    tg -->|reply| user
 ```
 
 ## Message Lifecycle
@@ -92,19 +93,20 @@ flowchart LR
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant DB as chat.db
+    participant C as iMessage or Telegram
     participant P as Poller
     participant G as Gateway
     participant W as Worker
+    participant H as push.db
     participant A as Agent backend
     participant S as Sender
 
-    U->>DB: send message
-    P->>DB: read rows newer than last_row_id
-    DB-->>P: messages
+    U->>C: send message
+    P->>C: poll after channel cursor
+    C-->>P: messages
     P->>G: Message values
-    G->>G: filter sender and reply marker
-    G->>G: persist accepted inbound message
+    G->>G: apply channel allowlist and filters
+    G->>H: persist accepted inbound message
     alt slash command
         G->>S: handle command locally
     else assistant turn
@@ -116,12 +118,12 @@ sequenceDiagram
         end
         W->>A: run new message or rehydrated prompt
         A-->>W: reply and optional backend session id
-        W->>W: persist generated outbound message
+        W->>H: persist generated outbound message
         W->>S: send reply
         W->>G: ack completed row
     end
-    S->>DB: osascript send
-    DB->>U: delivered reply
+    S->>C: send through channel adapter
+    C->>U: delivered reply
 ```
 
 ## Backend Boundary
@@ -257,7 +259,7 @@ limit bounds fresh-session job execution. Scheduled and manual processes share
 the per-job advisory lock and SQLite active-run uniqueness boundary.
 
 Scheduled output or bounded failure detail is committed before notification.
-Delivery has its own persisted state and is retried up to three times from that
+Delivery has its own persisted state and is retried up to five times from that
 stored result. Restart recovery resumes queued work and pending delivery, but
 never reruns a backend run that had already started. A running row is marked
 interrupted only after the released advisory lock proves its executor is gone.
@@ -359,9 +361,10 @@ Push does not override sandbox, approval, permission-mode, or tool-list settings
 Chats and jobs use the selected agent's own configuration and must use work
 directories that do not overlap Push-owned state or configuration.
 
-## Extension Points
+## Roadmap
 
-The next extension points should be added in this order:
+The following items are possible future work, not shipped behavior or release
+commitments:
 
 1. More agent adapters.
 2. More channels.
