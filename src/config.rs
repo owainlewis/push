@@ -347,21 +347,20 @@ impl Config {
             })
     }
 
-    pub fn route_for_message(&self, channel: &str, thread: &str) -> Result<RouteSelection> {
-        for route in self.routes.iter().filter(|route| route.thread.is_some()) {
-            if route.matches_thread(channel, thread) {
-                return self.resolve_route(route);
-            }
-        }
-        if let Some(parent) = telegram_parent_thread(channel, thread) {
+    pub fn route_for_message(
+        &self,
+        channel: &str,
+        route_thread_groups: &[Vec<String>],
+    ) -> Result<RouteSelection> {
+        for aliases in route_thread_groups {
             for route in self.routes.iter().filter(|route| route.thread.is_some()) {
-                if route.matches_thread(channel, parent) {
+                if route.matches_threads(channel, aliases) {
                     return self.resolve_route(route);
                 }
             }
         }
         for route in self.routes.iter().filter(|route| route.thread.is_none()) {
-            if route.matches(channel, thread) {
+            if route.matches(channel) {
                 return self.resolve_route(route);
             }
         }
@@ -724,33 +723,18 @@ impl RouteRule {
         self.channel.as_deref().is_none_or(|value| value == channel)
     }
 
-    fn matches_thread(&self, channel: &str, thread: &str) -> bool {
-        if !self.can_match_channel(channel) {
-            return false;
-        }
-        self.thread.as_deref().is_some_and(|value| {
-            value == thread
-                || (channel == "imessage"
-                    && thread
-                        .strip_prefix("imessage:")
-                        .is_some_and(|legacy| legacy == value))
-        })
-    }
-
-    fn matches(&self, channel: &str, thread: &str) -> bool {
+    fn matches_threads(&self, channel: &str, threads: &[String]) -> bool {
         if !self.can_match_channel(channel) {
             return false;
         }
         self.thread
             .as_deref()
-            .is_none_or(|_| self.matches_thread(channel, thread))
+            .is_some_and(|value| threads.iter().any(|thread| value == thread))
     }
-}
 
-fn telegram_parent_thread<'a>(channel: &str, thread: &'a str) -> Option<&'a str> {
-    (channel == "telegram")
-        .then(|| thread.rsplit_once(":topic:").map(|(parent, _)| parent))
-        .flatten()
+    fn matches(&self, channel: &str) -> bool {
+        self.can_match_channel(channel) && self.thread.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -904,7 +888,7 @@ mod tests {
         assert_eq!(cfg.agent_backend().unwrap(), AgentBackend::Pi);
         assert_eq!(cfg.jobs_backend().unwrap(), AgentBackend::Pi);
         assert_eq!(
-            cfg.route_for_message("imessage", "imessage:chat:pi")
+            cfg.route_for_message("imessage", &[vec!["imessage:chat:pi".to_string()]])
                 .unwrap()
                 .backend,
             AgentBackend::Pi

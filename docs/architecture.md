@@ -88,6 +88,45 @@ flowchart LR
     tg -->|reply| user
 ```
 
+## Channel Boundary
+
+The gateway depends on one closed, compile-time channel contract. iMessage and
+Telegram implement it, and the `Channel` enum provides static dispatch. This is
+an internal Rust boundary, not a dynamic plugin system or a configuration
+extension point.
+
+Each channel implementation owns these semantics:
+
+- **Inbound polling:** read events after an opaque monotonic cursor and report
+  the latest cursor used to skip backlog on first start. A pending poll must be
+  cancellation-safe because shutdown drops its future.
+- **Authorization:** reject unsupported, group, empty, looped-back, or
+  non-allowlisted input according to provider rules before backend dispatch.
+- **Thread identity:** return a stable channel-qualified thread key, the exact
+  reply target, approval sender/chat identity, and ordered route-key groups. Telegram
+  topics inherit a parent-chat route; iMessage retains its legacy unprefixed
+  route aliases.
+- **Outbound delivery:** validate proactive targets, plan durable chunks, and
+  send one chunk to the exact accepted target. Replies never cross from one
+  channel loop to another.
+- **Typing:** declare an optional refresh interval and send best-effort activity
+  updates. Typing failures do not fail an assistant turn.
+- **Rich messages:** choose plain or rich delivery per chunk. iMessage keeps one
+  plain marked reply. Telegram owns Markdown rendering, size limits, splitting,
+  and topic addressing.
+- **Retry:** expose the timeout and bounded retry cadence used for stored chat
+  replies. A send call is one attempt. Generated output is persisted before
+  delivery and retried without rerunning the backend. Scheduled delivery keeps
+  its separate durable attempt ledger and resumes at the first unsent chunk.
+- **Shutdown:** stop polling when its future is cancelled, drop queue senders,
+  drain accepted per-thread work for the contract's grace period, then abort any
+  remaining workers. Transport futures must release their resources when
+  dropped.
+
+Adding another built-in channel therefore requires a concrete contract
+implementation and one enum variant. It does not require channel-name branches
+in the shared polling, routing, worker, retry, or shutdown loops.
+
 ## Message Lifecycle
 
 ```mermaid

@@ -28,9 +28,6 @@ use crate::util::now_ms;
 use crate::voice::Voice;
 
 const QUEUE_DEPTH: usize = 32;
-#[cfg(not(test))]
-const SEND_TIMEOUT: Duration = Duration::from_secs(30);
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 type SentVoiceReplies = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
@@ -465,7 +462,7 @@ impl Gateway {
     }
 
     async fn drain_workers(&mut self) {
-        let deadline = tokio::time::Instant::now() + SHUTDOWN_GRACE;
+        let deadline = tokio::time::Instant::now() + self.channel.shutdown_semantics().worker_grace;
         let mut workers = std::mem::take(&mut self.handles).into_iter();
         while let Some(mut worker) = workers.next() {
             if tokio::time::timeout_at(deadline, &mut worker)
@@ -538,7 +535,7 @@ impl Gateway {
                 } else {
                     m.text.trim().to_string()
                 };
-                let approval_origin = approval_origin(m, &thread);
+                let approval_origin = self.channel.approval_origin(m, &thread);
                 let approval = if reply_with_voice {
                     Ok(AnswerOutcome::NotAnAnswer)
                 } else {
@@ -614,7 +611,8 @@ impl Gateway {
                         return;
                     }
                 };
-                let route = match self.cfg.route_for_message(m.channel, &thread) {
+                let route_threads = self.channel.route_thread_groups(&thread);
+                let route = match self.cfg.route_for_message(m.channel, &route_threads) {
                     Ok(v) => v,
                     Err(e) => {
                         error!("[{thread}] route error: {e}");
@@ -1050,7 +1048,12 @@ async fn send_reply_chunk(
         Ok(())
     }
     #[cfg(not(test))]
-    match tokio::time::timeout(SEND_TIMEOUT, ctx.channel.send_chunk(target, chunk)).await {
+    match tokio::time::timeout(
+        ctx.channel.delivery_semantics().send_timeout,
+        ctx.channel.send_chunk(target, chunk),
+    )
+    .await
+    {
         Ok(result) => result,
         Err(_) => anyhow::bail!("send timed out"),
     }
@@ -1126,30 +1129,6 @@ impl AckState {
             .max()?;
         self.completed.retain(|id| *id > next);
         Some(next)
-    }
-}
-
-fn approval_origin(message: &RawMessage, thread: &str) -> AnswerOrigin {
-    if message.channel == "imessage" {
-        let chat_key = crate::channel::normalize_handle(&message.chat_identifier);
-        let sender_key = if thread.starts_with("imessage:self:") {
-            chat_key.clone()
-        } else {
-            crate::channel::normalize_handle(&message.handle)
-        };
-        AnswerOrigin {
-            channel: message.channel.to_string(),
-            thread_key: thread.to_string(),
-            sender_key,
-            chat_key,
-        }
-    } else {
-        AnswerOrigin {
-            channel: message.channel.to_string(),
-            thread_key: thread.to_string(),
-            sender_key: message.handle.clone(),
-            chat_key: message.chat_identifier.clone(),
-        }
     }
 }
 

@@ -1152,36 +1152,59 @@ allow_user_ids = [7]
                 channel: None,
                 agent: "codex".to_string(),
             },
+            config::RouteRule {
+                thread: Some("imessage:self:me@icloud.com".to_string()),
+                channel: None,
+                agent: "claude".to_string(),
+            },
         ];
 
         assert_eq!(
-            cfg.route_for_message("telegram", "telegram:dm:7")
+            cfg.route_for_message("telegram", &[vec!["telegram:dm:7".to_string()]])
                 .unwrap()
                 .backend,
             config::AgentBackend::Claude
         );
         assert_eq!(
-            cfg.route_for_message("telegram", "telegram:dm:8")
+            cfg.route_for_message("telegram", &[vec!["telegram:dm:8".to_string()]])
                 .unwrap()
                 .backend,
             config::AgentBackend::Codex
         );
         assert_eq!(
-            cfg.route_for_message("telegram", "telegram:dm:7:topic:99")
-                .unwrap()
-                .backend,
+            cfg.route_for_message(
+                "telegram",
+                &[
+                    vec!["telegram:dm:7:topic:99".to_string()],
+                    vec!["telegram:dm:7".to_string()],
+                ],
+            )
+            .unwrap()
+            .backend,
             config::AgentBackend::Codex
         );
         assert_eq!(
-            cfg.route_for_message("telegram", "telegram:dm:7:topic:100")
-                .unwrap()
-                .backend,
+            cfg.route_for_message(
+                "telegram",
+                &[
+                    vec!["telegram:dm:7:topic:100".to_string()],
+                    vec!["telegram:dm:7".to_string()],
+                ],
+            )
+            .unwrap()
+            .backend,
             config::AgentBackend::Claude
         );
         assert_eq!(
-            cfg.route_for_message("imessage", "imessage:self:me@icloud.com")
-                .unwrap()
-                .backend,
+            cfg.route_for_message(
+                "imessage",
+                &[vec![
+                    "imessage:self:me@icloud.com".to_string(),
+                    "self:me@icloud.com".to_string(),
+                ]],
+            )
+            .unwrap()
+            .backend,
             config::AgentBackend::Codex
         );
     }
