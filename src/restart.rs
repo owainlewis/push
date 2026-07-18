@@ -8,10 +8,7 @@ const SYSTEMD_UNIT: &str = "push.service";
 
 pub fn gateway() -> Result<()> {
     let command = platform_command()?;
-    println!("Restarting gateway...");
-    io::stdout()
-        .flush()
-        .context("flush gateway restart status")?;
+    write_status("Restarting gateway...");
     let message = execute(&command, |command| {
         let mut process = Command::new(command.program);
         process.args(&command.args);
@@ -21,8 +18,14 @@ pub fn gateway() -> Result<()> {
             description: status.to_string(),
         })
     })?;
-    println!("{message}");
+    write_status(message);
     Ok(())
+}
+
+fn write_status(message: &str) {
+    let mut stdout = io::stdout().lock();
+    let _ = writeln!(stdout, "{message}");
+    let _ = stdout.flush();
 }
 
 struct ProcessStatus {

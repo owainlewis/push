@@ -7,7 +7,7 @@ The default is `~/.push/config.toml`.
 | Command | Purpose |
 | --- | --- |
 | `push help`, `push --help` | Print command and option help without loading config or changing files |
-| `push version`, `push --version` | Print the installed Push version without starting the gateway |
+| `push version`, `push --version`, `push -V` | Print the installed Push version without starting the gateway |
 | `push init [path]` | Create and Git-initialize the one assistant repository; defaults to `./assistant` |
 | `push` | Start the configured channel gateway and scheduler |
 | `push doctor` | Validate config, paths, channel requirements, and required backend binaries |
