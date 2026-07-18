@@ -1,6 +1,5 @@
 use super::worker::{
-    handle, present_drafts, run_with_periodic_activity, DELIVERY_ATTEMPTS, DRAFT_SETUP_FAILURE,
-    SESSION_SETUP_FAILURE,
+    handle, present_drafts, run_with_periodic_activity, DRAFT_SETUP_FAILURE, SESSION_SETUP_FAILURE,
 };
 use super::*;
 use crate::agent::{FakeRunCall, FakeRunner};
@@ -141,7 +140,7 @@ async fn shutdown_cancels_a_pending_poll_operation() {
 }
 
 fn filter() -> Channel {
-    Channel::IMessage {
+    Channel::IMessage(crate::channel::IMessageChannel {
         poller: Poller::new("fake-chat.db".to_string()),
         sender: Sender::new(),
         self_set: [("me@icloud.com".to_string(), "me@icloud.com".to_string())]
@@ -151,7 +150,7 @@ fn filter() -> Channel {
             .into_iter()
             .collect(),
         reply_marker: "\n\n-- sent by push".to_string(),
-    }
+    })
 }
 
 fn msg(chat: &str, handle: &str, from_me: bool, text: &str) -> RawMessage {
@@ -292,7 +291,7 @@ fn formatted_phone_allowlist_matches_normalized_handle() {
 
 #[test]
 fn bare_phone_matches_allowlist_with_plus() {
-    let filter = Channel::IMessage {
+    let filter = Channel::IMessage(crate::channel::IMessageChannel {
         poller: Poller::new("fake-chat.db".to_string()),
         sender: Sender::new(),
         self_set: HashMap::new(),
@@ -301,7 +300,7 @@ fn bare_phone_matches_allowlist_with_plus() {
             .map(|s| (normalize_handle(s), thread_handle(s)))
             .collect(),
         reply_marker: String::new(),
-    };
+    });
 
     let got = filter.accept(&msg("15551234567", "15551234567", false, "hi"));
 
@@ -316,7 +315,7 @@ fn bare_phone_matches_allowlist_with_plus() {
 
 #[test]
 fn plus_phone_matches_bare_allowlist() {
-    let filter = Channel::IMessage {
+    let filter = Channel::IMessage(crate::channel::IMessageChannel {
         poller: Poller::new("fake-chat.db".to_string()),
         sender: Sender::new(),
         self_set: HashMap::new(),
@@ -325,7 +324,7 @@ fn plus_phone_matches_bare_allowlist() {
             .map(|s| (normalize_handle(s), thread_handle(s)))
             .collect(),
         reply_marker: String::new(),
-    };
+    });
 
     let got = filter.accept(&msg("+1 (555) 123-4567", "+1 (555) 123-4567", false, "hi"));
 
@@ -1343,7 +1342,8 @@ async fn exhausted_delivery_batch_retries_without_blocking_cursor() {
     ))
     .unwrap();
     gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
-    *gateway.ctx.send_failures_remaining.lock().unwrap() = DELIVERY_ATTEMPTS;
+    *gateway.ctx.send_failures_remaining.lock().unwrap() =
+        gateway.ctx.channel.delivery_semantics().retry_attempts;
     gateway
         .tick_fake(vec![message(1, "me@icloud.com", "", true, "hello")])
         .await;
@@ -2646,7 +2646,8 @@ async fn route_agent_draft_requires_bound_approval_before_atomic_install() {
     );
     let (thread, _) = gateway.channel.accept(&inbound).unwrap();
     let draft_directory =
-        crate::drafts::origin_directory(&cfg, &approval_origin(&inbound, &thread)).unwrap();
+        crate::drafts::origin_directory(&cfg, &gateway.channel.approval_origin(&inbound, &thread))
+            .unwrap();
     let body = format!(
         "+++\nversion = 1\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"codex\"\n+++\n\nPrepare a note.\n",
         workdir.to_string_lossy()
@@ -2792,8 +2793,11 @@ async fn failed_run_and_recovered_outbound_still_reconcile_origin_drafts() {
     let mut gateway = Gateway::new(cfg.clone()).unwrap();
     let failed_message = message(1, "+15551234567", "+15551234567", false, "draft then fail");
     let (thread, _) = gateway.channel.accept(&failed_message).unwrap();
-    let directory =
-        crate::drafts::origin_directory(&cfg, &approval_origin(&failed_message, &thread)).unwrap();
+    let directory = crate::drafts::origin_directory(
+        &cfg,
+        &gateway.channel.approval_origin(&failed_message, &thread),
+    )
+    .unwrap();
     let failed_body = draft_runbook(&workdir, "CREATED BEFORE FAILURE");
     let hook = Arc::new(move || {
         std::fs::write(directory.join("failed-run.md"), &failed_body).unwrap();
@@ -2826,7 +2830,9 @@ async fn failed_run_and_recovered_outbound_still_reconcile_origin_drafts() {
     let (recovered_thread, _) = gateway.channel.accept(&recovered_message).unwrap();
     let recovered_dir = crate::drafts::origin_directory(
         &cfg,
-        &approval_origin(&recovered_message, &recovered_thread),
+        &gateway
+            .channel
+            .approval_origin(&recovered_message, &recovered_thread),
     )
     .unwrap();
     std::fs::write(
@@ -2893,7 +2899,8 @@ async fn failed_draft_delivery_retries_after_restart_before_expiry() {
     .unwrap();
     let job = draft_test_job(1, "+15551234567", origin);
     let gateway = Gateway::new(cfg.clone()).unwrap();
-    *gateway.ctx.send_failures_remaining.lock().unwrap() = DELIVERY_ATTEMPTS;
+    *gateway.ctx.send_failures_remaining.lock().unwrap() =
+        gateway.ctx.channel.delivery_semantics().retry_attempts;
 
     assert!(present_drafts(&gateway.ctx, &job, &directory)
         .await

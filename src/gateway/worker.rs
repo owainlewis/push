@@ -20,8 +20,6 @@ use crate::voice::MAX_AUDIO_BYTES;
 
 use super::{audit, complete_row, reply_to, Ctx, Job, WorkerState};
 
-const TYPING_REFRESH: Duration = Duration::from_secs(4);
-pub(super) const DELIVERY_ATTEMPTS: usize = 3;
 pub(super) const SESSION_SETUP_FAILURE: &str =
     "Push could not prepare this conversation. Check the local logs, then resend.";
 pub(super) const DRAFT_SETUP_FAILURE: &str =
@@ -392,17 +390,18 @@ where
         result
     };
     let run = async {
-        if ctx.channel.supports_typing() {
+        if let Some(refresh) = ctx.channel.typing_refresh() {
             let channel = ctx.channel.clone();
+            let channel_id = channel.id();
             let target = job.target.clone();
             let thread = job.thread.clone();
-            run_with_periodic_activity(run, TYPING_REFRESH, move || {
+            run_with_periodic_activity(run, refresh, move || {
                 let channel = channel.clone();
                 let target = target.clone();
                 let thread = thread.clone();
                 async move {
                     if let Err(e) = channel.send_typing(&target).await {
-                        warn!("[{thread}] Telegram typing update failed: {e}");
+                        warn!("[{thread}] {channel_id} typing update failed: {e}");
                     }
                 }
             })
@@ -948,6 +947,7 @@ async fn deliver_stored(
         return Ok(DeliveryOutcome::AlreadyDelivered);
     }
     let mut outbound = outbound.clone();
+    let semantics = ctx.channel.delivery_semantics();
     let mut attempt = 0;
     loop {
         attempt += 1;
@@ -975,17 +975,18 @@ async fn deliver_stored(
                 "stored outbound delivery attempt failed",
             ),
         );
-        if attempt < DELIVERY_ATTEMPTS {
+        if attempt < semantics.retry_attempts {
             warn!(
-                "delivery attempt {attempt}/{DELIVERY_ATTEMPTS} failed; retrying stored outbound"
+                "delivery attempt {attempt}/{} failed; retrying stored outbound",
+                semantics.retry_attempts
             );
             #[cfg(not(test))]
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            tokio::time::sleep(semantics.retry_delay).await;
         } else {
             warn!("delivery attempts exhausted; stored outbound remains failed and will retry");
             attempt = 0;
             #[cfg(not(test))]
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(semantics.exhausted_retry_delay).await;
         }
         #[cfg(test)]
         tokio::task::yield_now().await;
