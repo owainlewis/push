@@ -2440,6 +2440,51 @@ async fn scheduled_telegram_retry_resumes_at_the_first_unsent_rich_chunk() {
     let _ = std::fs::remove_dir_all(assistant_dir);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn ordinary_telegram_retry_resumes_at_the_first_unsent_chunk() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("ordinary-rich-retry-sessions");
+    let assistant_dir = temp_path("ordinary-rich-retry-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let mut cfg = test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    );
+    cfg.channel = "telegram".to_string();
+    cfg.self_handles.clear();
+    cfg.allow_from.clear();
+    cfg.telegram_bot_token = Some("secret".to_string());
+    cfg.telegram_allow_user_ids = vec![7];
+    let mut gateway = Gateway::new(cfg).unwrap();
+    gateway.ctx.runners = Arc::new(fake_runners(Arc::new(Mutex::new(Vec::new()))));
+    *gateway.ctx.send_failure_after.lock().unwrap() = Some(1);
+    let prompt = "x".repeat(crate::telegram::TEXT_LIMIT + 1);
+    let expected = crate::telegram::split_text(&format!("fake reply: {prompt}"));
+
+    gateway
+        .tick_fake(vec![telegram_message(1, 7, 7, false, &prompt)])
+        .await;
+    gateway.queues.clear();
+    gateway.drain_workers().await;
+
+    let delivered = gateway
+        .ctx
+        .sent_replies
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, text)| text.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(delivered, expected);
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
 #[tokio::test]
 async fn missing_primary_disables_new_schedules_without_stopping_gateway() {
     let state_path = temp_state_path();
