@@ -74,16 +74,18 @@ Claude Code, Codex, or Pi: reason → use tools → produce result
 ```
 
 You own one Git-versioned assistant repository containing identity, context,
-and jobs. Push owns channels, history, scheduling, approvals, security, and
-delivery. The selected backend owns models, tools, MCP servers, skills, and
-authentication. That boundary keeps Push small and lets the backend change
-without rebuilding your assistant.
+project skills, and jobs. Push owns channels, history, scheduling, approvals,
+security, and delivery. The selected backend owns models, execution,
+permissions, shared tools, MCP servers, global skills, and authentication. That
+boundary keeps Push small while preserving the assistant's reusable workflows
+across backends.
 
 ## Documentation map
 
 | If you need to… | Read… |
 | --- | --- |
 | install and run one working channel | [Quickstart](getting-started.md) |
+| add reusable workflows and supporting scripts | [Skills](skills.md) |
 | understand every TOML setting | [Configuration](configuration.md) |
 | add recurring or manual work | [Jobs and schedules](jobs.md) |
 | choose backend permissions safely | [Permissions and security](security.md) |

@@ -15,8 +15,8 @@ Ownership is split deliberately:
 
 ```text
 Push runtime         = channels, scheduling, history, security, delivery
-Assistant repository = SOUL.md, context, jobs
-Agent runtime        = reasoning, tools, skills, MCP, authentication
+Assistant repository = SOUL.md, context, project skills, jobs
+Agent runtime        = reasoning, execution, permissions, tools, MCP, authentication
 ```
 
 ## Principles
@@ -74,7 +74,7 @@ flowchart LR
         gateway --> worker[Per-thread worker]
         store[(state.json)] <--> gateway
         history[(push.db)] <--> gateway
-        assistant[/assistant repo: SOUL.md, context, jobs/] --> worker
+        assistant[/assistant repo: SOUL.md, context, skills, jobs/] --> worker
         worker --> adapter[Agent adapter]
     end
     adapter -->|claude -p| claude[Claude Code]
@@ -373,14 +373,14 @@ content logging.
 ## Assistant Repository
 
 Push supports one assistant and stores one canonical `assistant_root`. It
-derives `SOUL.md`, `context/`, and `jobs/` from that root. `push init [path]`
+derives `SOUL.md`, `context/`, `skills/`, and `jobs/` from that root. `push init [path]`
 creates the conventional structure, initializes Git when needed, and persists
 the root through the selected `--config` file. There are no assistant IDs,
 registries, active selections, or multi-assistant commands.
 
 For every conversation and scheduled or manual job run, Push reads `SOUL.md`
 and appends a gateway-owned footer in memory containing the resolved absolute
-assistant, context, and jobs paths. The footer directs the backend to begin
+assistant, context, skills, and jobs paths. The footer directs the backend to begin
 with `context/README.md` when useful, protect `SOUL.md` and installed jobs, and
 use the job draft approval flow. Push does not write the footer to the
 repository or inject all context files into each prompt. The selected backend
@@ -389,7 +389,11 @@ and its configuration decide what to inspect. Instructions include the absolute
 
 Sessions, databases, drafts, audit logs, delivery state, locks, config secrets,
 and other runtime state stay outside the Git-versioned assistant repository.
-The backend still owns tools, skills, MCP, authentication, and execution.
+Project skills and their workflow-specific scripts live in the assistant
+repository. The backend still owns discovery and execution, permissions,
+shared tools, MCP, and authentication. Push exposes the canonical `skills/`
+directory through backend-specific discovery paths rather than implementing a
+second skill or tool runtime.
 
 ## Concurrency
 

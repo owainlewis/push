@@ -22,9 +22,10 @@ pub fn load(dir: &str) -> Result<String> {
     .filter(|contents| !contents.is_empty());
 
     let footer = format!(
-        "Assistant root: {}\nContext: {}\nEvals: {}\nJobs: {}\n\n{POLICY}",
+        "Assistant root: {}\nContext: {}\nSkills: {}\nEvals: {}\nJobs: {}\n\n{POLICY}",
         root.display(),
         root.join("context").display(),
+        root.join("skills").display(),
         root.join("evals").display(),
         root.join("jobs").display()
     );
@@ -52,6 +53,7 @@ mod tests {
         assert!(instructions.starts_with("Be calm, direct, and curious."));
         assert!(instructions.contains(&format!("Assistant root: {}", canonical.display())));
         assert!(instructions.contains(&format!("Context: {}", canonical.join("context").display())));
+        assert!(instructions.contains(&format!("Skills: {}", canonical.join("skills").display())));
         assert!(instructions.contains(&format!("Evals: {}", canonical.join("evals").display())));
         assert!(instructions.contains(&format!("Jobs: {}", canonical.join("jobs").display())));
         assert!(instructions.ends_with(POLICY));

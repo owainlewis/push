@@ -20,8 +20,8 @@ Push should not compete there.
 
 Push should own the durable gateway layer: messages, routing, scheduling,
 history, security, and delivery. The user should own one portable assistant
-repository with identity, context, and jobs. The agent runtime should be
-replaceable.
+repository with identity, context, project skills, and jobs. The agent runtime
+should be replaceable.
 
 ## Product Thesis
 
@@ -60,10 +60,10 @@ A personal assistant needs:
 - Permission and routing rules that match the user's life.
 
 Push supports exactly one assistant. `push init [path]` creates its user-owned,
-Git-versioned repository with `SOUL.md`, `context/`, and `jobs/`. One canonical
-root is configured; the other paths are derived. There are no assistant names,
-IDs, registries, or selection flows. This stays small, legible, and stable
-across backends and machines.
+Git-versioned repository with `SOUL.md`, `context/`, `skills/`, and `jobs/`.
+One canonical root is configured; the other paths are derived. There are no
+assistant names, IDs, registries, or selection flows. This stays small,
+legible, and stable across backends and machines.
 
 ## What The Gateway Owns
 
@@ -83,13 +83,14 @@ across backends and machines.
 - Coding workflow.
 - Tool execution.
 - MCP servers.
-- Plugins and skills.
+- Skill discovery and execution.
 - Shell permissions.
 - Repo context.
 - Long-running task mechanics.
 
-The assistant repository owns `SOUL.md`, editable context, and installed job
-runbooks. The runtime owns skills, tools, MCP, and authentication. Push runtime
+The assistant repository owns `SOUL.md`, editable context, project skills, and
+installed job runbooks. The runtime owns reasoning, skill and tool execution,
+permissions, shared tools, MCP, global skills, and authentication. Push runtime
 state and secrets remain outside the repository.
 
 The gateway should not rebuild these unless there is no reliable backend
@@ -103,7 +104,7 @@ The backend seam should stay small:
 input:
   user message
   assistant context
-  resolved assistant, context, and jobs locations
+  resolved assistant, context, skills, and jobs locations
   conversation/session id if one exists
   working directory
   timeout

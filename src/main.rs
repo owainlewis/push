@@ -85,6 +85,7 @@ async fn main() -> Result<()> {
             println!("  Customize the assistant:");
             println!("    $EDITOR {}/SOUL.md", result.root.display());
             println!("    $EDITOR {}/context/README.md", result.root.display());
+            println!("    $EDITOR {}/skills/README.md", result.root.display());
             println!("  Validate and run:");
             if args.config_path == DEFAULT_CONFIG_PATH {
                 println!("    push doctor");

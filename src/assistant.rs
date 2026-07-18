@@ -28,6 +28,7 @@ const AGENTS: &str = r#"# Assistant repository instructions
 
 - Treat `SOUL.md` as user-owned identity. Do not edit it unless the user asks.
 - Use `context/` for durable user context and working notes.
+- Use `skills/` for reusable workflows. Keep workflow-specific scripts, references, and assets inside the skill directory.
 - Treat `evals/` as user-owned evaluation criteria. Do not edit them during evaluation.
 - Treat `jobs/` as installed runbooks. Propose job changes through Push's approval workflow.
 - Keep secrets, sessions, databases, drafts, logs, and other runtime state outside this repository.
@@ -39,10 +40,11 @@ This Git repository contains the durable, user-owned parts of one Push assistant
 
 - `SOUL.md` defines the assistant's identity and working style.
 - `context/` contains durable context the assistant may read and update.
+- `skills/` contains reusable workflows and their supporting scripts and resources.
 - `evals/` contains reusable agent evaluation criteria.
 - `jobs/` contains installed Push job runbooks.
 
-Push owns channels, scheduling, history, security, approvals, and delivery outside this repository. The configured agent runtime owns reasoning, tools, skills, MCP servers, and authentication.
+Push owns channels, scheduling, history, security, approvals, and delivery outside this repository. The configured agent runtime discovers and executes project skills, and owns reasoning, permissions, external tools, MCP servers, and authentication.
 "#;
 
 const CONTEXT_README: &str = r#"# Context
@@ -50,6 +52,26 @@ const CONTEXT_README: &str = r#"# Context
 Store durable facts and working context here when they should be available across conversations.
 
 Good examples include preferences, active projects, people, recurring processes, and reference notes. Keep secrets out of this repository. Start with small, focused Markdown files and update or remove stale information.
+"#;
+
+const SKILLS_README: &str = r#"# Skills
+
+Store reusable workflows here using the Agent Skills format. Each skill is a directory containing a required `SKILL.md` file and optional supporting resources:
+
+```text
+skills/
+└── example-skill/
+    ├── SKILL.md
+    ├── scripts/
+    ├── references/
+    └── assets/
+```
+
+Keep scripts here when they exist only to support one skill. Use an external CLI or MCP integration when several skills share the same capability or it needs an independently managed service.
+
+Document required commands, network access, and environment variable names in `SKILL.md`. Keep credentials and other secret values outside this repository.
+
+In a new assistant repository, the `.agents/skills` and `.claude/skills` paths expose this canonical directory to Codex and Claude Code. Push passes it explicitly to Pi. Init never replaces an existing backend-specific directory or non-canonical link; consolidate its skills manually and rerun init.
 "#;
 
 const DEFAULT_CONFIG: &str = r#"# Telegram quick start.
@@ -86,6 +108,7 @@ pub fn init(requested_path: &str, config_path: &str) -> Result<InitResult> {
     prepare_target(&target, &config_path)?;
     let root = fs::canonicalize(&target)
         .with_context(|| format!("resolve assistant root {}", target.display()))?;
+    validate_skill_discovery_paths(&root)?;
     scaffold(&root)?;
     let git_initialized = initialize_git(&root)?;
     persist_root(&config_path, &root, existing_config)?;
@@ -344,11 +367,127 @@ fn scaffold(root: &Path) -> Result<()> {
     create_directory(&root.join("context"))?;
     create_directory(&root.join("evals"))?;
     create_directory(&root.join("jobs"))?;
+    create_directory(&root.join("skills"))?;
+    create_directory(&root.join(".agents"))?;
+    create_directory(&root.join(".claude"))?;
     create_file(&root.join("SOUL.md"), SOUL)?;
     create_file(&root.join("AGENTS.md"), AGENTS)?;
     create_file(&root.join("README.md"), README)?;
     create_file(&root.join("context/README.md"), CONTEXT_README)?;
+    create_file(&root.join("skills/README.md"), SKILLS_README)?;
+    create_skill_discovery_path(&root.join(".agents/skills"), &root.join("skills"))?;
+    create_skill_discovery_path(&root.join(".claude/skills"), &root.join("skills"))?;
     Ok(())
+}
+
+fn validate_skill_discovery_paths(root: &Path) -> Result<()> {
+    for path in [root.join(".agents"), root.join(".claude")] {
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => bail!(
+                "{} must be a real directory inside the assistant repository, not a file or symlink",
+                path.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("inspect skill discovery parent {}", path.display()))
+            }
+        }
+    }
+    match fs::symlink_metadata(root.join("skills")) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => bail!(
+            "{} must be a real directory inside the assistant repository, not a file or symlink",
+            root.join("skills").display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "inspect canonical skills directory {}",
+                    root.join("skills").display()
+                )
+            })
+        }
+    }
+    let skills = resolve_existing_or_lexical(&root.join("skills"))?;
+    for path in [root.join(".agents/skills"), root.join(".claude/skills")] {
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let target = fs::read_link(&path)
+                    .with_context(|| format!("read skill discovery path {}", path.display()))?;
+                let target = if target.is_absolute() {
+                    target
+                } else {
+                    path.parent()
+                        .context("skill discovery path has no parent")?
+                        .join(target)
+                };
+                if resolve_existing_or_lexical(&target)? != skills {
+                    bail_skill_discovery_migration(&path, root)?;
+                }
+            }
+            Ok(_) => bail_skill_discovery_migration(&path, root)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("inspect skill discovery path {}", path.display()))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn bail_skill_discovery_migration(path: &Path, root: &Path) -> Result<()> {
+    bail!(
+        "{} already exists and does not expose the canonical skills directory. Move its skills into {}, remove the old discovery path, then rerun push init; Push will not move or delete skill files automatically.",
+        path.display(),
+        root.join("skills").display()
+    )
+}
+
+fn create_skill_discovery_path(path: &Path, skills: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            let resolved = fs::canonicalize(path)
+                .with_context(|| format!("resolve skill discovery path {}", path.display()))?;
+            let expected = fs::canonicalize(skills)
+                .with_context(|| format!("resolve canonical skills path {}", skills.display()))?;
+            if resolved == expected {
+                Ok(())
+            } else {
+                bail!(
+                    "cannot use skill discovery path {} because it points outside {}",
+                    path.display(),
+                    skills.display()
+                )
+            }
+        }
+        Ok(_) => bail_skill_discovery_migration(
+            path,
+            skills
+                .parent()
+                .context("skills path has no assistant root")?,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            create_skill_symlink(path, skills)
+        }
+        Err(error) => {
+            Err(error).with_context(|| format!("inspect skill discovery path {}", path.display()))
+        }
+    }
+}
+
+#[cfg(unix)]
+fn create_skill_symlink(path: &Path, _skills: &Path) -> Result<()> {
+    std::os::unix::fs::symlink("../skills", path)
+        .with_context(|| format!("create skill discovery path {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn create_skill_symlink(path: &Path, _skills: &Path) -> Result<()> {
+    create_directory(path)
 }
 
 fn create_directory(path: &Path) -> Result<()> {
@@ -561,9 +700,23 @@ mod tests {
         assert!(target.join("AGENTS.md").is_file());
         assert!(target.join("README.md").is_file());
         assert!(target.join("context/README.md").is_file());
+        assert!(target.join("skills/README.md").is_file());
+        assert!(target.join(".agents/skills").is_dir());
+        assert!(target.join(".claude/skills").is_dir());
         assert!(target.join("evals").is_dir());
         assert!(target.join("jobs").is_dir());
         assert_eq!(fs::read_dir(target.join("jobs")).unwrap().count(), 0);
+        #[cfg(unix)]
+        {
+            assert!(fs::symlink_metadata(target.join(".agents/skills"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert!(fs::symlink_metadata(target.join(".claude/skills"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+        }
         assert!(target.join(".git").exists());
         let raw = fs::read_to_string(config).unwrap();
         assert!(raw.contains(&format!(
@@ -595,6 +748,85 @@ mod tests {
             "Keep me\n"
         );
         assert_eq!(fs::read_to_string(config).unwrap(), config_before);
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repeat_initialization_rejects_backend_specific_skills_before_writing() {
+        let parent = temp_dir("assistant-existing-skills");
+        let target = parent.join("assistant");
+        let config = parent.join("push.toml");
+        init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap();
+        fs::remove_file(target.join(".agents/skills")).unwrap();
+        fs::remove_file(target.join(".claude/skills")).unwrap();
+        fs::remove_dir_all(target.join("skills")).unwrap();
+        fs::create_dir(target.join(".agents/skills")).unwrap();
+        fs::write(
+            target.join(".agents/skills/custom.md"),
+            "existing backend skill",
+        )
+        .unwrap();
+
+        let error = init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("Move its skills"));
+        assert_eq!(
+            fs::read_to_string(target.join(".agents/skills/custom.md")).unwrap(),
+            "existing backend skill"
+        );
+        assert!(!target.join("skills").exists());
+        assert!(!target.join(".claude/skills").exists());
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repeat_initialization_rejects_external_skill_symlink_before_writing() {
+        let parent = temp_dir("assistant-external-skills");
+        let target = parent.join("assistant");
+        let external = parent.join("external-skills");
+        let config = parent.join("push.toml");
+        init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap();
+        fs::remove_file(target.join(".agents/skills")).unwrap();
+        fs::remove_file(target.join(".claude/skills")).unwrap();
+        fs::remove_dir_all(target.join("skills")).unwrap();
+        fs::create_dir(&external).unwrap();
+        fs::write(external.join("keep.md"), "keep").unwrap();
+        std::os::unix::fs::symlink(&external, target.join(".agents/skills")).unwrap();
+
+        let error = init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("Move its skills"));
+        assert_eq!(
+            fs::read_to_string(external.join("keep.md")).unwrap(),
+            "keep"
+        );
+        assert!(!target.join("skills").exists());
+        assert!(!target.join(".claude/skills").exists());
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repeat_initialization_rejects_symlinked_discovery_parent_before_writing() {
+        let parent = temp_dir("assistant-external-skill-parent");
+        let target = parent.join("assistant");
+        let external = parent.join("external-agent-config");
+        let config = parent.join("push.toml");
+        init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap();
+        fs::remove_file(target.join(".agents/skills")).unwrap();
+        fs::remove_dir(target.join(".agents")).unwrap();
+        fs::remove_file(target.join(".claude/skills")).unwrap();
+        fs::remove_dir_all(target.join("skills")).unwrap();
+        fs::create_dir(&external).unwrap();
+        std::os::unix::fs::symlink(&external, target.join(".agents")).unwrap();
+
+        let error = init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("must be a real directory"));
+        assert!(!target.join("skills").exists());
+        assert_eq!(fs::read_dir(&external).unwrap().count(), 0);
         let _ = fs::remove_dir_all(parent);
     }
 
