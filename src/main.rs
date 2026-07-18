@@ -438,6 +438,31 @@ mod tests {
     }
 
     #[test]
+    fn cli_reference_covers_every_help_command() {
+        let reference = include_str!("../docs/reference/cli.md").replace(['<', '>'], "");
+        let commands = HELP
+            .split("Commands:\n")
+            .nth(1)
+            .unwrap()
+            .split("\n\nOptions:")
+            .next()
+            .unwrap();
+
+        for line in commands.lines().filter(|line| !line.trim().is_empty()) {
+            let command = line
+                .trim()
+                .split("  ")
+                .next()
+                .unwrap()
+                .replace(['<', '>'], "");
+            assert!(
+                reference.contains(&format!("push {command}")),
+                "docs/reference/cli.md does not document `push {command}`"
+            );
+        }
+    }
+
+    #[test]
     fn parses_all_job_commands_with_config_anywhere() {
         assert_eq!(
             Args::parse(vec!["job".into(), "validate".into()])

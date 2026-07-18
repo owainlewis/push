@@ -47,7 +47,7 @@ Frontmatter fields:
 | `triggers` | no | One or more cron trigger tables |
 
 Unknown fields are errors. A job work directory may not overlap the assistant
-root, Push config, sessions, state, database, audit, drafts, or lock paths.
+root, loaded Push config, state, database, audit log, drafts, or job lock paths.
 
 ## Validate and inspect jobs
 
