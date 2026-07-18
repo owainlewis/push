@@ -25,7 +25,36 @@ fn help_commands_print_usage_without_creating_files() {
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("Usage: push"));
+        assert!(stdout.contains("reload"));
         assert!(stdout.contains("restart"));
+        assert!(output.stderr.is_empty());
+    }
+    assert_eq!(std::fs::read_dir(&workdir).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(&home).unwrap().count(), 0);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn version_commands_print_version_without_creating_files() {
+    let root = temp_dir("version");
+    let home = root.join("home");
+    let workdir = root.join("workdir");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workdir).unwrap();
+
+    for args in [&["version"][..], &["--version"][..], &["-V"][..]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_push"))
+            .args(args)
+            .current_dir(&workdir)
+            .env("HOME", &home)
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            format!("push {}", env!("CARGO_PKG_VERSION"))
+        );
         assert!(output.stderr.is_empty());
     }
     assert_eq!(std::fs::read_dir(&workdir).unwrap().count(), 0);
@@ -249,6 +278,52 @@ fn restart_invokes_the_platform_service_manager() {
     } else {
         assert_eq!(args, "--user\nrestart\npush.service\n");
     }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn reload_invokes_the_platform_service_manager() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = temp_dir("reload-service-manager");
+    let bin_dir = root.join("bin");
+    let args_path = root.join("args");
+    std::fs::create_dir(&bin_dir).unwrap();
+    let manager = if cfg!(target_os = "macos") {
+        "launchctl"
+    } else {
+        "systemctl"
+    };
+    let manager_path = bin_dir.join(manager);
+    std::fs::write(
+        &manager_path,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$PUSH_RESTART_ARGS_PATH\"\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&manager_path).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&manager_path, permissions).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin_dir.clone()).chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_push"))
+        .arg("reload")
+        .env("PATH", path)
+        .env("PUSH_RESTART_ARGS_PATH", &args_path)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(args_path.is_file());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "Restarted the Push gateway."
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
