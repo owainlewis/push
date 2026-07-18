@@ -58,8 +58,9 @@ history in SQLite outside that repository.
 
 ```text
 Push runtime                    Assistant repository          Agent runtime
-channels, scheduling, history   SOUL.md, context, jobs         reasoning, tools,
-security, delivery              user-owned and Git-versioned   skills, MCP, auth
+channels, scheduling, history   SOUL.md, context, jobs,        reasoning, tools,
+security, delivery              project skills                execution, global
+                                user-owned and Git-versioned   skills, MCP, auth
 ```
 
 The gateway owns durable runtime state. The user owns the assistant repository.
@@ -179,8 +180,9 @@ backend session id. The request separates:
 - working directory and timeout.
 
 Conversation history storage happens around this boundary and is independent
-of the selected backend. Agent tools, skills, MCP servers, model choice, and
-execution loops remain backend-owned.
+of the selected backend. Project skill definitions and their supporting files
+may live in the assistant repository. Agent tool and skill execution, global
+skills, MCP servers, model choice, and execution loops remain backend-owned.
 
 ## Alternatives and tradeoffs
 

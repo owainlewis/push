@@ -1,5 +1,6 @@
 //! Runs the Pi coding agent headlessly for a single message.
 
+use std::path::Path;
 use std::time::Duration;
 use std::{io, process::Stdio};
 
@@ -107,6 +108,11 @@ impl Runner {
                 .arg("--no-prompt-templates")
                 .arg("--no-context-files")
                 .arg("--no-session");
+        } else {
+            let skills = Path::new(req.work_dir).join("skills");
+            if skills.is_dir() {
+                cmd.arg("--skill").arg(skills);
+            }
         }
         if !req.instructions.trim().is_empty() {
             cmd.arg("--append-system-prompt")
@@ -318,6 +324,27 @@ mod tests {
         let args = read_args(&args_path);
         assert_arg_pair(&args, "--session", "pi-session");
         assert!(!args.contains(&"--tools".to_string()));
+    }
+
+    #[tokio::test]
+    async fn loads_assistant_skills_from_the_canonical_directory() {
+        let args_path = temp_path("pi-skills-args");
+        let work_dir = temp_dir("pi-skills-work");
+        std::fs::create_dir(work_dir.join("skills")).unwrap();
+        let cli = FakeCli::new("pi", &success_script(&args_path, "pi-session", "hello"));
+        let runner = Runner { bin: cli.bin() };
+
+        runner
+            .run(
+                request(work_dir.to_str().unwrap(), true),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+
+        let args = read_args(&args_path);
+        assert_arg_pair(&args, "--skill", work_dir.join("skills").to_str().unwrap());
+        let _ = std::fs::remove_dir_all(work_dir);
     }
 
     #[tokio::test]

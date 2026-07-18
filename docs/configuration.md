@@ -21,10 +21,10 @@ push init ~/Code/assistant
 
 For a new file, init writes a private, owner-only Telegram and Codex starting
 point with empty `telegram.bot_token` and `telegram.allow_user_ids` values.
-Fill both in before running Push. Push derives `SOUL.md`, `context/`, `evals/`, and `jobs/` from
-`assistant_root`. At run time it appends their resolved absolute locations to
-the user-owned `SOUL.md` instructions in memory. It does not write machine
-paths into the repository.
+Fill both in before running Push. Push derives `SOUL.md`, `context/`, `skills/`,
+`evals/`, and `jobs/` from `assistant_root`. At run time it appends their
+resolved absolute locations to the user-owned `SOUL.md` instructions in
+memory. It does not write machine paths into the repository.
 
 Root configuration, route, and primary-delivery tables do not
 yet reject every unknown key. Use the documented names, then run `push doctor`;
@@ -239,7 +239,7 @@ the selected agent and review [permissions and security](security.md).
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `assistant_root` | required for new setups | Canonical root of the one assistant repository; `SOUL.md`, `context/`, `evals/`, and `jobs/` are derived |
+| `assistant_root` | required for new setups | Canonical root of the one assistant repository; `SOUL.md`, `context/`, `skills/`, `evals/`, and `jobs/` are derived |
 | `state_path` | `~/.push/state.json` | Channel cursors and backend session IDs |
 | `database_path` | `~/.push/push.db` | Canonical conversation, approval, and job history |
 | `audit_log_path` | `~/.push/audit.jsonl` | Structured local audit log |

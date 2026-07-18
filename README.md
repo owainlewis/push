@@ -12,10 +12,10 @@ and schedule work with plain Markdown runbooks.
 
 It can review repositories before you wake up, watch pull requests, prepare a
 daily brief, or pick up a conversation from your phone. You own one portable,
-Git-versioned assistant repository containing identity, context, and jobs. Push
-owns channels, schedule evaluation, history, approvals, security, and result
-delivery. Each job file owns its schedule definition.
-Your coding agent owns the intelligence and tools.
+Git-versioned assistant repository containing identity, context, skills, and
+jobs. Push owns channels, schedule evaluation, history, approvals, security,
+and result delivery. Each job file owns its schedule definition. Your coding
+agent owns reasoning and execution.
 
 [Read the documentation](https://owainlewis.github.io/push/) ·
 [Get started](#quickstart) ·
@@ -26,14 +26,15 @@ Your coding agent owns the intelligence and tools.
 - **An assistant that is actually available.** Push runs continuously under
   `launchd` or `systemd`, not only while a terminal window is open.
 - **The agents you already use.** Keep Claude Code, Codex, or Pi, including
-  their model access, tools, MCP servers, skills, login, and backend
+  their model access, tools, MCP servers, global skills, login, and backend
   configuration.
 - **Conversations from your phone.** Use private iMessage, Telegram, or Slack app DMs.
   Each thread keeps its own backend session and canonical history.
 - **Work that starts without you.** A five-field cron trigger can run a
   Markdown job and send the stored result back to your primary chat.
-- **State you own.** `SOUL.md`, durable context, and installed jobs live in
-  one assistant repository. History is local SQLite and configuration is TOML.
+- **State you own.** `SOUL.md`, durable context, reusable project skills, and
+  installed jobs live in one assistant repository. History is local SQLite and
+  configuration is TOML.
 - **A small local control layer.** Sender allowlists constrain chat access.
   Agent permissions, tools, and MCP servers stay in the agent configuration.
   Telegram uses outbound long polling and Slack uses outbound Socket Mode. Neither opens a port.
@@ -102,9 +103,9 @@ push init ~/Code/assistant
 ```
 
 This creates a Git repository containing `SOUL.md`, `AGENTS.md`, `context/`,
-`evals/`, and `jobs/`, then records its path in `~/.push/config.toml`. New configs use
-Telegram and Codex by default. Edit the config to add your Telegram bot token
-and numeric user ID:
+portable `skills/`, `evals/`, and `jobs/`, then records its path in
+`~/.push/config.toml`. New configs use Telegram and Codex by default. Edit the
+config to add your Telegram bot token and numeric user ID:
 
 ```toml
 channel = "telegram"
