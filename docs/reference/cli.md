@@ -52,6 +52,7 @@ These messages are handled by the gateway before backend dispatch:
 | Message | Effect |
 | --- | --- |
 | `/clear`, `/new`, `/reset` | Start a fresh backend session for that conversation |
+| `/stop` | Stop the active request; already queued messages continue in order |
 | `/help` | Return the available chat commands |
 
 Starting a fresh session preserves canonical history. Push can seed the new
