@@ -1,7 +1,7 @@
 # Quickstart
 
 This guide gets one private chat working with one coding-agent backend. Start
-with Telegram on macOS or Linux, or iMessage on macOS. Add multiple channels,
+with Telegram or Slack on macOS or Linux, or iMessage on macOS. Add multiple channels,
 routes, and scheduled jobs after the basic path passes `push doctor`.
 
 ## 1. Check the requirements
@@ -9,7 +9,7 @@ routes, and scheduled jobs after the basic path passes `push doctor`.
 You need:
 
 - Apple Silicon macOS or x86_64 Linux for the current prebuilt release
-- macOS for iMessage, or macOS/Linux for Telegram
+- macOS for iMessage, or macOS/Linux for Telegram or Slack
 - Claude Code, Codex, or Pi installed, authenticated, and runnable by the same
   user that will run Push
 - Git for the assistant repository created by `push init`
@@ -121,6 +121,24 @@ the repository.
     Read the [iMessage guide](channels/imessage.md) for database permissions
     and filtering behavior.
 
+=== "Slack"
+
+    Create a Slack app with Socket Mode, `connections:write`, `im:history`,
+    `chat:write`, and the `message.im` bot event. Set the two tokens in the
+    service environment, then edit `~/.push/config.toml`:
+
+    ```toml
+    channel = "slack"
+    agent = "codex"
+    assistant_root = "~/Code/assistant"
+
+    [slack]
+    allow_user_ids = ["U012ABCDEF"]
+    ```
+
+    Read the [Slack guide](slack.md) for app setup, scopes, token storage,
+    filtering, and recovery behavior.
+
 Replace `codex` with `claude` for Claude Code or `pi` for Pi. Pi must already
 have a configured model provider or authenticated account for the service user.
 
@@ -152,7 +170,7 @@ security](security.md) before running the gateway unattended.
 
 A foreground process stops when its terminal closes. Follow [run as a
 service](services.md) to install Push under `launchd` on macOS or `systemd` for
-a Telegram-only Linux host.
+a Telegram- or Slack-only Linux host.
 
 ## Next steps
 

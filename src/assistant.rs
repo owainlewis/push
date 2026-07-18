@@ -7,7 +7,10 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
-use crate::config::{validate_inline_token_location, validate_inline_voice_key_location};
+use crate::config::{
+    validate_inline_slack_token_location, validate_inline_token_location,
+    validate_inline_voice_key_location,
+};
 use crate::util::expand_home;
 
 const SOUL: &str = r#"# SOUL
@@ -159,6 +162,21 @@ fn validate_config_secrets(config_path: &Path, target: &Path, config: &toml::Tab
         .and_then(toml::Value::as_str);
     for token in [flat_token, nested_token] {
         validate_inline_token_location(&config_path, &assistant, token)?;
+    }
+    let slack = config.get("slack").and_then(toml::Value::as_table);
+    let flat_app_token = config.get("slack_app_token").and_then(toml::Value::as_str);
+    let flat_bot_token = config.get("slack_bot_token").and_then(toml::Value::as_str);
+    let nested_app_token = slack
+        .and_then(|slack| slack.get("app_token"))
+        .and_then(toml::Value::as_str);
+    let nested_bot_token = slack
+        .and_then(|slack| slack.get("bot_token"))
+        .and_then(toml::Value::as_str);
+    for (app_token, bot_token) in [
+        (flat_app_token, flat_bot_token),
+        (nested_app_token, nested_bot_token),
+    ] {
+        validate_inline_slack_token_location(&config_path, &assistant, app_token, bot_token)?;
     }
     let flat_voice_key = config
         .get("voice_openai_api_key")
@@ -789,6 +807,24 @@ mod tests {
             fs::read_to_string(&config).unwrap(),
             "[voice]\nopenai_api_key = 'secret'\n"
         );
+        let _ = fs::remove_dir_all(target);
+    }
+
+    #[test]
+    fn refuses_inline_slack_tokens_in_a_config_inside_the_assistant() {
+        let target = temp_path("assistant-slack-secret-config");
+        fs::create_dir_all(&target).unwrap();
+        let config = target.join("config.toml");
+        fs::write(
+            &config,
+            "channel = 'slack'\n[slack]\napp_token = 'xapp-secret'\nbot_token = 'xoxb-secret'\n",
+        )
+        .unwrap();
+
+        let error = init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("inline Slack tokens"));
+        assert!(!target.join("SOUL.md").exists());
         let _ = fs::remove_dir_all(target);
     }
 }

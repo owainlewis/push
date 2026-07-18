@@ -10,6 +10,8 @@ use serde::Deserialize;
 use crate::util::expand_home;
 
 pub const TELEGRAM_BOT_TOKEN_ENV: &str = "TELEGRAM_BOT_TOKEN";
+pub const SLACK_APP_TOKEN_ENV: &str = "SLACK_APP_TOKEN";
+pub const SLACK_BOT_TOKEN_ENV: &str = "SLACK_BOT_TOKEN";
 pub const DEFAULT_VOICE_NAME: &str = "cedar";
 const SUPPORTED_VOICE_NAMES: &[&str] = &[
     "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse",
@@ -59,6 +61,12 @@ pub struct Config {
     pub telegram_allow_user_ids: Vec<i64>,
     #[serde(default)]
     pub telegram_allow_chat_ids: Vec<i64>,
+    #[serde(default)]
+    pub slack_app_token: Option<String>,
+    #[serde(default)]
+    pub slack_bot_token: Option<String>,
+    #[serde(default)]
+    pub slack_allow_user_ids: Vec<String>,
     #[serde(default)]
     pub voice_openai_api_key: Option<String>,
     #[serde(default = "default_voice_name")]
@@ -213,6 +221,15 @@ impl Config {
         )?;
         flatten_provider_section(
             root,
+            "slack",
+            &[
+                ("app_token", "slack_app_token"),
+                ("bot_token", "slack_bot_token"),
+                ("allow_user_ids", "slack_allow_user_ids"),
+            ],
+        )?;
+        flatten_provider_section(
+            root,
             "voice",
             &[
                 ("openai_api_key", "voice_openai_api_key"),
@@ -246,6 +263,12 @@ impl Config {
                 &config_path,
                 &assistant_root,
                 c.telegram_bot_token.as_deref(),
+            )?;
+            validate_inline_slack_token_location(
+                &config_path,
+                &assistant_root,
+                c.slack_app_token.as_deref(),
+                c.slack_bot_token.as_deref(),
             )?;
             validate_inline_voice_key_location(
                 &config_path,
@@ -345,6 +368,14 @@ impl Config {
                     .map(|token| token.trim().to_string())
                     .filter(|token| !token.is_empty())
             })
+    }
+
+    pub fn slack_app_token(&self) -> Option<String> {
+        configured_secret(self.slack_app_token.as_deref(), SLACK_APP_TOKEN_ENV)
+    }
+
+    pub fn slack_bot_token(&self) -> Option<String> {
+        configured_secret(self.slack_bot_token.as_deref(), SLACK_BOT_TOKEN_ENV)
     }
 
     pub fn route_for_message(
@@ -491,6 +522,30 @@ impl Config {
                         bail!("telegram.bot_token cannot be empty");
                     }
                 }
+                ChannelKind::Slack => {
+                    if self.slack_allow_user_ids.is_empty()
+                        || self
+                            .slack_allow_user_ids
+                            .iter()
+                            .any(|user| user.trim().is_empty())
+                    {
+                        bail!("set slack.allow_user_ids to explicit Slack user IDs");
+                    }
+                    if self
+                        .slack_app_token
+                        .as_deref()
+                        .is_some_and(|v| v.trim().is_empty())
+                    {
+                        bail!("slack.app_token cannot be empty");
+                    }
+                    if self
+                        .slack_bot_token
+                        .as_deref()
+                        .is_some_and(|v| v.trim().is_empty())
+                    {
+                        bail!("slack.bot_token cannot be empty");
+                    }
+                }
             }
         }
         self.agent_backend()?;
@@ -598,6 +653,26 @@ pub(crate) fn validate_inline_voice_key_location(
     if key.is_some_and(|key| !key.trim().is_empty()) && config_path.starts_with(assistant_root) {
         bail!(
             "config {} contains an inline OpenAI API key inside the Git-versioned assistant repository. Move the config outside the assistant or use OPENAI_API_KEY.",
+            config_path.display()
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_inline_slack_token_location(
+    config_path: &Path,
+    assistant_root: &Path,
+    app_token: Option<&str>,
+    bot_token: Option<&str>,
+) -> Result<()> {
+    if [app_token, bot_token]
+        .into_iter()
+        .flatten()
+        .any(|token| !token.trim().is_empty())
+        && config_path.starts_with(assistant_root)
+    {
+        bail!(
+            "config {} contains inline Slack tokens inside the Git-versioned assistant repository. Move the config outside the assistant or use SLACK_APP_TOKEN and SLACK_BOT_TOKEN.",
             config_path.display()
         );
     }
@@ -741,6 +816,7 @@ impl RouteRule {
 pub enum ChannelKind {
     IMessage,
     Telegram,
+    Slack,
 }
 
 impl ChannelKind {
@@ -748,7 +824,10 @@ impl ChannelKind {
         match s {
             "imessage" => Ok(Self::IMessage),
             "telegram" => Ok(Self::Telegram),
-            other => bail!("invalid channel {other:?}; expected \"imessage\" or \"telegram\""),
+            "slack" => Ok(Self::Slack),
+            other => bail!(
+                "invalid channel {other:?}; expected \"imessage\", \"telegram\", or \"slack\""
+            ),
         }
     }
 
@@ -756,8 +835,22 @@ impl ChannelKind {
         match self {
             Self::IMessage => "imessage",
             Self::Telegram => "telegram",
+            Self::Slack => "slack",
         }
     }
+}
+
+fn configured_secret(inline: Option<&str>, environment: &str) -> Option<String> {
+    inline
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            std::env::var(environment)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -851,6 +944,9 @@ mod tests {
             telegram_bot_token: None,
             telegram_allow_user_ids: Vec::new(),
             telegram_allow_chat_ids: Vec::new(),
+            slack_app_token: None,
+            slack_bot_token: None,
+            slack_allow_user_ids: Vec::new(),
             voice_openai_api_key: None,
             voice_name: DEFAULT_VOICE_NAME.to_string(),
             agent: "codex".to_string(),

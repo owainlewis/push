@@ -12,7 +12,7 @@ hide:
 
 Push turns Claude Code, Codex, or Pi into a personal assistant you can message and
 schedule. It runs on your machine, keeps durable state, and sends results back
-to iMessage or Telegram.
+to iMessage, Telegram, or Slack.
 
 [Get started](getting-started.md){ .md-button .md-button--primary }
 [See the architecture](architecture.md){ .md-button }
@@ -37,7 +37,7 @@ to iMessage or Telegram.
     ---
 
     Set up private [iMessage](channels/imessage.md) or
-    [Telegram](telegram.md) conversations with narrow sender allowlists.
+    [Telegram](telegram.md), or [Slack](slack.md) conversations with narrow sender allowlists.
 
     [:octicons-arrow-right-24: Configure channels](configuration.md#channels)
 

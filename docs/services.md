@@ -4,7 +4,8 @@ This guide covers running `push` continuously under a process manager.
 
 The iMessage channel is macOS-only because it reads
 `~/Library/Messages/chat.db` and sends replies with `osascript`. Telegram uses
-outbound HTTPS long polling and can run under `systemd` on Linux or a VM.
+outbound HTTPS long polling. Slack uses outbound Socket Mode. Both can run
+under `systemd` on Linux or a VM.
 
 ## Before Installing a Service
 
@@ -32,6 +33,8 @@ Use absolute paths in service files. The service user needs:
 - for iMessage on macOS, Full Disk Access and `osascript`
 - for Telegram, a token in the private config and network access to
   `api.telegram.org`
+- for Slack, app and bot tokens in the private config or service environment,
+  plus network access to `slack.com`
 - for optional voice messages, `voice.openai_api_key` in the private config or
   `OPENAI_API_KEY` in the service environment, plus network access to
   `api.openai.com`
@@ -180,8 +183,8 @@ chmod 600 ~/.config/push/env
 systemctl --user restart push.service
 ```
 
-Keep `~/.push/config.toml` at mode `0600` because it contains the Telegram bot
-token and may contain the OpenAI API key. Do not commit this file or print it in
+Keep `~/.push/config.toml` at mode `0600` because it may contain messaging or
+OpenAI credentials. Do not commit this file or print it in
 service logs.
 
 For a user service that survives logout, enable lingering:

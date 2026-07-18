@@ -1048,14 +1048,16 @@ async fn send_reply_chunk(
         Ok(())
     }
     #[cfg(not(test))]
-    match tokio::time::timeout(
-        ctx.channel.delivery_semantics().send_timeout,
-        ctx.channel.send_chunk(target, chunk),
-    )
-    .await
     {
-        Ok(result) => result,
-        Err(_) => anyhow::bail!("send timed out"),
+        let timeout = ctx.channel.delivery_semantics().send_timeout;
+        if timeout.is_zero() {
+            ctx.channel.send_chunk(target, chunk).await
+        } else {
+            match tokio::time::timeout(timeout, ctx.channel.send_chunk(target, chunk)).await {
+                Ok(result) => result,
+                Err(_) => anyhow::bail!("send timed out"),
+            }
+        }
     }
 }
 

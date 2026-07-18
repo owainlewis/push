@@ -291,6 +291,7 @@ mod tests {
     fn msg() -> RawMessage {
         RawMessage {
             row_id: 42,
+            provider_event_id: None,
             channel: "imessage",
             handle: "+15551234567".to_string(),
             chat_identifier: "+15551234567".to_string(),

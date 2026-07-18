@@ -451,6 +451,7 @@ impl Update {
         let Some(message) = self.message else {
             return RawMessage {
                 row_id: self.update_id,
+                provider_event_id: None,
                 channel: "telegram",
                 handle: String::new(),
                 chat_identifier: String::new(),
@@ -464,6 +465,7 @@ impl Update {
         };
         RawMessage {
             row_id: self.update_id,
+            provider_event_id: None,
             channel: "telegram",
             handle: message
                 .from

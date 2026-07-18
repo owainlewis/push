@@ -14,10 +14,12 @@ Keep these allowlists narrow:
 
 - `imessage.self_handles` and `imessage.allow_from`
 - `telegram.allow_user_ids` and `telegram.allow_chat_ids`
+- `slack.allow_user_ids`
 
 Use stable numeric Telegram IDs. Usernames are mutable and are not accepted as
 security identities. Treat a lost phone, shared messaging account, or
 compromised allowed sender as access to the assistant.
+Slack allowlists use stable member IDs, never mutable display names.
 
 ## Agent permissions
 
@@ -60,7 +62,7 @@ Keep them on local durable storage with permissions restricted to the service
 user. Keep the assistant directory in its own private Git repository. Never
 put real config secrets, state, audit logs, or databases in
 that repository. An explicit `assistant_root` config stored inside it cannot
-contain an inline Telegram token or OpenAI API key; use the matching environment
+contain inline Telegram, Slack, or OpenAI credentials; use the matching environment
 variable or move the config outside. When `voice.openai_api_key` is configured,
 `push doctor` requires the config file to be private on Unix:
 
@@ -71,7 +73,8 @@ chmod 600 ~/.push/config.toml
 ## Network exposure
 
 Push opens no inbound server port. iMessage reads local state. Telegram uses
-outbound HTTPS long polling against the Bot API and does not need a webhook.
+outbound HTTPS long polling and Slack uses an authenticated outbound Socket
+Mode WebSocket. Neither needs a webhook.
 This reduces exposure, but it does not make an allowed message harmless.
 
 ## Durable approval

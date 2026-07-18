@@ -91,6 +91,17 @@ private. `push init` creates new config files with mode `0600` on Unix. Set
 `TELEGRAM_BOT_TOKEN` when an environment variable is a better fit. See the
 [Telegram guide](telegram.md).
 
+### Slack
+
+```toml
+[slack]
+allow_user_ids = ["U012ABCDEF"]
+```
+
+Slack requires both `SLACK_APP_TOKEN` and `SLACK_BOT_TOKEN`, or the matching
+`slack.app_token` and `slack.bot_token` values in the private config. At least
+one exact Slack member ID is required. See the [Slack guide](slack.md).
+
 Telegram voice notes are optional. Configure the shared voice provider with:
 
 ```toml
@@ -111,7 +122,7 @@ See [Voice Messages](telegram.md#voice-messages).
 Use `channels` instead of `channel`:
 
 ```toml
-channels = ["imessage", "telegram"]
+channels = ["imessage", "telegram", "slack"]
 agent = "codex"
 
 [imessage]
@@ -133,6 +144,7 @@ provider does not stop the other.
 `primary_delivery` is the destination for scheduled job results. The channel
 must be enabled and the target must appear in that channel's allowlist.
 Telegram topic targets use `"<chat-id>:<topic-id>"`.
+Slack primary targets use an allowlisted member ID such as `U012ABCDEF`.
 
 ## Routing
 
@@ -161,6 +173,7 @@ Thread keys are:
 - `imessage:dm:<handle>`
 - `telegram:dm:<chat-id>`
 - `telegram:dm:<chat-id>:topic:<topic-id>`
+- `slack:dm:<workspace-id>:<dm-channel-id>`
 
 ## Agent permissions
 
@@ -196,6 +209,14 @@ the selected agent and review [permissions and security](security.md).
 | `telegram.bot_token` | `TELEGRAM_BOT_TOKEN` fallback | Private Bot API token; the environment value is used when this is omitted |
 | `telegram.allow_user_ids` | `[]` | Trusted numeric sender IDs |
 | `telegram.allow_chat_ids` | `[]` | Trusted numeric private-chat IDs |
+
+### Slack
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `slack.app_token` | `SLACK_APP_TOKEN` fallback | App-level Socket Mode token with `connections:write` |
+| `slack.bot_token` | `SLACK_BOT_TOKEN` fallback | Bot token used for `auth.test`, replies, and progress |
+| `slack.allow_user_ids` | `[]` | Trusted stable Slack member IDs |
 
 ### Voice
 
