@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-111417)](LICENSE)
 
 Push turns Claude Code, Codex, or Pi into an always-on personal assistant. Run
-one small process on your own machine, message it over iMessage or Telegram,
+one small process on your own machine, message it over iMessage, Telegram, or Slack,
 and schedule work with plain Markdown runbooks.
 
 It can review repositories before you wake up, watch pull requests, prepare a
@@ -28,7 +28,7 @@ Your coding agent owns the intelligence and tools.
 - **The agents you already use.** Keep Claude Code, Codex, or Pi, including
   their model access, tools, MCP servers, skills, login, and backend
   configuration.
-- **Conversations from your phone.** Use private iMessage or Telegram chats.
+- **Conversations from your phone.** Use private iMessage, Telegram, or Slack app DMs.
   Each thread keeps its own backend session and canonical history.
 - **Work that starts without you.** A five-field cron trigger can run a
   Markdown job and send the stored result back to your primary chat.
@@ -36,7 +36,7 @@ Your coding agent owns the intelligence and tools.
   one assistant repository. History is local SQLite and configuration is TOML.
 - **A small local control layer.** Sender allowlists constrain chat access.
   Agent permissions, tools, and MCP servers stay in the agent configuration.
-  Telegram uses outbound long polling and opens no port.
+  Telegram uses outbound long polling and Slack uses outbound Socket Mode. Neither opens a port.
 
 ## The model
 
@@ -117,6 +117,7 @@ allow_user_ids = [123456789]
 ```
 
 For iMessage, use the [iMessage setup guide](docs/channels/imessage.md). For
+Slack, use the [Slack direct-message guide](docs/slack.md). For
 Claude Code or Pi, set `agent = "claude"` or `agent = "pi"` after confirming
 that backend is authenticated for the same user.
 
@@ -185,7 +186,7 @@ and the rest of your day.
 
 ## What works today
 
-- iMessage on macOS and Telegram private chats on macOS or Linux
+- iMessage on macOS, plus Telegram private chats and Slack app DMs on macOS or Linux
 - Telegram voice notes with OpenAI transcription and spoken replies
 - Claude Code, Codex, and Pi backends, selectable by channel or conversation
 - One Git-versioned assistant repository containing `SOUL.md`, `context/`, and

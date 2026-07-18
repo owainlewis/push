@@ -12,6 +12,13 @@ bot_token = "replace-with-the-token-from-BotFather"
 # Replace this once with your numeric Telegram user ID.
 allow_user_ids = [123456789]
 
+# Slack alternative. See docs/slack.md.
+# channel = "slack"
+# [slack]
+# app_token = "xapp-..." # Prefer SLACK_APP_TOKEN.
+# bot_token = "xoxb-..." # Prefer SLACK_BOT_TOKEN.
+# allow_user_ids = ["U012ABCDEF"]
+
 # Required when a job contains an enabled cron trigger.
 # [primary_delivery]
 # channel = "telegram"

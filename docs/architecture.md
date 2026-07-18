@@ -1,7 +1,7 @@
 # Push Architecture
 
-Push is one local Rust process. It polls one or more configured iMessage and
-Telegram channels, filters messages, loads the configured assistant repository,
+Push is one local Rust process. It receives from configured iMessage, Telegram,
+and Slack channels, filters messages, loads the configured assistant repository,
 runs a configured agent backend, and sends the
 final reply.
 
@@ -50,11 +50,11 @@ The gateway should not build:
 
 Those belong to the selected backend.
 
-### 3. Polling Only
+### 3. Outbound connections only
 
-Push polls channel state and shells out to local agent commands. It opens no
+Push polls channel adapters and shells out to local agent commands. It opens no
 server port and accepts no inbound network connection. Telegram uses outbound
-HTTPS long polling.
+HTTPS long polling and Slack uses an outbound Socket Mode WebSocket.
 
 The trust boundary is the messaging account plus the configured channel
 allowlist.
@@ -65,8 +65,10 @@ allowlist.
 flowchart LR
     user([You]) -->|iMessage| db[(chat.db)]
     user -->|private chat| tg[Telegram Bot API]
+    user -->|app DM| slack[Slack]
     db -->|poll| push
     tg -->|long poll| push
+    slack -->|Socket Mode| push
     subgraph push[Push gateway]
         poller[Channel poller] --> gateway[Gateway loop]
         gateway --> worker[Per-thread worker]
@@ -84,14 +86,16 @@ flowchart LR
     adapter --> sender[Sender]
     sender -->|osascript| db
     sender -->|sendMessage| tg
+    sender -->|chat.postMessage| slack
     db -->|reply| user
     tg -->|reply| user
+    slack -->|reply| user
 ```
 
 ## Channel Boundary
 
-The gateway depends on one closed, compile-time channel contract. iMessage and
-Telegram implement it, and the `Channel` enum provides static dispatch. This is
+The gateway depends on one closed, compile-time channel contract. iMessage,
+Telegram, and Slack implement it, and the `Channel` enum provides static dispatch. This is
 an internal Rust boundary, not a dynamic plugin system or a configuration
 extension point.
 
@@ -105,15 +109,16 @@ Each channel implementation owns these semantics:
 - **Thread identity:** return a stable channel-qualified thread key, the exact
   reply target, approval sender/chat identity, and ordered route-key groups. Telegram
   topics inherit a parent-chat route; iMessage retains its legacy unprefixed
-  route aliases.
+  route aliases. Slack keeps one workspace-scoped DM identity while targeting
+  the exact originating Slack message thread.
 - **Outbound delivery:** validate proactive targets, plan durable chunks, and
   send one chunk to the exact accepted target. Replies never cross from one
   channel loop to another.
 - **Typing:** declare an optional refresh interval and send best-effort activity
   updates. Typing failures do not fail an assistant turn.
 - **Rich messages:** choose plain or rich delivery per chunk. iMessage keeps one
-  plain marked reply. Telegram owns Markdown rendering, size limits, splitting,
-  and topic addressing.
+  plain marked reply. Telegram and Slack own their formatting, size limits,
+  splitting, and provider-specific addressing.
 - **Retry:** expose the timeout and bounded retry cadence used for stored chat
   replies. A send call is one attempt. Generated output is persisted before
   delivery and retried without rerunning the backend. Scheduled delivery keeps
@@ -237,7 +242,8 @@ interactive permission prompts, so its own configuration is the boundary.
   "last_row_id": 123,
   "cursors": {
     "imessage": 123,
-    "telegram": 456
+    "telegram": 456,
+    "slack": 789
   },
   "sessions": {
     "imessage:self:you@icloud.com": {
@@ -256,7 +262,15 @@ now means "backend session id".
 If the configured backend changes for a thread, Push starts a fresh backend
 session instead of trying to resume the old runtime's session.
 
-With advanced `channels = ["imessage", "telegram"]` configuration, one
+Slack's dedicated receiver commits accepted Socket Mode events to
+`<state_path>.slack-inbox.db` before acknowledging their envelopes. It
+continues receiving while the gateway processes earlier events. The inbox
+assigns monotonic cursor rows and deduplicates Slack's stable `event_id`, so
+accepted input survives a process restart without relying on an in-memory
+WebSocket buffer. Ignored envelopes retain redacted rejection metadata for the
+audit path without retaining message content.
+
+With advanced `channels = ["imessage", "telegram", "slack"]` configuration, one
 coordinator starts an independent polling loop, acknowledgement tracker, and
 thread queue map for each enabled provider. The loops share one locked state
 store, canonical history database, backend runner set, and serialized audit log.
@@ -394,7 +408,8 @@ backend session.
 An allowed inbound message can cause an agent to run tools. The sender filter is
 the trust boundary. iMessage uses `imessage.self_handles` and
 `imessage.allow_from`; Telegram uses stable numeric `telegram.allow_user_ids`
-and `telegram.allow_chat_ids`.
+and `telegram.allow_chat_ids`; Slack uses stable `slack.allow_user_ids` member
+IDs and verifies the authenticated workspace.
 
 Push does not override sandbox, approval, permission-mode, or tool-list settings.
 Chats and jobs use the selected agent's own configuration and must use work

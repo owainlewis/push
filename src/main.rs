@@ -20,6 +20,7 @@ mod markdown;
 mod pi;
 mod rehydration;
 mod restart;
+mod slack;
 mod soul;
 mod store;
 mod telegram;
@@ -819,6 +820,11 @@ self_handles = ["me@example.com"]
 allow_user_ids = [7]
 allow_chat_ids = [9]
 
+[slack]
+app_token = "xapp-config"
+bot_token = "xoxb-config"
+allow_user_ids = ["U1"]
+
 [voice]
 openai_api_key = "config-openai-key"
 name = "onyx"
@@ -832,11 +838,35 @@ name = "onyx"
         assert_eq!(cfg.self_handles, ["me@example.com"]);
         assert_eq!(cfg.telegram_allow_user_ids, [7]);
         assert_eq!(cfg.telegram_allow_chat_ids, [9]);
+        assert_eq!(cfg.slack_app_token.as_deref(), Some("xapp-config"));
+        assert_eq!(cfg.slack_bot_token.as_deref(), Some("xoxb-config"));
+        assert_eq!(cfg.slack_allow_user_ids, ["U1"]);
         assert_eq!(
             cfg.voice_openai_api_key.as_deref(),
             Some("config-openai-key")
         );
         assert_eq!(cfg.voice_name, "onyx");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn slack_config_requires_an_explicit_user_allowlist() {
+        let path = temp_path("slack-allowlist-config");
+        std::fs::write(
+            &path,
+            r#"channel = "slack"
+[slack]
+app_token = "xapp-config"
+bot_token = "xoxb-config"
+allow_user_ids = []
+"#,
+        )
+        .unwrap();
+
+        let error = Config::load(path.to_str().unwrap()).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("set slack.allow_user_ids to explicit Slack user IDs"));
         let _ = std::fs::remove_file(path);
     }
 

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 
 use crate::{channel::Channel, config, drafts, history, jobs};
-use config::TELEGRAM_BOT_TOKEN_ENV;
+use config::{SLACK_APP_TOKEN_ENV, SLACK_BOT_TOKEN_ENV, TELEGRAM_BOT_TOKEN_ENV};
 
 /// Fails fast with actionable messages when the environment is not ready.
 pub fn preflight(cfg: &config::Config) -> Result<()> {
@@ -52,7 +52,7 @@ pub fn doctor(config_path: &str) -> Result<()> {
 fn run_checks(cfg: &config::Config) -> CheckReport {
     let mut checks = Vec::new();
     check_config(cfg, &mut checks);
-    check_voice_config_permissions(cfg, &mut checks);
+    check_secret_config_permissions(cfg, &mut checks);
     check_parent_dir(
         "state directory",
         "state_path",
@@ -73,6 +73,7 @@ fn run_checks(cfg: &config::Config) -> CheckReport {
                 match channel {
                     config::ChannelKind::IMessage => check_imessage_db(cfg, &mut checks),
                     config::ChannelKind::Telegram => check_telegram_config(cfg, &mut checks),
+                    config::ChannelKind::Slack => check_slack_config(cfg, &mut checks),
                 }
             }
         }
@@ -167,11 +168,16 @@ fn voice_check_message(source: Option<crate::voice::VoiceCredentialSource>) -> &
     }
 }
 
-fn check_voice_config_permissions(cfg: &config::Config, checks: &mut Vec<Check>) {
-    if cfg
-        .voice_openai_api_key
-        .as_deref()
-        .is_none_or(|key| key.trim().is_empty())
+fn check_secret_config_permissions(cfg: &config::Config, checks: &mut Vec<Check>) {
+    if [
+        cfg.voice_openai_api_key.as_deref(),
+        cfg.telegram_bot_token.as_deref(),
+        cfg.slack_app_token.as_deref(),
+        cfg.slack_bot_token.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .all(|secret| secret.trim().is_empty())
     {
         return;
     }
@@ -188,7 +194,7 @@ fn check_voice_config_permissions(cfg: &config::Config, checks: &mut Vec<Check>)
             Ok(_) => checks.push(Check::fail(
                 "config permissions",
                 format!(
-                    "{} contains voice.openai_api_key and is accessible by group or others. Run chmod 600 {}.",
+                    "{} contains inline credentials and is accessible by group or others. Run chmod 600 {}.",
                     cfg.config_path, cfg.config_path
                 ),
             )),
@@ -207,7 +213,7 @@ fn check_config(cfg: &config::Config, checks: &mut Vec<Check>) {
     checks.push(Check::pass(
         "config",
         format!(
-            "channels={}, agent={}, assistant_root={}, imessage.self_handles={}, imessage.allow_from={}, telegram.allow_user_ids={}, telegram.allow_chat_ids={}",
+            "channels={}, agent={}, assistant_root={}, imessage.self_handles={}, imessage.allow_from={}, telegram.allow_user_ids={}, telegram.allow_chat_ids={}, slack.allow_user_ids={}",
             cfg.enabled_channel_kinds()
                 .map(|channels| channels.into_iter().map(|kind| kind.as_str()).collect::<Vec<_>>().join(","))
                 .unwrap_or_else(|_| cfg.channel.clone()),
@@ -216,7 +222,8 @@ fn check_config(cfg: &config::Config, checks: &mut Vec<Check>) {
             cfg.self_handles.len(),
             cfg.allow_from.len(),
             cfg.telegram_allow_user_ids.len(),
-            cfg.telegram_allow_chat_ids.len()
+            cfg.telegram_allow_chat_ids.len(),
+            cfg.slack_allow_user_ids.len()
         ),
     ));
 }
@@ -325,6 +332,33 @@ fn check_telegram_config(cfg: &config::Config, checks: &mut Vec<Check>) {
                 TELEGRAM_BOT_TOKEN_ENV
             ),
         ));
+    }
+}
+
+fn check_slack_config(cfg: &config::Config, checks: &mut Vec<Check>) {
+    for (name, configured, environment) in [
+        (
+            "Slack app token",
+            cfg.slack_app_token(),
+            SLACK_APP_TOKEN_ENV,
+        ),
+        (
+            "Slack bot token",
+            cfg.slack_bot_token(),
+            SLACK_BOT_TOKEN_ENV,
+        ),
+    ] {
+        if configured.is_some() {
+            checks.push(Check::pass(
+                name,
+                format!("loaded from config or {environment}"),
+            ));
+        } else {
+            checks.push(Check::fail(
+                name,
+                format!("not configured. Set {environment} or the matching slack token without printing it."),
+            ));
+        }
     }
 }
 
@@ -491,14 +525,14 @@ mod tests {
 
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         let mut checks = Vec::new();
-        check_voice_config_permissions(&cfg, &mut checks);
+        check_secret_config_permissions(&cfg, &mut checks);
         assert!(matches!(checks[0].status, CheckStatus::Fail));
         assert!(checks[0].message.contains("chmod 600"));
         assert!(!checks[0].message.contains("'secret'"));
 
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         checks.clear();
-        check_voice_config_permissions(&cfg, &mut checks);
+        check_secret_config_permissions(&cfg, &mut checks);
         assert!(matches!(checks[0].status, CheckStatus::Pass));
 
         let _ = std::fs::remove_file(path);
@@ -678,6 +712,31 @@ claude_tools = []
             .iter()
             .any(|check| check.name == "binary /fake/claude"));
         assert!(!checks.iter().any(|check| check.name.contains("osascript")));
+    }
+
+    #[test]
+    fn slack_checks_both_tokens_without_printing_them() {
+        let mut cfg = test_config();
+        cfg.channel = "slack".to_string();
+        cfg.self_handles.clear();
+        cfg.slack_app_token = Some("xapp-secret".to_string());
+        cfg.slack_bot_token = Some("xoxb-secret".to_string());
+        cfg.slack_allow_user_ids = vec!["U1".to_string()];
+        let mut checks = Vec::new();
+
+        check_slack_config(&cfg, &mut checks);
+
+        assert_eq!(checks.len(), 2);
+        assert!(checks
+            .iter()
+            .all(|check| matches!(check.status, CheckStatus::Pass)));
+        let output = checks
+            .iter()
+            .map(|check| check.message.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!output.contains("xapp-secret"));
+        assert!(!output.contains("xoxb-secret"));
     }
 
     #[test]

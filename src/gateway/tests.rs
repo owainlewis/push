@@ -156,6 +156,7 @@ fn filter() -> Channel {
 fn msg(chat: &str, handle: &str, from_me: bool, text: &str) -> RawMessage {
     RawMessage {
         row_id: 1,
+        provider_event_id: None,
         channel: "imessage",
         handle: handle.to_string(),
         chat_identifier: chat.to_string(),
@@ -2956,6 +2957,9 @@ fn test_config(state_path: &str, _sessions_dir: &str, assistant_dir: &str) -> Co
         telegram_bot_token: None,
         telegram_allow_user_ids: Vec::new(),
         telegram_allow_chat_ids: Vec::new(),
+        slack_app_token: None,
+        slack_bot_token: None,
+        slack_allow_user_ids: Vec::new(),
         voice_openai_api_key: None,
         voice_name: crate::config::DEFAULT_VOICE_NAME.to_string(),
         agent: "codex".to_string(),
@@ -3057,6 +3061,7 @@ fn approval_question(
 fn message(row_id: i64, chat: &str, handle: &str, is_from_me: bool, text: &str) -> RawMessage {
     RawMessage {
         row_id,
+        provider_event_id: None,
         channel: "imessage",
         handle: handle.to_string(),
         chat_identifier: chat.to_string(),
@@ -3078,6 +3083,7 @@ fn telegram_message(
 ) -> RawMessage {
     RawMessage {
         row_id,
+        provider_event_id: None,
         channel: "telegram",
         handle: user_id.to_string(),
         chat_identifier: chat_id.to_string(),

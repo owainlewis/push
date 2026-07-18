@@ -50,6 +50,7 @@ nav:
       - Configuration: configuration.md
       - iMessage: channels/imessage.md
       - Telegram: telegram.md
+      - Slack: slack.md
   - Use Push:
       - Jobs and schedules: jobs.md
       - Permissions and security: security.md

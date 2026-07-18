@@ -8,6 +8,7 @@ use anyhow::{bail, Context, Result};
 use crate::approval::AnswerOrigin;
 use crate::config::{ChannelKind, Config};
 use crate::imessage::{Poller as IMessagePoller, Sender as IMessageSender};
+use crate::slack::{parse_message_target, Slack};
 use crate::telegram::Telegram;
 use crate::voice::AudioClip;
 
@@ -27,6 +28,9 @@ pub struct InboundVoice {
 #[derive(Debug, Clone)]
 pub struct RawMessage {
     pub row_id: i64,
+    /// Provider-stable identifier used for durable deduplication when it is
+    /// different from the channel's monotonic local cursor.
+    pub provider_event_id: Option<String>,
     pub channel: &'static str,
     pub handle: String,
     pub chat_identifier: String,
@@ -41,7 +45,10 @@ pub struct RawMessage {
 
 impl RawMessage {
     pub fn event_id(&self) -> String {
-        format!("{}:{}", self.channel, self.row_id)
+        self.provider_event_id.as_ref().map_or_else(
+            || format!("{}:{}", self.channel, self.row_id),
+            |id| format!("{}:{id}", self.channel),
+        )
     }
 }
 
@@ -132,6 +139,7 @@ pub(crate) struct IMessageChannel {
 pub enum Channel {
     IMessage(IMessageChannel),
     Telegram(Telegram),
+    Slack(Slack),
 }
 
 impl Channel {
@@ -158,6 +166,14 @@ impl Channel {
                 cfg.telegram_allow_user_ids.clone(),
                 cfg.telegram_allow_chat_ids.clone(),
             ))),
+            ChannelKind::Slack => Ok(Self::Slack(Slack::new(
+                cfg.slack_app_token()
+                    .ok_or_else(|| anyhow::anyhow!("Slack app token is not configured"))?,
+                cfg.slack_bot_token()
+                    .ok_or_else(|| anyhow::anyhow!("Slack bot token is not configured"))?,
+                cfg.slack_allow_user_ids.clone(),
+                &cfg.state_path,
+            )?)),
         }
     }
 
@@ -165,6 +181,7 @@ impl Channel {
         match self {
             Self::IMessage(channel) => ChannelContract::primary_target(channel, configured),
             Self::Telegram(channel) => ChannelContract::primary_target(channel, configured),
+            Self::Slack(channel) => ChannelContract::primary_target(channel, configured),
         }
     }
 
@@ -172,6 +189,7 @@ impl Channel {
         match self {
             Self::IMessage(channel) => ChannelContract::id(channel),
             Self::Telegram(channel) => ChannelContract::id(channel),
+            Self::Slack(channel) => ChannelContract::id(channel),
         }
     }
 
@@ -179,6 +197,7 @@ impl Channel {
         match self {
             Self::IMessage(channel) => ChannelContract::poll(channel, since).await,
             Self::Telegram(channel) => ChannelContract::poll(channel, since).await,
+            Self::Slack(channel) => ChannelContract::poll(channel, since).await,
         }
     }
 
@@ -186,6 +205,7 @@ impl Channel {
         match self {
             Self::IMessage(channel) => ChannelContract::latest_cursor(channel).await,
             Self::Telegram(channel) => ChannelContract::latest_cursor(channel).await,
+            Self::Slack(channel) => ChannelContract::latest_cursor(channel).await,
         }
     }
 
@@ -194,6 +214,7 @@ impl Channel {
         match self {
             Self::IMessage(channel) => ChannelContract::accept(channel, message),
             Self::Telegram(channel) => ChannelContract::accept(channel, message),
+            Self::Slack(channel) => ChannelContract::accept(channel, message),
         }
     }
 
@@ -201,6 +222,7 @@ impl Channel {
         match self {
             Self::IMessage(channel) => ChannelContract::reject_reason(channel, message),
             Self::Telegram(channel) => ChannelContract::reject_reason(channel, message),
+            Self::Slack(channel) => ChannelContract::reject_reason(channel, message),
         }
     }
 
@@ -208,6 +230,7 @@ impl Channel {
         match self {
             Self::IMessage(channel) => ChannelContract::approval_origin(channel, message, thread),
             Self::Telegram(channel) => ChannelContract::approval_origin(channel, message, thread),
+            Self::Slack(channel) => ChannelContract::approval_origin(channel, message, thread),
         }
     }
 
@@ -215,6 +238,7 @@ impl Channel {
         match self {
             Self::IMessage(channel) => ChannelContract::route_thread_groups(channel, thread),
             Self::Telegram(channel) => ChannelContract::route_thread_groups(channel, thread),
+            Self::Slack(channel) => ChannelContract::route_thread_groups(channel, thread),
         }
     }
 
@@ -222,6 +246,7 @@ impl Channel {
         match self {
             Self::IMessage(channel) => ChannelContract::outbound_chunks(channel, text, marker),
             Self::Telegram(channel) => ChannelContract::outbound_chunks(channel, text, marker),
+            Self::Slack(channel) => ChannelContract::outbound_chunks(channel, text, marker),
         }
     }
 
@@ -233,6 +258,9 @@ impl Channel {
             Self::Telegram(channel) => {
                 ChannelContract::scheduled_outbound_chunks(channel, text, marker)
             }
+            Self::Slack(channel) => {
+                ChannelContract::scheduled_outbound_chunks(channel, text, marker)
+            }
         }
     }
 
@@ -241,6 +269,7 @@ impl Channel {
         match self {
             Self::IMessage(channel) => ChannelContract::send_chunk(channel, target, chunk).await,
             Self::Telegram(channel) => ChannelContract::send_chunk(channel, target, chunk).await,
+            Self::Slack(channel) => ChannelContract::send_chunk(channel, target, chunk).await,
         }
     }
 
@@ -248,6 +277,7 @@ impl Channel {
         match self {
             Self::IMessage(channel) => ChannelContract::typing_refresh(channel),
             Self::Telegram(channel) => ChannelContract::typing_refresh(channel),
+            Self::Slack(channel) => ChannelContract::typing_refresh(channel),
         }
     }
 
@@ -255,6 +285,7 @@ impl Channel {
         match self {
             Self::IMessage(channel) => ChannelContract::send_typing(channel, target).await,
             Self::Telegram(channel) => ChannelContract::send_typing(channel, target).await,
+            Self::Slack(channel) => ChannelContract::send_typing(channel, target).await,
         }
     }
 
@@ -262,6 +293,7 @@ impl Channel {
         match self {
             Self::IMessage(channel) => ChannelContract::download_voice(channel, voice).await,
             Self::Telegram(channel) => ChannelContract::download_voice(channel, voice).await,
+            Self::Slack(channel) => ChannelContract::download_voice(channel, voice).await,
         }
     }
 
@@ -270,6 +302,7 @@ impl Channel {
         match self {
             Self::IMessage(channel) => ChannelContract::send_voice(channel, target, clip).await,
             Self::Telegram(channel) => ChannelContract::send_voice(channel, target, clip).await,
+            Self::Slack(channel) => ChannelContract::send_voice(channel, target, clip).await,
         }
     }
 
@@ -277,6 +310,7 @@ impl Channel {
         match self {
             Self::IMessage(channel) => ChannelContract::delivery_semantics(channel),
             Self::Telegram(channel) => ChannelContract::delivery_semantics(channel),
+            Self::Slack(channel) => ChannelContract::delivery_semantics(channel),
         }
     }
 
@@ -284,6 +318,7 @@ impl Channel {
         match self {
             Self::IMessage(channel) => ChannelContract::shutdown_semantics(channel),
             Self::Telegram(channel) => ChannelContract::shutdown_semantics(channel),
+            Self::Slack(channel) => ChannelContract::shutdown_semantics(channel),
         }
     }
 }
@@ -316,6 +351,7 @@ impl ChannelContract for IMessageChannel {
             .into_iter()
             .map(|message| RawMessage {
                 row_id: message.row_id,
+                provider_event_id: None,
                 channel: self.id(),
                 handle: message.handle,
                 chat_identifier: message.chat_identifier,
@@ -541,6 +577,113 @@ impl ChannelContract for Telegram {
     }
 }
 
+impl ChannelContract for Slack {
+    fn id(&self) -> &'static str {
+        "slack"
+    }
+
+    fn primary_target(&self, configured: &str) -> Result<String> {
+        let user = configured.trim();
+        if user.is_empty() {
+            bail!("primary delivery target cannot be empty");
+        }
+        if !self.allows_user(user) {
+            bail!("Slack primary user {user:?} is not in slack.allow_user_ids");
+        }
+        Ok(format!("user:{user}"))
+    }
+
+    async fn poll(&self, since: i64) -> Result<Vec<RawMessage>> {
+        self.poll(since).await
+    }
+
+    async fn latest_cursor(&self) -> Result<i64> {
+        self.latest_cursor()
+    }
+
+    fn accept(&self, message: &RawMessage) -> Option<(String, String)> {
+        if message.is_from_me
+            || common_reject_reason(message).is_some()
+            || !self.allows_user(&message.handle)
+        {
+            return None;
+        }
+        let (team, channel, root) = parse_message_target(&message.chat_identifier)?;
+        Some((
+            format!("slack:dm:{team}:{channel}"),
+            format!("{channel}|{root}"),
+        ))
+    }
+
+    fn reject_reason(&self, message: &RawMessage) -> &'static str {
+        if message.is_from_me {
+            "bot_message"
+        } else if !self.allows_user(&message.handle) {
+            "not_allowlisted"
+        } else {
+            common_reject_reason(message).unwrap_or("unsupported_update")
+        }
+    }
+
+    fn approval_origin(&self, message: &RawMessage, thread: &str) -> AnswerOrigin {
+        let chat_key = parse_message_target(&message.chat_identifier)
+            .map(|(_, channel, _)| channel)
+            .unwrap_or(&message.chat_identifier);
+        AnswerOrigin {
+            channel: self.id().to_string(),
+            thread_key: thread.to_string(),
+            sender_key: message.handle.clone(),
+            chat_key: chat_key.to_string(),
+        }
+    }
+
+    fn route_thread_groups(&self, thread: &str) -> Vec<Vec<String>> {
+        vec![vec![thread.to_string()]]
+    }
+
+    fn outbound_chunks(&self, text: &str, _marker: &str) -> Vec<OutboundChunk> {
+        crate::slack::split_text(text)
+            .into_iter()
+            .map(|text| OutboundChunk {
+                text,
+                rich_markdown: true,
+            })
+            .collect()
+    }
+
+    async fn send_chunk(&self, target: &str, chunk: &OutboundChunk) -> Result<()> {
+        self.send_message(target, &chunk.text).await
+    }
+
+    fn typing_refresh(&self) -> Option<Duration> {
+        Some(Duration::from_secs(60))
+    }
+
+    async fn send_typing(&self, target: &str) -> Result<()> {
+        self.send_status(target).await
+    }
+
+    async fn download_voice(&self, _voice: &InboundVoice) -> Result<AudioClip> {
+        bail!("Slack voice messages are not supported")
+    }
+
+    async fn send_voice(&self, _target: &str, _clip: &AudioClip) -> Result<()> {
+        bail!("Slack voice replies are not supported")
+    }
+
+    fn delivery_semantics(&self) -> DeliverySemantics {
+        DeliverySemantics {
+            // Slack's HTTP client bounds each request. A zero gateway timeout
+            // lets a server-directed Retry-After sleep finish without an
+            // early generic retry.
+            send_timeout: Duration::ZERO,
+            retry_attempts: 3,
+            retry_delay: Duration::from_secs(1),
+            exhausted_retry_delay: Duration::from_secs(5),
+        }
+    }
+}
+
 fn common_reject_reason(message: &RawMessage) -> Option<&'static str> {
     if !message.is_supported {
         Some("unsupported_update")
@@ -615,9 +758,26 @@ mod tests {
         Channel::Telegram(Telegram::new("secret".to_string(), vec![7], vec![9]))
     }
 
+    fn slack() -> Channel {
+        let state = std::env::temp_dir()
+            .join(format!("push-channel-slack-{}.json", uuid::Uuid::new_v4()))
+            .to_string_lossy()
+            .to_string();
+        Channel::Slack(
+            Slack::new(
+                "xapp-test".to_string(),
+                "xoxb-test".to_string(),
+                vec!["U1".to_string()],
+                &state,
+            )
+            .unwrap(),
+        )
+    }
+
     fn imessage_message(chat: &str, handle: &str, is_from_me: bool) -> RawMessage {
         RawMessage {
             row_id: 1,
+            provider_event_id: None,
             channel: "imessage",
             handle: handle.to_string(),
             chat_identifier: chat.to_string(),
@@ -633,6 +793,7 @@ mod tests {
     fn telegram_message(user: i64, chat: i64, is_group: bool) -> RawMessage {
         RawMessage {
             row_id: 1,
+            provider_event_id: None,
             channel: "telegram",
             handle: user.to_string(),
             chat_identifier: chat.to_string(),
@@ -646,9 +807,10 @@ mod tests {
     }
 
     #[test]
-    fn both_existing_channels_implement_the_static_contract() {
+    fn built_in_channels_implement_the_static_contract() {
         assert_contract::<IMessageChannel>();
         assert_contract::<Telegram>();
+        assert_contract::<Slack>();
     }
 
     #[test]
@@ -718,6 +880,44 @@ mod tests {
                 rich_markdown: true,
             }]
         );
+    }
+
+    #[test]
+    fn slack_contract_keeps_workspace_dm_identity_and_origin_thread_target() {
+        let channel = slack();
+        let message = RawMessage {
+            row_id: 1,
+            provider_event_id: Some("Ev1".to_string()),
+            channel: "slack",
+            handle: "U1".to_string(),
+            chat_identifier: "T1|D1|123.45".to_string(),
+            is_group: false,
+            text: "hello".to_string(),
+            voice: None,
+            is_from_me: false,
+            is_supported: true,
+            thread_id: None,
+        };
+
+        let (thread, target) = channel.accept(&message).unwrap();
+        assert_eq!(thread, "slack:dm:T1:D1");
+        assert_eq!(target, "D1|123.45");
+        assert_eq!(message.event_id(), "slack:Ev1");
+        assert_eq!(channel.delivery_semantics().send_timeout, Duration::ZERO);
+        assert_eq!(
+            channel.approval_origin(&message, &thread),
+            AnswerOrigin {
+                channel: "slack".to_string(),
+                thread_key: thread,
+                sender_key: "U1".to_string(),
+                chat_key: "D1".to_string(),
+            }
+        );
+
+        let mut unauthorized = message.clone();
+        unauthorized.handle = "U2".to_string();
+        assert_eq!(channel.accept(&unauthorized), None);
+        assert_eq!(channel.reject_reason(&unauthorized), "not_allowlisted");
     }
 
     #[test]
