@@ -70,6 +70,8 @@ struct Ctx {
     sent_voice_replies: SentVoiceReplies,
     #[cfg(test)]
     send_failures_remaining: Arc<Mutex<usize>>,
+    #[cfg(test)]
+    send_failure_after: Arc<Mutex<Option<usize>>>,
 }
 
 pub struct Gateway {
@@ -381,6 +383,8 @@ impl Gateway {
             sent_voice_replies: Arc::new(Mutex::new(Vec::new())),
             #[cfg(test)]
             send_failures_remaining: Arc::new(Mutex::new(0)),
+            #[cfg(test)]
+            send_failure_after: Arc::new(Mutex::new(None)),
         };
         let poll_interval = cfg.poll_interval_dur()?;
         Ok(Self {
@@ -1047,51 +1051,61 @@ async fn scheduled_reply_to(
     if start_chunk >= chunks.len() {
         return jobs::DeliveryAttempt::delivered(chunks.len());
     }
+    for (index, chunk) in chunks.iter().enumerate().skip(start_chunk) {
+        if let Err(error) = send_scheduled_chunk(ctx, target, chunk).await {
+            tracing::error!("scheduled send error to {target}: {error}");
+            return jobs::DeliveryAttempt::failed(index, error.to_string());
+        }
+        if let Err(error) = progress.checkpoint(index + 1).await {
+            tracing::error!("persist scheduled delivery progress: {error:#}");
+            return jobs::DeliveryAttempt::failed(index + 1, error.to_string());
+        }
+    }
+    jobs::DeliveryAttempt::delivered(chunks.len())
+}
+
+async fn send_scheduled_chunk(
+    ctx: &Ctx,
+    target: &str,
+    chunk: &crate::channel::OutboundChunk,
+) -> Result<()> {
     #[cfg(test)]
     {
-        let chunk_count = chunks.len();
         let should_fail = {
             let mut failures = ctx.send_failures_remaining.lock().unwrap();
-            let should_fail = *failures > 0;
-            if should_fail {
+            if *failures > 0 {
                 *failures -= 1;
+                true
+            } else {
+                let mut after = ctx.send_failure_after.lock().unwrap();
+                match after.as_mut() {
+                    Some(remaining) if *remaining == 0 => {
+                        *after = None;
+                        true
+                    }
+                    Some(remaining) => {
+                        *remaining -= 1;
+                        false
+                    }
+                    None => false,
+                }
             }
-            should_fail
         };
         if should_fail {
-            return jobs::DeliveryAttempt::failed(start_chunk, "scheduled send failed");
+            anyhow::bail!("scheduled send failed");
         }
-        for (index, chunk) in chunks.into_iter().enumerate().skip(start_chunk) {
-            ctx.sent_replies
-                .lock()
-                .unwrap()
-                .push((target.to_string(), chunk.text));
-            if let Err(error) = progress.checkpoint(index + 1).await {
-                return jobs::DeliveryAttempt::failed(index + 1, error.to_string());
-            }
-        }
-        jobs::DeliveryAttempt::delivered(chunk_count)
+        ctx.sent_replies
+            .lock()
+            .unwrap()
+            .push((target.to_string(), chunk.text.clone()));
+        Ok(())
     }
     #[cfg(not(test))]
     {
-        for (index, chunk) in chunks.iter().enumerate().skip(start_chunk) {
-            match tokio::time::timeout(SEND_TIMEOUT, ctx.channel.send_chunk(target, chunk)).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    tracing::error!("scheduled send error to {target}: {error}");
-                    return jobs::DeliveryAttempt::failed(index, error.to_string());
-                }
-                Err(_) => {
-                    tracing::error!("scheduled send to {target} timed out");
-                    return jobs::DeliveryAttempt::failed(index, "send timed out");
-                }
-            }
-            if let Err(error) = progress.checkpoint(index + 1).await {
-                tracing::error!("persist scheduled delivery progress: {error:#}");
-                return jobs::DeliveryAttempt::failed(index + 1, error.to_string());
-            }
+        match tokio::time::timeout(SEND_TIMEOUT, ctx.channel.send_chunk(target, chunk)).await {
+            Ok(result) => result,
+            Err(_) => anyhow::bail!("send timed out"),
         }
-        jobs::DeliveryAttempt::delivered(chunks.len())
     }
 }
 

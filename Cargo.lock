@@ -739,6 +739,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulldown-cmark"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+dependencies = [
+ "bitflags",
+ "memchr",
+ "unicase",
+]
+
+[[package]]
 name = "push"
 version = "0.6.0"
 dependencies = [
@@ -746,6 +757,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "humantime",
+ "pulldown-cmark",
  "reqwest",
  "rusqlite",
  "serde",
