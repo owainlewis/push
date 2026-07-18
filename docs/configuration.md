@@ -96,12 +96,15 @@ Telegram voice notes are optional. Configure the shared voice provider with:
 ```toml
 [voice]
 openai_api_key = "your-api-key"
+name = "cedar"
 ```
 
 `OPENAI_API_KEY` remains available as a higher-priority override for CI and
-service secret injection. Without either value, text remains fully available
-and voice notes get a helpful fallback. See
-[Voice Messages](telegram.md#voice-messages).
+service secret injection. `voice.name` is optional and defaults to `cedar`.
+Supported names are `alloy`, `ash`, `ballad`, `coral`, `echo`, `fable`, `nova`,
+`onyx`, `sage`, `shimmer`, `verse`, `marin`, and `cedar`. Without either API
+key value, text remains fully available and voice notes get a helpful fallback.
+See [Voice Messages](telegram.md#voice-messages).
 
 ### Run both providers
 
