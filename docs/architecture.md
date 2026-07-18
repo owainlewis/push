@@ -235,7 +235,8 @@ so slow audio cannot pause polling or work in another conversation.
 
 The first provider uses `voice.openai_api_key`, with `OPENAI_API_KEY` as a
 higher-priority environment override, for both `gpt-4o-transcribe` and
-`gpt-4o-mini-tts`. The first channel implementation is Telegram. A future
+`gpt-4o-mini-tts`. Speech uses the configured `voice.name`, which defaults to
+`cedar`. The first channel implementation is Telegram. A future
 channel needs only voice download and upload support. It does not need to change
 gateway routing, agent requests, or the OpenAI client.
 

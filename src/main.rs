@@ -783,6 +783,7 @@ allow_chat_ids = [9]
 
 [voice]
 openai_api_key = "config-openai-key"
+name = "onyx"
 "#,
         )
         .unwrap();
@@ -797,7 +798,29 @@ openai_api_key = "config-openai-key"
             cfg.voice_openai_api_key.as_deref(),
             Some("config-openai-key")
         );
+        assert_eq!(cfg.voice_name, "onyx");
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn voice_config_defaults_to_cedar_and_rejects_unknown_names() {
+        let default_path = temp_path("default-voice-config");
+        std::fs::write(&default_path, "self_handles = ['me@icloud.com']\n").unwrap();
+
+        let cfg = Config::load(default_path.to_str().unwrap()).unwrap();
+        assert_eq!(cfg.voice_name, "cedar");
+
+        let invalid_path = temp_path("invalid-voice-config");
+        std::fs::write(
+            &invalid_path,
+            "self_handles = ['me@icloud.com']\n[voice]\nname = 'unknown'\n",
+        )
+        .unwrap();
+
+        let error = Config::load(invalid_path.to_str().unwrap()).unwrap_err();
+        assert!(error.to_string().contains("invalid voice.name \"unknown\""));
+        let _ = std::fs::remove_file(default_path);
+        let _ = std::fs::remove_file(invalid_path);
     }
 
     #[test]

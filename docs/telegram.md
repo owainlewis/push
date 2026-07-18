@@ -58,7 +58,12 @@ voice transcription and spoken replies:
 ```toml
 [voice]
 openai_api_key = "your-api-key"
+name = "cedar"
 ```
+
+`voice.name` is optional and defaults to `cedar`. Supported names are `alloy`,
+`ash`, `ballad`, `coral`, `echo`, `fable`, `nova`, `onyx`, `sage`, `shimmer`,
+`verse`, `marin`, and `cedar`.
 
 Restart the managed gateway to load the updated config:
 
