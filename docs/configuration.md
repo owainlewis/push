@@ -96,12 +96,15 @@ Telegram voice notes are optional. Configure the shared voice provider with:
 ```toml
 [voice]
 openai_api_key = "your-api-key"
+name = "cedar"
 ```
 
 `OPENAI_API_KEY` remains available as a higher-priority override for CI and
-service secret injection. Without either value, text remains fully available
-and voice notes get a helpful fallback. See
-[Voice Messages](telegram.md#voice-messages).
+service secret injection. `voice.name` is optional and defaults to `cedar`.
+Supported names are `alloy`, `ash`, `ballad`, `coral`, `echo`, `fable`, `nova`,
+`onyx`, `sage`, `shimmer`, `verse`, `marin`, and `cedar`. Without either API
+key value, text remains fully available and voice notes get a helpful fallback.
+See [Voice Messages](telegram.md#voice-messages).
 
 ### Run both providers
 
@@ -176,7 +179,7 @@ the selected agent and review [permissions and security](security.md).
 | `channels` | `[]` | Concurrent enabled providers |
 | `agent` | `"claude"` | Default backend |
 | `poll_interval` | `"3s"` | Delay between channel polls |
-| `run_timeout` | `"120s"` | Maximum chat backend run time |
+| `run_timeout` | `"10m"` | Maximum chat backend run time |
 
 ### Local state
 
@@ -210,7 +213,7 @@ channels = ["imessage", "telegram"]
 agent = "codex"
 assistant_root = "~/Code/assistant"
 poll_interval = "3s"
-run_timeout = "120s"
+run_timeout = "10m"
 
 [imessage]
 self_handles = ["you@icloud.com"]

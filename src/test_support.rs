@@ -55,6 +55,7 @@ pub fn test_config() -> crate::config::Config {
         telegram_allow_user_ids: Vec::new(),
         telegram_allow_chat_ids: Vec::new(),
         voice_openai_api_key: None,
+        voice_name: crate::config::DEFAULT_VOICE_NAME.to_string(),
         agent: "codex".to_string(),
         routes: Vec::new(),
         assistant_root: "/fake/assistant".to_string(),

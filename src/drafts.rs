@@ -433,6 +433,7 @@ mod tests {
                 telegram_allow_user_ids: vec![7],
                 telegram_allow_chat_ids: Vec::new(),
                 voice_openai_api_key: None,
+                voice_name: crate::config::DEFAULT_VOICE_NAME.to_string(),
                 agent: "codex".to_string(),
                 routes: Vec::new(),
                 assistant_root: root.to_string_lossy().to_string(),
