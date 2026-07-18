@@ -86,6 +86,11 @@ fn init_without_path_creates_assistant_in_current_directory() {
     assert!(assistant.join("context/README.md").is_file());
     assert!(assistant.join("evals").is_dir());
     assert!(assistant.join("jobs").is_dir());
+    let morning_brief =
+        std::fs::read_to_string(assistant.join("jobs/morning-ai-brief.md")).unwrap();
+    assert!(morning_brief.contains("schedule = \"0 8 * * *\""));
+    assert!(morning_brief.contains("enabled = true"));
+    assert!(morning_brief.contains("AI news stories"));
     assert!(assistant.join(".git").exists());
     let config_path = home.join(".push/config.toml");
     let config = std::fs::read_to_string(&config_path).unwrap();
@@ -95,6 +100,8 @@ fn init_without_path_creates_assistant_in_current_directory() {
     assert!(config.contains("[telegram]"));
     assert!(config.contains("allow_user_ids = []"));
     assert!(config.contains("bot_token = \"\""));
+    assert!(config.contains("# [primary_delivery]"));
+    assert!(config.contains("# target = \"123456789\""));
     assert!(config.contains(
         &assistant
             .canonicalize()
@@ -115,7 +122,7 @@ fn init_without_path_creates_assistant_in_current_directory() {
         );
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Review or configure the channel and its allowlist:"));
+    assert!(stdout.contains("Configure the channel, allowlist, and primary delivery:"));
     assert!(stdout.contains("push doctor"));
     assert!(!stdout.contains("push doctor --config"));
     assert!(stdout.contains(&format!("$EDITOR {}", config_path.display())));
@@ -126,6 +133,8 @@ fn init_without_path_creates_assistant_in_current_directory() {
             < stdout.find("push doctor").unwrap()
     );
     assert!(stdout.contains("SOUL.md"));
+    assert!(stdout.contains("Review the daily 8:00 AI news brief:"));
+    assert!(stdout.contains("jobs/morning-ai-brief.md"));
 
     let run_output = Command::new(env!("CARGO_BIN_EXE_push"))
         .current_dir(&workdir)

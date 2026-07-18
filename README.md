@@ -102,9 +102,10 @@ push init ~/Code/assistant
 ```
 
 This creates a Git repository containing `SOUL.md`, `AGENTS.md`, `context/`,
-`evals/`, and `jobs/`, then records its path in `~/.push/config.toml`. New configs use
-Telegram and Codex by default. Edit the config to add your Telegram bot token
-and numeric user ID:
+`evals/`, and `jobs/`, then records its path in `~/.push/config.toml`. It also
+installs a morning AI news brief scheduled for 8:00 each day in your machine's
+local IANA timezone. New configs use Telegram and Codex by default. Edit the
+config to add your Telegram bot token and numeric user ID:
 
 ```toml
 channel = "telegram"
@@ -114,6 +115,10 @@ assistant_root = "~/Code/assistant"
 [telegram]
 bot_token = "token-from-BotFather"
 allow_user_ids = [123456789]
+
+[primary_delivery]
+channel = "telegram"
+target = "123456789"
 ```
 
 For iMessage, use the [iMessage setup guide](docs/channels/imessage.md). For

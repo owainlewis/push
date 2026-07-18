@@ -75,12 +75,16 @@ push init ~/Code/assistant
 ```
 
 Push creates one Git-versioned repository containing `SOUL.md`, `AGENTS.md`,
-`README.md`, `context/`, and empty `evals/` and `jobs/` directories. It records the canonical root in
-the selected config file. A new config starts with Telegram, Codex, and an empty
-`telegram.allow_user_ids` list that you must fill in. Edit `SOUL.md` to define
-identity and operating style, then add durable user context under `context/`.
-Push reads these files at run time and never writes machine-specific paths into
-the repository.
+`README.md`, `context/`, `evals/`, and `jobs/`. It also installs an enabled
+`morning-ai-brief` job scheduled for 8:00 each day in the machine's local IANA
+timezone. The brief opens with a friendly greeting, summarizes the top current
+AI news with source links, and ends with an uplifting message.
+
+Push records the canonical root in the selected config file. A new config
+starts with Telegram, Codex, and an empty `telegram.allow_user_ids` list that
+you must fill in. Edit `SOUL.md` to define identity and operating style, then
+add durable user context under `context/`. Push reads these files at run time
+and keeps runtime state outside the repository.
 
 ## 4. Configure a channel
 
@@ -97,6 +101,10 @@ the repository.
     [telegram]
     bot_token = "token-from-BotFather"
     allow_user_ids = [123456789]
+
+    [primary_delivery]
+    channel = "telegram"
+    target = "123456789"
     ```
 
     Read the [Telegram guide](telegram.md) for token storage, allowlisting,
@@ -114,6 +122,10 @@ the repository.
 
     [imessage]
     self_handles = ["you@icloud.com"]
+
+    [primary_delivery]
+    channel = "imessage"
+    target = "you@icloud.com"
     ```
 
     `self_handles` is for a private conversation with yourself. Use
@@ -128,6 +140,10 @@ If you replace the config file created by `push init`, keep its
 `assistant_root` setting. Running the same init command again is safe for a
 complete assistant repository and restores the setting without overwriting
 user files.
+
+The morning brief starts delivering after you configure `primary_delivery`.
+Edit `jobs/morning-ai-brief.md` if you want a different time, timezone, tone,
+or set of stories.
 
 ## 5. Validate and run
 
