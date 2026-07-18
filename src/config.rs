@@ -812,7 +812,7 @@ fn default_poll_interval() -> String {
     "3s".to_string()
 }
 fn default_run_timeout() -> String {
-    "120s".to_string()
+    "10m".to_string()
 }
 fn default_agent() -> String {
     "claude".to_string()
@@ -918,6 +918,19 @@ mod tests {
 
         assert_eq!(cfg.agent_backend().unwrap(), AgentBackend::Pi);
         assert_eq!(cfg.agent_bin(AgentBackend::Pi), "pi");
+    }
+
+    #[test]
+    fn chat_run_timeout_defaults_to_ten_minutes_and_accepts_an_override() {
+        let default: Config = toml::from_str("agent = 'codex'").unwrap();
+        let overridden: Config = toml::from_str("agent = 'codex'\nrun_timeout = '45s'").unwrap();
+
+        assert_eq!(default.run_timeout, "10m");
+        assert_eq!(default.run_timeout_dur().unwrap(), Duration::from_secs(600));
+        assert_eq!(
+            overridden.run_timeout_dur().unwrap(),
+            Duration::from_secs(45)
+        );
     }
 
     #[test]

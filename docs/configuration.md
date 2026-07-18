@@ -179,7 +179,7 @@ the selected agent and review [permissions and security](security.md).
 | `channels` | `[]` | Concurrent enabled providers |
 | `agent` | `"claude"` | Default backend |
 | `poll_interval` | `"3s"` | Delay between channel polls |
-| `run_timeout` | `"120s"` | Maximum chat backend run time |
+| `run_timeout` | `"10m"` | Maximum chat backend run time |
 
 ### Local state
 
@@ -213,7 +213,7 @@ channels = ["imessage", "telegram"]
 agent = "codex"
 assistant_root = "~/Code/assistant"
 poll_interval = "3s"
-run_timeout = "120s"
+run_timeout = "10m"
 
 [imessage]
 self_handles = ["you@icloud.com"]
