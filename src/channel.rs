@@ -265,17 +265,11 @@ impl Channel {
                 text: format!("{text}{marker}"),
                 rich_markdown: false,
             }],
-            Self::Telegram(_) if text.chars().count() <= crate::telegram::RICH_TEXT_LIMIT => {
-                vec![OutboundChunk {
-                    text: text.to_string(),
-                    rich_markdown: true,
-                }]
-            }
             Self::Telegram(_) => crate::telegram::split_text(text)
                 .into_iter()
                 .map(|text| OutboundChunk {
                     text,
-                    rich_markdown: false,
+                    rich_markdown: true,
                 })
                 .collect(),
         }
@@ -436,9 +430,9 @@ mod tests {
         assert!(chunks.iter().all(|chunk| !chunk.text.contains(marker)));
         assert_eq!(chunks[0].text, "x".repeat(crate::telegram::TEXT_LIMIT));
 
-        let long =
-            telegram().outbound_chunks(&"x".repeat(crate::telegram::RICH_TEXT_LIMIT + 1), marker);
-        assert!(long.iter().all(|chunk| !chunk.rich_markdown));
+        let long = telegram().outbound_chunks(&"x".repeat(crate::telegram::TEXT_LIMIT + 1), marker);
+        assert_eq!(long.len(), 2);
+        assert!(long.iter().all(|chunk| chunk.rich_markdown));
         assert!(long
             .iter()
             .all(|chunk| { chunk.text.encode_utf16().count() <= crate::telegram::TEXT_LIMIT }));
@@ -462,31 +456,18 @@ mod tests {
     }
 
     #[test]
-    fn telegram_keeps_markdown_structures_whole_or_falls_back_to_plain_chunks() {
+    fn telegram_keeps_each_rich_send_inside_a_durable_chunk_boundary() {
         let structured = format!(
             "{}\n```rust\nlet value = 1;\n```\n[link](https://example.com)\n| a | b |\n| - | - |\n| 1 | 2 |",
             "x".repeat(crate::telegram::TEXT_LIMIT)
         );
         let rich = telegram().outbound_chunks(&structured, "ignored");
 
-        assert_eq!(rich.len(), 1);
-        assert!(rich[0].rich_markdown);
-        assert_eq!(rich[0].text, structured);
-
-        let oversized = format!(
-            "{}\n```rust\nlet value = 1;\n```\n[link](https://example.com)\n| a | b |\n| - | - |",
-            "x".repeat(crate::telegram::RICH_TEXT_LIMIT)
-        );
-        let plain = telegram().outbound_chunks(&oversized, "ignored");
-
-        assert!(plain.len() > 1);
-        assert!(plain.iter().all(|chunk| !chunk.rich_markdown));
+        assert_eq!(rich.len(), 2);
+        assert!(rich.iter().all(|chunk| chunk.rich_markdown));
         assert_eq!(
-            plain
-                .into_iter()
-                .map(|chunk| chunk.text)
-                .collect::<String>(),
-            oversized
+            rich.into_iter().map(|chunk| chunk.text).collect::<String>(),
+            structured
         );
     }
 

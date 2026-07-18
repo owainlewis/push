@@ -14,7 +14,6 @@ use crate::channel::{InboundVoice, RawMessage};
 use crate::voice::{AudioClip, MAX_AUDIO_BYTES};
 
 pub const TEXT_LIMIT: usize = 4096;
-pub const RICH_TEXT_LIMIT: usize = 32768;
 const LONG_POLL_SECONDS: u64 = 25;
 const HTTP_TIMEOUT_SECONDS: u64 = LONG_POLL_SECONDS + 10;
 
@@ -251,23 +250,23 @@ impl Telegram {
     }
 
     pub async fn send_rich(&self, target: &str, text: &str) -> Result<()> {
-        for chunk in split_text(text) {
-            let html = crate::markdown::to_telegram_html(&chunk);
-            let mut payload = target_payload(target);
-            payload["text"] = json!(html);
-            payload["parse_mode"] = json!("HTML");
-            let transport_response = self
-                .post_with_topic_fallback("sendMessage", payload)
-                .await?;
-            let response: ApiResponse<Value> = serde_json::from_value(transport_response.body)
-                .map_err(|_| {
-                    anyhow::anyhow!("Telegram sendMessage returned an invalid response")
-                })?;
-            if !response.ok {
-                // Rendered HTML Telegram rejects (for example a parse error)
-                // still reaches the user as plain text.
-                self.send_plain(target, &chunk).await?;
-            }
+        if text.encode_utf16().count() > TEXT_LIMIT {
+            bail!("Telegram rich message exceeds the {TEXT_LIMIT} character chunk limit");
+        }
+        let html = crate::markdown::to_telegram_html(text);
+        let mut payload = target_payload(target);
+        payload["text"] = json!(html);
+        payload["parse_mode"] = json!("HTML");
+        let transport_response = self
+            .post_with_topic_fallback("sendMessage", payload)
+            .await?;
+        let response: ApiResponse<Value> = serde_json::from_value(transport_response.body)
+            .map_err(|_| anyhow::anyhow!("Telegram sendMessage returned an invalid response"))?;
+        if !response.ok {
+            // Rendered HTML Telegram rejects (for example a parse error)
+            // still reaches the user as plain text within the same durable
+            // delivery chunk.
+            self.send_plain(target, text).await?;
         }
         Ok(())
     }
@@ -883,35 +882,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejected_rich_markdown_falls_back_to_plain_chunks() {
+    async fn rejected_rich_markdown_falls_back_within_the_same_chunk() {
         let fake = Arc::new(FakeTransport::with_status_responses(vec![
             (400, json!({"ok": false, "error_code": 400})),
-            (200, json!({"ok": true, "result": {}})),
             (200, json!({"ok": true, "result": {}})),
         ]));
         let telegram =
             Telegram::with_transport("secret".to_string(), vec![7], vec![], fake.clone());
-        let text = format!("{}é", "x".repeat(TEXT_LIMIT));
+        let text = "**reply**";
 
-        telegram.send_rich("7", &text).await.unwrap();
+        telegram.send_rich("7", text).await.unwrap();
 
         let calls = fake.calls.lock().unwrap();
-        // First chunk: HTML send rejected, then plain fallback for the same
-        // chunk. Second chunk: HTML send accepted.
+        // The HTML send and its plain fallback share one gateway-owned chunk.
         assert_eq!(calls[0].0, "sendMessage");
         assert_eq!(calls[0].1["parse_mode"], "HTML");
         assert_eq!(calls[1].0, "sendMessage");
         assert!(calls[1].1.get("parse_mode").is_none());
-        assert_eq!(calls[2].0, "sendMessage");
-        assert_eq!(calls[2].1["parse_mode"], "HTML");
-        assert_eq!(
-            format!(
-                "{}{}",
-                calls[1].1["text"].as_str().unwrap(),
-                calls[2].1["text"].as_str().unwrap()
-            ),
-            text
-        );
+        assert_eq!(calls[1].1["text"], text);
+    }
+
+    #[tokio::test]
+    async fn rich_send_rejects_text_beyond_one_gateway_chunk() {
+        let fake = Arc::new(FakeTransport::with_responses(Vec::new()));
+        let telegram =
+            Telegram::with_transport("secret".to_string(), vec![7], vec![], fake.clone());
+
+        let error = telegram
+            .send_rich("7", &"x".repeat(TEXT_LIMIT + 1))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("exceeds"));
+        assert!(fake.calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

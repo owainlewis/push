@@ -696,6 +696,20 @@ impl DeliveryProgress {
             .map_err(|_| anyhow::anyhow!("delivery worker stopped while saving chunk progress"))?
             .map_err(anyhow::Error::msg)
     }
+
+    #[cfg(test)]
+    pub fn accepting_for_test(checkpoints: std::sync::Arc<std::sync::Mutex<Vec<usize>>>) -> Self {
+        let (checkpoint_tx, mut checkpoint_rx) = mpsc::unbounded_channel::<DeliveryCheckpoint>();
+        tokio::spawn(async move {
+            while let Some(checkpoint) = checkpoint_rx.recv().await {
+                checkpoints.lock().unwrap().push(checkpoint.next_chunk);
+                let _ = checkpoint.saved.send(Ok(()));
+            }
+        });
+        Self {
+            checkpoints: checkpoint_tx,
+        }
+    }
 }
 
 struct DeliveryCheckpoint {
