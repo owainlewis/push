@@ -13,7 +13,7 @@ use crate::approval::{
     NormalizedAnswer, Question,
 };
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 const MAX_HISTORY_READ_BYTES: usize = 8 * 1024;
 const READ_TRUNCATED: &str = "\n[truncated by push while reading history]";
 
@@ -184,6 +184,37 @@ impl History {
         tx.commit()
             .with_context(|| format!("commit outbound message to {database_path}"))?;
         Ok(message)
+    }
+
+    pub fn record_stop_target(
+        &mut self,
+        inbound_id: i64,
+        target_row_id: Option<i64>,
+    ) -> Result<Option<i64>> {
+        let database_path = self.path.display().to_string();
+        let tx = self
+            .conn
+            .transaction()
+            .with_context(|| format!("begin stop target transaction in {database_path}"))?;
+        tx.execute(
+            "INSERT INTO gateway_control_actions (inbound_id, action, target_row_id)
+             VALUES (?1, 'stop', ?2)
+             ON CONFLICT(inbound_id) DO NOTHING",
+            params![inbound_id, target_row_id],
+        )
+        .with_context(|| format!("insert stop target into {database_path}"))?;
+        let target_row_id = tx
+            .query_row(
+                "SELECT target_row_id
+                 FROM gateway_control_actions
+                 WHERE inbound_id = ?1 AND action = 'stop'",
+                [inbound_id],
+                |row| row.get(0),
+            )
+            .with_context(|| format!("read stop target from {database_path}"))?;
+        tx.commit()
+            .with_context(|| format!("commit stop target to {database_path}"))?;
+        Ok(target_row_id)
     }
 
     pub fn replace_inbound_content(&mut self, inbound_id: i64, content: &str) -> Result<()> {
@@ -935,6 +966,17 @@ fn migrate(conn: &Connection) -> Result<()> {
              PRAGMA user_version = 7;",
         )?;
     }
+    if version <= 7 {
+        conn.execute_batch(
+            "CREATE TABLE gateway_control_actions (
+                 inbound_id INTEGER PRIMARY KEY REFERENCES messages(id),
+                 action TEXT NOT NULL CHECK(action = 'stop'),
+                 target_row_id INTEGER,
+                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             );
+             PRAGMA user_version = 8;",
+        )?;
+    }
     conn.execute_batch("COMMIT;")?;
     Ok(())
 }
@@ -1051,7 +1093,7 @@ mod tests {
             .record_inbound("imessage", "imessage:self:me", "imessage:1", "hello")
             .unwrap();
         history.execute_batch_for_test(
-            "DROP TABLE job_draft_proposals; DROP TABLE job_runs; DROP TABLE approval_questions; PRAGMA user_version = 1;",
+            "DROP TABLE gateway_control_actions; DROP TABLE job_draft_proposals; DROP TABLE job_runs; DROP TABLE approval_questions; PRAGMA user_version = 1;",
         );
         drop(history);
 
@@ -1076,7 +1118,7 @@ mod tests {
         let question = question(2_000);
         history.create_question(&question, 1_000).unwrap();
         history.execute_batch_for_test(
-            "DROP TABLE job_draft_proposals; DROP TABLE job_runs; PRAGMA user_version = 2;",
+            "DROP TABLE gateway_control_actions; DROP TABLE job_draft_proposals; DROP TABLE job_runs; PRAGMA user_version = 2;",
         );
         drop(history);
 
@@ -1133,6 +1175,7 @@ mod tests {
              ALTER TABLE job_runs DROP COLUMN evaluation_error;
              ALTER TABLE job_runs DROP COLUMN evaluation_result;
              ALTER TABLE job_runs DROP COLUMN evaluation_state;
+             DROP TABLE gateway_control_actions;
              PRAGMA user_version = 6;",
         );
         drop(history);
