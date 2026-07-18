@@ -102,7 +102,7 @@ push init ~/Code/assistant
 ```
 
 This creates a Git repository containing `SOUL.md`, `AGENTS.md`, `context/`,
-and `jobs/`, then records its path in `~/.push/config.toml`. New configs use
+`evals/`, and `jobs/`, then records its path in `~/.push/config.toml`. New configs use
 Telegram and Codex by default. Edit the config to add your Telegram bot token
 and numeric user ID:
 

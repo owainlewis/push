@@ -13,7 +13,7 @@ use crate::approval::{
     NormalizedAnswer, Question,
 };
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 const MAX_HISTORY_READ_BYTES: usize = 8 * 1024;
 const READ_TRUNCATED: &str = "\n[truncated by push while reading history]";
 
@@ -926,6 +926,15 @@ fn migrate(conn: &Connection) -> Result<()> {
              PRAGMA user_version = 6;",
         )?;
     }
+    if version <= 6 {
+        conn.execute_batch(
+            "ALTER TABLE job_runs ADD COLUMN evaluation_state TEXT NOT NULL DEFAULT 'not_requested'
+                 CHECK(evaluation_state IN ('not_requested', 'running', 'passed', 'failed', 'error'));
+             ALTER TABLE job_runs ADD COLUMN evaluation_result TEXT;
+             ALTER TABLE job_runs ADD COLUMN evaluation_error TEXT;
+             PRAGMA user_version = 7;",
+        )?;
+    }
     conn.execute_batch("COMMIT;")?;
     Ok(())
 }
@@ -1093,18 +1102,64 @@ mod tests {
             )
             .unwrap();
         assert_eq!(run_table, 1);
-        let delivery_columns: i64 = reopened
+        let job_run_columns: i64 = reopened
             .conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('job_runs')
                  WHERE name IN ('delivery_channel', 'delivery_target',
                     'delivery_claim_owner', 'delivery_claimed_at_ms',
-                    'delivery_chunk_index')",
+                    'delivery_chunk_index', 'evaluation_state',
+                    'evaluation_result', 'evaluation_error')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(delivery_columns, 5);
+        assert_eq!(job_run_columns, 8);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn migrates_v6_job_rows_with_evaluation_defaulting_to_not_requested() {
+        let path = temp_path("evals-v6-migration");
+        let history = History::open(path.to_str().unwrap()).unwrap();
+        history.execute_batch_for_test(
+            "INSERT INTO job_runs (
+                id, job_name, snapshot_hash, trigger_kind, owner_kind, queued_at_ms,
+                backend, permission_profile, timeout_ms, workdir, state, result
+             ) VALUES (
+                'run-1', 'existing-job', 'hash', 'manual', 'manual_cli', 1000,
+                'codex', 'agent', 5000, '/tmp', 'succeeded', 'existing result'
+             );
+             ALTER TABLE job_runs DROP COLUMN evaluation_error;
+             ALTER TABLE job_runs DROP COLUMN evaluation_result;
+             ALTER TABLE job_runs DROP COLUMN evaluation_state;
+             PRAGMA user_version = 6;",
+        );
+        drop(history);
+
+        let reopened = History::open(path.to_str().unwrap()).unwrap();
+        let row = reopened
+            .conn
+            .query_row(
+                "SELECT state, result, evaluation_state FROM job_runs WHERE id = 'run-1'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "succeeded".into(),
+                "existing result".into(),
+                "not_requested".into()
+            )
+        );
         let _ = std::fs::remove_file(path);
     }
 

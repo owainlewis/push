@@ -28,9 +28,26 @@ struct CliResult {
 impl Runner {
     /// Executes one turn and returns Claude's reply text, or a RunError.
     pub async fn run(&self, req: Request<'_>, timeout: Duration) -> Result<RunOutput, RunError> {
+        self.run_with_mode(req, timeout, false).await
+    }
+
+    pub async fn run_evaluator(
+        &self,
+        req: Request<'_>,
+        timeout: Duration,
+    ) -> Result<RunOutput, RunError> {
+        self.run_with_mode(req, timeout, true).await
+    }
+
+    async fn run_with_mode(
+        &self,
+        req: Request<'_>,
+        timeout: Duration,
+        evaluator: bool,
+    ) -> Result<RunOutput, RunError> {
         let is_resume = !req.is_new;
         let attempt = crate::agent::output_with_retry(|| {
-            let mut cmd = self.command(&req);
+            let mut cmd = self.command(&req, evaluator);
             async move { cmd.output().await }
         });
         let out = match tokio::time::timeout(timeout, attempt).await {
@@ -42,12 +59,22 @@ impl Runner {
         self.parse_output(out, is_resume)
     }
 
-    fn command(&self, req: &Request<'_>) -> Command {
+    fn command(&self, req: &Request<'_>, evaluator: bool) -> Command {
         let mut cmd = Command::new(&self.bin);
         cmd.arg("-p")
             .arg(req.prompt)
             .arg("--output-format")
             .arg("json");
+        if evaluator {
+            cmd.arg("--safe-mode")
+                .arg("--tools")
+                .arg("")
+                .arg("--strict-mcp-config")
+                .arg("--mcp-config")
+                .arg("{}")
+                .arg("--no-chrome")
+                .arg("--no-session-persistence");
+        }
         if req.is_new {
             cmd.arg("--session-id").arg(req.session_id);
         } else {
@@ -309,6 +336,31 @@ mod tests {
         };
 
         assert_timeout(err);
+    }
+
+    #[tokio::test]
+    async fn evaluator_disables_tools_and_mcp() {
+        let work_dir = temp_dir("claude-evaluator-work");
+        let args_path = temp_path("claude-evaluator-args");
+        let cli = FakeCli::new(
+            "claude",
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nprintf '%s\\n' '{{\"result\":\"VERDICT: PASS\",\"session_id\":\"eval-session\"}}'\n",
+                sh_arg(&args_path)
+            ),
+        );
+        let runner = Runner { bin: cli.bin() };
+
+        runner
+            .run_evaluator(request(work_dir.to_str().unwrap()), Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        let args = read_args(&args_path);
+        assert_arg_pair(&args, "--tools", "");
+        assert_arg_pair(&args, "--mcp-config", "{}");
+        assert!(args.iter().any(|arg| arg == "--strict-mcp-config"));
+        assert!(args.iter().any(|arg| arg == "--safe-mode"));
     }
 
     fn request(work_dir: &str) -> Request<'_> {
