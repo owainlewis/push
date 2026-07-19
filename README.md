@@ -41,23 +41,19 @@ schedules to Claude Code, Codex, or Pi.
 ## How it works
 
 ```mermaid
-flowchart LR
-    You["You<br/>iMessage · Telegram · Slack"]
+flowchart TD
+    Message["Message from you<br/>iMessage · Telegram · Slack"]
     Jobs["Scheduled<br/>Markdown jobs"]
     Repo["Assistant repository<br/>SOUL.md · context · jobs"]
+    Push["Push<br/>message gateway · scheduler · history"]
     Agent["Your coding agent<br/>Claude Code · Codex · Pi"]
+    Reply["Push returns the result<br/>to your chat"]
 
-    subgraph Push
-        Gateway["Gateway<br/>filter · route · store"]
-        Delivery["Delivery"]
-    end
-
-    You -->|message| Gateway
-    Jobs -->|trigger| Gateway
-    Gateway -->|dispatch| Agent
+    Message --> Push
+    Jobs --> Push
+    Push -->|dispatch| Agent
     Repo -. context .-> Agent
-    Agent -->|result| Delivery
-    Delivery -->|reply| You
+    Agent --> Reply
 ```
 
 ## What it does
