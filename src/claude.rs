@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use tokio::process::Command;
 
-use crate::agent::{Request, RunError, RunOutput};
+use crate::agent::{final_reply, Request, RunError, RunOutput};
 use crate::util::non_empty_session_id;
 
 /// Runner invokes the `claude` binary in print mode.
@@ -109,13 +109,13 @@ impl Runner {
                 }
             }
             Ok(r) => Ok(RunOutput {
-                reply: r.result.trim().to_string(),
+                reply: final_reply("claude", &r.result)?,
                 session_id: non_empty_session_id(&r.session_id).map(str::to_string),
             }),
             Err(_) => {
                 if out.status.success() {
                     Ok(RunOutput {
-                        reply: String::from_utf8_lossy(&out.stdout).trim().to_string(),
+                        reply: final_reply("claude", &String::from_utf8_lossy(&out.stdout))?,
                         session_id: None,
                     })
                 } else {
@@ -270,6 +270,28 @@ mod tests {
         assert_arg_pair(&args, "--append-system-prompt", "assistant identity");
         assert!(!args.contains(&"--add-dir".to_string()));
         assert_arg_pair(&args, "-p", "continue");
+    }
+
+    #[tokio::test]
+    async fn rejects_successful_empty_replies() {
+        for stdout in [
+            r#"{"result":" \t\n ","session_id":"claude-session"}"#,
+            " \t ",
+        ] {
+            let work_dir = temp_dir("claude-empty-reply-work");
+            let cli = FakeCli::new(
+                "claude",
+                &format!("#!/bin/sh\nprintf '%s\\n' {}\n", sh_arg(stdout.as_ref())),
+            );
+            let runner = Runner { bin: cli.bin() };
+
+            let error = runner
+                .run(request(work_dir.to_str().unwrap()), Duration::from_secs(5))
+                .await
+                .unwrap_err();
+
+            assert_failed(error, "claude exited without a final reply");
+        }
     }
 
     #[tokio::test]

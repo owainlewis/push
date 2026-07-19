@@ -380,6 +380,46 @@ fn empty_text_dropped() {
     );
 }
 
+#[tokio::test]
+async fn delivery_fails_when_channel_produces_no_chunks() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("empty-delivery-sessions");
+    let assistant_dir = temp_path("empty-delivery-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let gateway = Gateway::new(test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    ))
+    .unwrap();
+
+    assert!(!reply_to(&gateway.ctx, "me@icloud.com", " \t\n ").await);
+    assert!(gateway.ctx.sent_replies.lock().unwrap().is_empty());
+
+    let checkpoints = Arc::new(Mutex::new(Vec::new()));
+    let scheduled = scheduled_reply_to(
+        &gateway.ctx,
+        "me@icloud.com",
+        " \t\n ",
+        0,
+        jobs::DeliveryProgress::accepting_for_test(checkpoints.clone()),
+    )
+    .await;
+    assert!(!scheduled.delivered);
+    assert_eq!(scheduled.next_chunk, 0);
+    assert_eq!(
+        scheduled.error.as_deref(),
+        Some("channel produced no outbound chunks")
+    );
+    assert!(checkpoints.lock().unwrap().is_empty());
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
 #[test]
 fn group_chat_dropped_even_from_allowlisted_sender() {
     assert_eq!(
