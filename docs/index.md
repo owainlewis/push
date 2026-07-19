@@ -6,24 +6,25 @@ hide:
 
 <div class="push-hero" markdown>
 
-<span class="push-kicker">Open source · Runs on your machine</span>
+<span class="push-kicker">Lightweight · Open source · Runs on your machine</span>
 
-# Your coding agent has a phone now.
+# Build your own 24/7 AI chief of staff.
 
-Text Claude Code, Codex, or Pi from iMessage, Telegram, or Slack. Ask for work,
-walk away, and get the result back in chat.
+Push turns Claude Code, Codex, or Pi into an always-on personal assistant.
+Message it from iMessage, Telegram, or Slack, give it recurring jobs, and let it
+handle work in the background.
 
 <p class="push-actions">
-  <a class="md-button md-button--primary" href="getting-started/">Build your assistant</a>
-  <a class="md-button" href="#what-can-it-do">See what it can do&nbsp; ↓</a>
+  <a class="md-button md-button--primary" href="getting-started/">Set up your assistant</a>
+  <a class="md-button" href="#what-can-it-do">What it can do&nbsp; ↓</a>
 </p>
 
 <p class="push-install">curl -fsSL https://raw.githubusercontent.com/owainlewis/push/main/install.sh | sh</p>
 
 <ul class="push-signals">
-  <li><strong>Use your existing agent</strong>No new model stack</li>
-  <li><strong>Your machine</strong>Push state stays under your control</li>
-  <li><strong>Beyond the terminal</strong>Available from the chat apps you use</li>
+  <li><strong>One small binary</strong>No new agent runtime</li>
+  <li><strong>Always available</strong>Handles messages and scheduled jobs</li>
+  <li><strong>You stay in control</strong>Push state stays on your machine</li>
 </ul>
 
 </div>
@@ -32,21 +33,21 @@ walk away, and get the result back in chat.
 
 <div class="push-section-heading" markdown>
 
-<span class="push-section-label">A task in Push</span>
+<span class="push-section-label">Background work</span>
 
-## Send the work. Get on with your day.
+## Give it a task. Get the answer in chat.
 
-Push carries the conversation between your phone and the coding agent already
-set up on your machine.
+Send a message from your phone. Push runs your coding agent on your machine and
+sends the result back when the work is done.
 
 </div>
 
 <div class="push-chat" markdown="0">
 <div class="push-chat-bar"><span>Telegram</span><span><i></i> Push is online</span></div>
 <div class="push-chat-body">
-<div class="push-chat-message push-chat-message--user"><span>You · 08:42</span><p>Check why the nightly build failed and send me the likely fix.</p></div>
-<div class="push-chat-status"><span>Push → Codex</span><span>Working on your machine</span></div>
-<div class="push-chat-message push-chat-message--assistant"><span>Push · 08:47</span><p>The failure comes from an expired fixture in the integration suite. I prepared the change and ran the focused tests: 18 passed.</p></div>
+<div class="push-chat-message push-chat-message--user"><span>You · 18:12</span><p>Every weekday at 8am, run my morning brief and send me the three things that need my attention.</p></div>
+<div class="push-chat-status"><span>Push → Codex</span><span>Draft ready for approval</span></div>
+<div class="push-chat-message push-chat-message--assistant"><span>Push · 18:14</span><p>I drafted your morning brief for weekdays at 8am. Approve it to start the schedule.</p></div>
 </div>
 <div class="push-chat-footer"><span>Delivered in chat</span><span>Conversation saved</span></div>
 </div>
@@ -55,30 +56,30 @@ set up on your machine.
 
 <section class="push-outcomes" id="what-can-it-do" markdown>
 
-<span class="push-section-label">Your personal assistant</span>
+<span class="push-section-label">What it does</span>
 
-## Useful work, without reopening the terminal.
+## A personal assistant that keeps working when you step away.
 
 <div class="push-use-cases" markdown="0">
   <article>
     <span>01</span>
-    <h3>Start work from anywhere</h3>
-    <p>Ask your agent to inspect a repository, investigate a failure, or prepare an update while you are away from your desk.</p>
+    <h3>Handle background work</h3>
+    <p>Ask it to inspect a repository, research a question, or prepare an update. You do not need to keep a terminal open.</p>
   </article>
   <article>
     <span>02</span>
-    <h3>Wake up to a useful brief</h3>
-    <p>Run Markdown routines every morning, evening, or week and deliver the result automatically to your primary chat.</p>
+    <h3>Run your daily routines</h3>
+    <p>Schedule a morning brief, weekly review, or any other Markdown job and receive the result automatically in chat.</p>
   </article>
   <article>
     <span>03</span>
-    <h3>Keep the conversation moving</h3>
-    <p>Continue across messages with durable history instead of rebuilding context every time you open a terminal.</p>
+    <h3>Remember the context</h3>
+    <p>Keep conversation history and assistant context between messages instead of explaining the same work again.</p>
   </article>
   <article>
     <span>04</span>
-    <h3>Bring the tools you trust</h3>
-    <p>Use the MCP servers, skills, permissions, and integrations already configured in Claude Code, Codex, or Pi.</p>
+    <h3>Use your existing tools</h3>
+    <p>Keep the MCP servers, skills, permissions, and integrations already configured in Claude Code, Codex, or Pi.</p>
   </article>
 </div>
 
@@ -88,17 +89,17 @@ set up on your machine.
 
 <span class="push-section-label">How it works</span>
 
-## Your agent leaves the terminal.
+## One lightweight bridge. Your agent does the work.
 
 <div class="push-steps" markdown="0">
-  <div><span>01</span><strong>Send a message</strong><p>Use iMessage, Telegram, or Slack from wherever you are.</p></div>
-  <div><span>02</span><strong>Your agent does the work</strong><p>Push restores the conversation and hands the task to your chosen coding agent.</p></div>
-  <div><span>03</span><strong>The answer comes back</strong><p>Push saves the result and delivers it to the same chat.</p></div>
+  <div><span>01</span><strong>Message your assistant</strong><p>Use iMessage, Telegram, or Slack from wherever you are.</p></div>
+  <div><span>02</span><strong>Push starts the work</strong><p>It restores the conversation and runs your chosen coding agent in the background.</p></div>
+  <div><span>03</span><strong>Get the result</strong><p>Push saves the response and sends it back to the same chat.</p></div>
 </div>
 
-Push is a gateway, not another agent runtime. You own a Git-versioned assistant
-repository containing identity, context, and jobs. Your backend continues to
-own models, tools, MCP servers, skills, permissions, and authentication.
+Push does not replace your coding agent. It handles chat, history, schedules,
+approvals, and delivery. Claude Code, Codex, or Pi keeps control of models,
+tools, skills, permissions, and authentication.
 
 [See the full architecture](architecture.md){ .push-inline-link }
 
@@ -106,9 +107,9 @@ own models, tools, MCP servers, skills, permissions, and authentication.
 
 <section class="push-paths" markdown>
 
-<span class="push-section-label">Set up Push</span>
+<span class="push-section-label">Get started</span>
 
-## Build your assistant
+## Build your AI chief of staff
 
 <div class="grid cards" markdown>
 
