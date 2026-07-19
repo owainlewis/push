@@ -17,8 +17,31 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  validate:
+    name: validate release tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Check tag matches package version
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          if ! git rev-parse --verify --quiet "refs/tags/${RELEASE_TAG}^{commit}"; then
+            echo "release ref '${RELEASE_TAG}' is not an existing Git tag" >&2
+            exit 1
+          fi
+          scripts/check-release-version.sh "${RELEASE_TAG}"
+
   build:
     name: build release (${{ matrix.os }})
+    needs: validate
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
