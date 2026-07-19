@@ -24,8 +24,8 @@ Slack allowlists use stable member IDs, never mutable display names.
 ## Agent permissions
 
 Push does not pass sandbox, approval-policy, permission-mode, or tool-list
-overrides to Claude Code, Codex, or Pi. The selected agent's own configuration
-is the sole permission source for chats and jobs.
+overrides for chats. The selected agent's own configuration is the permission
+source for chat requests.
 
 This makes Push behave like the agent you already configured, but it also means
 every agent-approved capability may be one accepted message away. Review the
@@ -40,9 +40,17 @@ selected agent instead.
 
 ## Job permissions
 
-Jobs use the selected agent's own permission configuration. Push requires a
-fixed, existing work directory and rejects overlap with Push-owned files,
-including the loaded config file.
+Jobs must complete without an interactive approval channel. Push therefore runs
+Codex jobs with full filesystem and network access and no approval prompts, and
+runs Claude jobs in `bypassPermissions` mode. Pi already has no native
+filesystem sandbox or interactive permission prompt. Evaluators remain
+read-only with tools disabled.
+
+This makes job bodies equivalent to unattended code execution as the Push
+service user. Push requires a fixed, existing work directory and rejects overlap
+with Push-owned files, including the loaded config file. Keep allowed senders
+and job definitions trusted, and run the service with only the OS permissions
+its jobs require.
 
 Do not place secrets in a job body. Make them available through the backend or
 service environment using the narrowest policy that works.

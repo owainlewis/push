@@ -47,8 +47,9 @@ an agent runtime.
 - Push has one long-running gateway process with no inbound server port.
   Commands may run as short-lived local processes against the same SQLite
   store.
-- Claude Code, Codex, and Pi own their permission controls. Push passes no
-  permission or tool overrides.
+- Chats use the selected agent's permission controls without overrides. Codex
+  and Claude jobs bypass interactive permissions so unattended runs can finish;
+  Pi has no native filesystem sandbox or approval prompt.
 - Scheduled work can have external side effects, so duplicate execution is more
   dangerous than skipping a missed run.
 - Job files, `SOUL.md`, and `context/` belong to the Git-versioned assistant
@@ -143,8 +144,9 @@ A scheduled occurrence is cancelled if its trigger no longer exists in that
 validated snapshot. Immediately before spawning a backend, Push resolves the
 work directory again so a path replacement is likely to be detected. This
 path-based check does not eliminate a replacement race between validation and
-child startup; the agent's configuration and OS permissions remain the
-enforcement boundary. The timeout must not exceed the configured jobs maximum.
+child startup. Jobs bypass interactive backend permissions, so OS permissions
+remain the enforcement boundary. The timeout must not exceed the configured
+jobs maximum.
 
 Notification behavior follows the trigger rather than job metadata. A manual
 run prints its result to the invoking terminal and does not send a message. A

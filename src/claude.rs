@@ -13,6 +13,13 @@ pub struct Runner {
     pub bin: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RunMode {
+    Configured,
+    Unattended,
+    Evaluator,
+}
+
 #[derive(Deserialize, Default)]
 struct CliResult {
     #[serde(default)]
@@ -28,7 +35,15 @@ struct CliResult {
 impl Runner {
     /// Executes one turn and returns Claude's reply text, or a RunError.
     pub async fn run(&self, req: Request<'_>, timeout: Duration) -> Result<RunOutput, RunError> {
-        self.run_with_mode(req, timeout, false).await
+        self.run_with_mode(req, timeout, RunMode::Configured).await
+    }
+
+    pub async fn run_unattended(
+        &self,
+        req: Request<'_>,
+        timeout: Duration,
+    ) -> Result<RunOutput, RunError> {
+        self.run_with_mode(req, timeout, RunMode::Unattended).await
     }
 
     pub async fn run_evaluator(
@@ -36,18 +51,18 @@ impl Runner {
         req: Request<'_>,
         timeout: Duration,
     ) -> Result<RunOutput, RunError> {
-        self.run_with_mode(req, timeout, true).await
+        self.run_with_mode(req, timeout, RunMode::Evaluator).await
     }
 
     async fn run_with_mode(
         &self,
         req: Request<'_>,
         timeout: Duration,
-        evaluator: bool,
+        mode: RunMode,
     ) -> Result<RunOutput, RunError> {
         let is_resume = !req.is_new;
         let attempt = crate::agent::output_with_retry(|| {
-            let mut cmd = self.command(&req, evaluator);
+            let mut cmd = self.command(&req, mode);
             async move { cmd.output().await }
         });
         let out = match tokio::time::timeout(timeout, attempt).await {
@@ -59,13 +74,13 @@ impl Runner {
         self.parse_output(out, is_resume)
     }
 
-    fn command(&self, req: &Request<'_>, evaluator: bool) -> Command {
+    fn command(&self, req: &Request<'_>, mode: RunMode) -> Command {
         let mut cmd = Command::new(&self.bin);
         cmd.arg("-p")
             .arg(req.prompt)
             .arg("--output-format")
             .arg("json");
-        if evaluator {
+        if mode == RunMode::Evaluator {
             cmd.arg("--safe-mode")
                 .arg("--tools")
                 .arg("")
@@ -74,6 +89,8 @@ impl Runner {
                 .arg("{}")
                 .arg("--no-chrome")
                 .arg("--no-session-persistence");
+        } else if mode == RunMode::Unattended {
+            cmd.arg("--permission-mode").arg("bypassPermissions");
         }
         if req.is_new {
             cmd.arg("--session-id").arg(req.session_id);
@@ -96,12 +113,12 @@ impl Runner {
         // claude prints its JSON envelope to stdout even when it exits non-zero
         // (e.g. an API error), so parse stdout regardless of exit status.
         match serde_json::from_slice::<CliResult>(&out.stdout) {
-            Ok(r) if r.is_error => {
-                let msg = if r.result.is_empty() {
-                    r.subtype
-                } else {
-                    r.result
-                };
+            Ok(r) if r.is_error || !out.status.success() => {
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                let msg = [r.result, r.subtype, stderr]
+                    .into_iter()
+                    .find(|message| !message.trim().is_empty())
+                    .unwrap_or_else(|| "claude exited unsuccessfully".to_string());
                 if is_resume && missing_resume_error(&msg) {
                     Err(RunError::SessionMissing(msg))
                 } else {
@@ -194,7 +211,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runs_new_session_with_push_owned_session_id() {
+    async fn unattended_new_session_bypasses_permissions() {
         let args_path = temp_path("claude-args");
         let work_dir = temp_dir("claude-work");
         let script = format!(
@@ -205,7 +222,7 @@ mod tests {
         let runner = Runner { bin: cli.bin() };
 
         let out = runner
-            .run(
+            .run_unattended(
                 Request {
                     session_id: "push-session",
                     is_new: true,
@@ -224,12 +241,8 @@ mod tests {
         assert_arg_pair(&args, "--session-id", "push-session");
         assert_arg_pair(&args, "--append-system-prompt", "assistant identity");
         assert_arg_pair(&args, "-p", "hello");
-        for flag in [
-            "--permission-mode",
-            "--tools",
-            "--allowed-tools",
-            "--disallowed-tools",
-        ] {
+        assert_arg_pair(&args, "--permission-mode", "bypassPermissions");
+        for flag in ["--tools", "--allowed-tools", "--disallowed-tools"] {
             assert!(
                 !args.contains(&flag.to_string()),
                 "unexpected {flag} in {args:?}"
@@ -239,7 +252,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runs_resumed_session_with_resume_flag() {
+    async fn unattended_resumed_session_bypasses_permissions() {
         let args_path = temp_path("claude-resume-args");
         let work_dir = temp_dir("claude-resume-work");
         let script = format!(
@@ -250,7 +263,7 @@ mod tests {
         let runner = Runner { bin: cli.bin() };
 
         let out = runner
-            .run(
+            .run_unattended(
                 Request {
                     session_id: "existing-session",
                     is_new: false,
@@ -266,6 +279,7 @@ mod tests {
         assert_eq!(out.reply, "resumed");
         let args = read_args(&args_path);
         assert_arg_pair(&args, "--resume", "existing-session");
+        assert_arg_pair(&args, "--permission-mode", "bypassPermissions");
         assert!(!args.contains(&"--session-id".to_string()));
         assert_arg_pair(&args, "--append-system-prompt", "assistant identity");
         assert!(!args.contains(&"--add-dir".to_string()));
@@ -292,6 +306,28 @@ mod tests {
 
             assert_failed(error, "claude exited without a final reply");
         }
+    }
+
+    #[tokio::test]
+    async fn configured_run_preserves_backend_permission_settings() {
+        let args_path = temp_path("claude-configured-args");
+        let work_dir = temp_dir("claude-configured-work");
+        let cli = FakeCli::new(
+            "claude",
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nprintf '%s\\n' '{{\"result\":\"reply\",\"session_id\":\"claude-session\"}}'\n",
+                sh_arg(&args_path)
+            ),
+        );
+        let runner = Runner { bin: cli.bin() };
+
+        runner
+            .run(request(work_dir.to_str().unwrap()), Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        let args = read_args(&args_path);
+        assert!(!args.contains(&"--permission-mode".to_string()));
     }
 
     #[tokio::test]
@@ -341,6 +377,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_non_zero_exit_with_non_error_json_envelope() {
+        let work_dir = temp_dir("claude-false-success-work");
+        let cli = FakeCli::new(
+            "claude",
+            "#!/bin/sh\nprintf '%s\\n' '{\"result\":\"permission denied\",\"is_error\":false}'\nexit 1\n",
+        );
+        let runner = Runner { bin: cli.bin() };
+
+        let error = runner
+            .run(request(work_dir.to_str().unwrap()), Duration::from_secs(5))
+            .await
+            .unwrap_err();
+
+        assert_failed(error, "permission denied");
+    }
+
+    #[tokio::test]
     async fn reports_timeout() {
         let work_dir = temp_dir("claude-timeout-work");
         let cli = FakeCli::new("claude", "#!/bin/sh\nsleep 2\n");
@@ -383,6 +436,7 @@ mod tests {
         assert_arg_pair(&args, "--mcp-config", "{}");
         assert!(args.iter().any(|arg| arg == "--strict-mcp-config"));
         assert!(args.iter().any(|arg| arg == "--safe-mode"));
+        assert!(!args.contains(&"--permission-mode".to_string()));
     }
 
     fn request(work_dir: &str) -> Request<'_> {

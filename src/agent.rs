@@ -131,6 +131,20 @@ impl Runner {
         }
     }
 
+    pub async fn run_unattended(
+        &self,
+        req: Request<'_>,
+        timeout: Duration,
+    ) -> Result<RunOutput, RunError> {
+        match self {
+            Runner::Claude(r) => r.run_unattended(req, timeout).await,
+            Runner::Codex(r) => r.run_unattended(req, timeout).await,
+            Runner::Pi(r) => r.run(req, timeout).await,
+            #[cfg(test)]
+            Runner::Fake(r) => r.run(req, timeout).await,
+        }
+    }
+
     pub async fn run_evaluator(
         &self,
         req: Request<'_>,

@@ -17,6 +17,13 @@ pub struct Runner {
     pub bin: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RunMode {
+    Configured,
+    Unattended,
+    Evaluator,
+}
+
 #[derive(Deserialize)]
 struct JsonEvent {
     #[serde(rename = "type")]
@@ -53,7 +60,15 @@ impl Drop for OutputFile {
 impl Runner {
     /// Executes one turn and returns Codex's final reply plus the Codex session id.
     pub async fn run(&self, req: Request<'_>, timeout: Duration) -> Result<RunOutput, RunError> {
-        self.run_with_mode(req, timeout, false).await
+        self.run_with_mode(req, timeout, RunMode::Configured).await
+    }
+
+    pub async fn run_unattended(
+        &self,
+        req: Request<'_>,
+        timeout: Duration,
+    ) -> Result<RunOutput, RunError> {
+        self.run_with_mode(req, timeout, RunMode::Unattended).await
     }
 
     pub async fn run_evaluator(
@@ -61,20 +76,20 @@ impl Runner {
         req: Request<'_>,
         timeout: Duration,
     ) -> Result<RunOutput, RunError> {
-        self.run_with_mode(req, timeout, true).await
+        self.run_with_mode(req, timeout, RunMode::Evaluator).await
     }
 
     async fn run_with_mode(
         &self,
         req: Request<'_>,
         timeout: Duration,
-        evaluator: bool,
+        mode: RunMode,
     ) -> Result<RunOutput, RunError> {
         let output_file = OutputFile::create()
             .map_err(|error| RunError::Failed(format!("prepare Codex output: {error}")))?;
         let out_path = output_file.path.as_path();
         let attempt = crate::agent::output_with_retry(|| {
-            let mut cmd = self.command(&req, out_path, evaluator);
+            let mut cmd = self.command(&req, out_path, mode);
             async move { cmd.output().await }
         });
         let out = match tokio::time::timeout(timeout, attempt).await {
@@ -113,13 +128,13 @@ impl Runner {
         })
     }
 
-    fn command(&self, req: &Request<'_>, out_path: &Path, evaluator: bool) -> Command {
+    fn command(&self, req: &Request<'_>, out_path: &Path, mode: RunMode) -> Command {
         let mut cmd = Command::new(&self.bin);
         if !req.instructions.trim().is_empty() {
             cmd.arg("-c")
                 .arg(developer_instructions(req.instructions.trim()));
         }
-        if evaluator {
+        if mode == RunMode::Evaluator {
             cmd.arg("-c")
                 .arg("mcp_servers={}")
                 .arg("-c")
@@ -151,6 +166,11 @@ impl Runner {
             ] {
                 cmd.arg("--disable").arg(feature);
             }
+        } else if mode == RunMode::Unattended {
+            cmd.arg("--sandbox")
+                .arg("danger-full-access")
+                .arg("--ask-for-approval")
+                .arg("never");
         }
         if req.is_new {
             cmd.arg("exec")
@@ -160,7 +180,7 @@ impl Runner {
                 .arg(req.work_dir)
                 .arg("-o")
                 .arg(out_path);
-            if evaluator {
+            if mode == RunMode::Evaluator {
                 cmd.arg("--sandbox")
                     .arg("read-only")
                     .arg("--ephemeral")
@@ -279,7 +299,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runs_new_session_and_reads_jsonl_thread_id() {
+    async fn unattended_new_session_bypasses_permissions() {
         let args_path = temp_path("codex-args");
         let work_dir = temp_dir("codex-work");
         let script = codex_success_script(&args_path, "codex reply", Some("codex-thread"));
@@ -287,7 +307,7 @@ mod tests {
         let runner = runner(cli.bin());
 
         let out = runner
-            .run(
+            .run_unattended(
                 Request {
                     session_id: "",
                     is_new: true,
@@ -303,8 +323,8 @@ mod tests {
         assert_eq!(out.reply, "codex reply");
         assert_eq!(out.session_id, Some("codex-thread".to_string()));
         let args = read_args(&args_path);
-        assert!(!args.contains(&"--ask-for-approval".to_string()));
-        assert!(!args.contains(&"--sandbox".to_string()));
+        assert_arg_pair(&args, "--ask-for-approval", "never");
+        assert_arg_pair(&args, "--sandbox", "danger-full-access");
         assert_arg_present(&args, "exec");
         assert_arg_present(&args, "--json");
         assert_arg_pair(&args, "-C", work_dir.to_str().unwrap());
@@ -314,7 +334,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runs_resumed_session_with_resume_command() {
+    async fn unattended_resumed_session_bypasses_permissions() {
         let args_path = temp_path("codex-resume-args");
         let work_dir = temp_dir("codex-resume-work");
         let script = codex_success_script(&args_path, "resumed reply", None);
@@ -322,7 +342,7 @@ mod tests {
         let runner = runner(cli.bin());
 
         let out = runner
-            .run(
+            .run_unattended(
                 Request {
                     session_id: "existing-thread",
                     is_new: false,
@@ -339,6 +359,8 @@ mod tests {
         assert_eq!(out.session_id, None);
         let args = read_args(&args_path);
         assert_arg_sequence(&args, &["exec", "resume"]);
+        assert_arg_pair(&args, "--ask-for-approval", "never");
+        assert_arg_pair(&args, "--sandbox", "danger-full-access");
         assert!(!args.contains(&"--add-dir".to_string()));
         assert_arg_present(&args, "existing-thread");
         assert_arg_pair(&args, "-c", &developer_instructions("assistant identity"));
@@ -360,6 +382,26 @@ mod tests {
             .unwrap_err();
 
         assert_failed(error, "codex exited without a final reply");
+    }
+
+    #[tokio::test]
+    async fn configured_run_preserves_backend_permission_settings() {
+        let args_path = temp_path("codex-configured-args");
+        let work_dir = temp_dir("codex-configured-work");
+        let cli = FakeCli::new(
+            "codex",
+            &codex_success_script(&args_path, "reply", Some("codex-thread")),
+        );
+        let runner = runner(cli.bin());
+
+        runner
+            .run(request(work_dir.to_str().unwrap()), Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        let args = read_args(&args_path);
+        assert!(!args.contains(&"--ask-for-approval".to_string()));
+        assert!(!args.contains(&"--sandbox".to_string()));
     }
 
     #[tokio::test]
@@ -460,6 +502,7 @@ sleep 2
 
         let args = read_args(&args_path);
         assert_arg_pair(&args, "--sandbox", "read-only");
+        assert!(!args.contains(&"--ask-for-approval".to_string()));
         assert!(args.iter().any(|arg| arg == "--ephemeral"));
         assert!(args.iter().any(|arg| arg == "--ignore-user-config"));
         assert!(args.iter().any(|arg| arg == "mcp_servers={}"));

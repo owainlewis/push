@@ -79,7 +79,7 @@ sends the result back when the work is done.
   <article>
     <span>04</span>
     <h3>Use your existing tools</h3>
-    <p>Keep the MCP servers, skills, permissions, and integrations already configured in Claude Code, Codex, or Pi.</p>
+    <p>Keep the MCP servers, skills, and integrations already configured in Claude Code, Codex, or Pi. Chats also preserve your configured permissions.</p>
   </article>
 </div>
 
@@ -99,7 +99,9 @@ sends the result back when the work is done.
 
 Push does not replace your coding agent. It handles chat, history, schedules,
 approvals, and delivery. Claude Code, Codex, or Pi keeps control of models,
-tools, skills, permissions, and authentication.
+tools, skills, and authentication. Chats preserve configured agent permissions;
+Codex and Claude jobs bypass interactive permissions so scheduled work can
+finish without an operator.
 
 [See the full architecture](architecture.md){ .push-inline-link }
 

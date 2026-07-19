@@ -237,8 +237,9 @@ is completed.
 Managed services run without a person watching the terminal. An allowed sender
 can instruct the configured backend to use its tools, subject to your backend
 settings. Keep `imessage.allow_from` narrow and configure each selected agent
-for unattended use. Push passes no sandbox, approval, or tool overrides. Jobs
-are kept away from Push-owned paths by work-directory validation.
+for unattended use. Push preserves backend permissions for chats. Codex and
+Claude jobs bypass interactive permissions so they can finish without an
+operator. Jobs are kept away from Push-owned paths by work-directory validation.
 
 Store config files, state files, audit logs, backend credentials, and service
 logs with permissions appropriate for the service user. Logs may contain

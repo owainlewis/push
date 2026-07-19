@@ -171,7 +171,8 @@ and primary delivery destination.
 ## Execution and delivery guarantees
 
 - Every job and evaluator run uses a fresh backend session, without chat history.
-- Jobs use the selected agent's own permission configuration.
+- Codex and Claude jobs bypass interactive permissions so unattended work can
+  complete. Evaluators remain restricted.
 - Push does not retry failed or timed-out backend execution because the agent
   may have completed external side effects before failing.
 - Success, failure, timeout, overlap, and delivery state are stored separately.
@@ -209,6 +210,7 @@ job. Rejection leaves the proposal inactive.
 
 !!! warning
 
-    Jobs use the selected agent's own permissions. A headless backend may not
-    ask for approval interactively, so configure its
-    unattended permissions carefully and keep job work directories narrow.
+    Jobs have no interactive approval path. Push runs Codex jobs with full
+    access and no prompts and Claude jobs in `bypassPermissions` mode. Treat
+    every enabled job as code execution by the Push service user, keep job work
+    directories narrow, and allow only trusted senders and job definitions.
