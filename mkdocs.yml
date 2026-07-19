@@ -1,6 +1,6 @@
 site_name: Push
 site_description: Turn Claude Code, Codex, or Pi into an always-on personal assistant.
-site_url: https://owainlewis.github.io/push/
+site_url: https://pushassistant.com/
 repo_url: https://github.com/owainlewis/push
 repo_name: owainlewis/push
 edit_uri: edit/main/docs/
