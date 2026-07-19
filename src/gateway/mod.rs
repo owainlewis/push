@@ -1003,6 +1003,10 @@ fn audit(ctx: &Ctx, event: AuditEvent) {
 
 async fn reply_to(ctx: &Ctx, target: &str, text: &str) -> bool {
     let chunks = ctx.channel.outbound_chunks(text, &ctx.reply_marker);
+    if chunks.is_empty() {
+        error!("send error to {target}: channel produced no outbound chunks");
+        return false;
+    }
     for chunk in chunks {
         if let Err(error) = send_reply_chunk(ctx, target, &chunk).await {
             error!("send error to {target}: {error}");
@@ -1072,6 +1076,11 @@ async fn scheduled_reply_to(
     let chunks = ctx
         .channel
         .scheduled_outbound_chunks(text, &ctx.reply_marker);
+    if chunks.is_empty() {
+        let error = "channel produced no outbound chunks";
+        tracing::error!("scheduled send error to {target}: {error}");
+        return jobs::DeliveryAttempt::failed(0, error.to_string());
+    }
     if start_chunk >= chunks.len() {
         return jobs::DeliveryAttempt::delivered(chunks.len());
     }
