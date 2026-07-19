@@ -37,7 +37,8 @@ const SCHEDULER_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 struct Frontmatter {
     version: u32,
     timeout: String,
-    workdir: String,
+    #[serde(default)]
+    workdir: Option<String>,
     #[serde(default)]
     backend: Option<String>,
     #[serde(default)]
@@ -216,7 +217,11 @@ pub(crate) fn validate_contents(
         .map(AgentBackend::parse)
         .transpose()?
         .unwrap_or(cfg.jobs_backend()?);
-    let workdir = canonical_workdir(&metadata.workdir)?;
+    let workdir = match metadata.workdir.as_deref() {
+        Some(workdir) => canonical_workdir(workdir)?,
+        None => canonical_workdir(&cfg.assistant_root)
+            .context("canonicalize default job workdir from assistant_root")?,
+    };
     cfg.validate_job_workdir(&workdir)?;
     let mut snapshot = Sha256::new();
     snapshot.update(bytes);
@@ -2298,6 +2303,26 @@ mod tests {
         assert!(messages
             .iter()
             .any(|message| message.contains("canonicalize job workdir")));
+    }
+
+    #[test]
+    fn missing_workdir_defaults_to_assistant_root() {
+        let jobs_dir = temp_dir("jobs-default-workdir");
+        let database = temp_path("jobs-default-workdir-db");
+        let run_dir = temp_dir("jobs-default-workdir-run");
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        write_job(
+            &jobs_dir,
+            "default-workdir",
+            "+++\nversion = 1\ntimeout = \"5s\"\nbackend = \"codex\"\n+++\n\nInspect the assistant repository.\n",
+        );
+
+        let job = Catalog::load_named(&cfg, "default-workdir").unwrap();
+
+        assert_eq!(
+            job.workdir,
+            std::fs::canonicalize(&cfg.assistant_root).unwrap()
+        );
     }
 
     #[test]

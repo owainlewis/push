@@ -29,8 +29,8 @@ const AGENTS: &str = r#"# Assistant repository instructions
 - Treat `SOUL.md` as user-owned identity. Do not edit it unless the user asks.
 - Use `context/` for durable user context and working notes.
 - Treat `evals/` as user-owned evaluation criteria. Do not edit them during evaluation.
-- Treat `jobs/` as installed runbooks. Propose job changes through Push's approval workflow.
-- Keep secrets, sessions, databases, drafts, logs, and other runtime state outside this repository.
+- Store job runbooks in `jobs/`. Create or update them directly when the user asks, then run `push job validate`.
+- Keep secrets, sessions, databases, logs, and other runtime state outside this repository.
 "#;
 
 const CLAUDE: &str = "@AGENTS.md\n";
@@ -45,7 +45,7 @@ This Git repository contains the durable, user-owned parts of one Push assistant
 - `evals/` contains reusable agent evaluation criteria.
 - `jobs/` contains installed Push job runbooks.
 
-Push owns channels, scheduling, history, security, approvals, and delivery outside this repository. Project skills may live here, while the configured agent runtime owns discovery, execution, global skills, MCP servers, and authentication. Chats preserve configured agent permissions. Codex and Claude jobs bypass interactive permissions so unattended work can finish.
+Push owns channels, scheduling, history, security, and delivery outside this repository. Project skills may live here, while the configured agent runtime owns discovery, execution, global skills, MCP servers, and authentication. Chats preserve configured agent permissions. Codex and Claude jobs bypass interactive permissions so unattended work can finish.
 "#;
 
 const CONTEXT_README: &str = r#"# Context
@@ -197,14 +197,9 @@ fn validate_config_secrets(config_path: &Path, target: &Path, config: &toml::Tab
 
 fn validate_runtime_boundary(config: Option<&toml::Table>, target: &Path) -> Result<()> {
     let assistant = resolve_existing_or_lexical(target)?;
-    for (key, default) in [
-        ("drafts_dir", "~/.push/drafts"),
-        ("jobs_run_dir", "~/.push/run"),
-    ] {
-        let runtime = configured_runtime_path(config, key, default)?;
-        if assistant.starts_with(&runtime) || runtime.starts_with(&assistant) {
-            bail!("{key} must stay outside assistant_root; choose a separate assistant path or update {key}");
-        }
+    let jobs_run = configured_runtime_path(config, "jobs_run_dir", "~/.push/run")?;
+    if assistant.starts_with(&jobs_run) || jobs_run.starts_with(&assistant) {
+        bail!("jobs_run_dir must stay outside assistant_root; choose a separate assistant path or update jobs_run_dir");
     }
     for (key, default) in [
         ("state_path", "~/.push/state.json"),
@@ -763,19 +758,19 @@ mod tests {
     }
 
     #[test]
-    fn refuses_runtime_state_inside_new_assistant_repository() {
+    fn refuses_job_runtime_state_inside_new_assistant_repository() {
         let parent = temp_dir("assistant-runtime-boundary");
         let target = parent.join("assistant");
         let config = parent.join("push.toml");
         fs::write(
             &config,
-            format!("drafts_dir = {:?}\n", target.join("drafts")),
+            format!("jobs_run_dir = {:?}\n", target.join("run")),
         )
         .unwrap();
 
         let error = init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap_err();
 
-        assert!(error.to_string().contains("drafts_dir must stay outside"));
+        assert!(error.to_string().contains("jobs_run_dir must stay outside"));
         assert!(!target.exists());
         let _ = fs::remove_dir_all(parent);
     }

@@ -149,7 +149,6 @@ user prompt.
 | `channels` | Optional advanced list of reply channels to poll concurrently; otherwise `channel` is used unchanged. |
 | `primary_delivery` | Optional enabled channel and allowlisted target for proactive output. |
 | `assistant_root` | Canonical root of the one assistant repository. `SOUL.md`, `context/`, and `jobs/` are derived. |
-| `drafts_dir` | Agent-written inactive job proposals; defaults to `~/.push/drafts`. |
 | `jobs_agent` | Optional default job backend; otherwise uses `agent`. |
 | `jobs_max_timeout` | Maximum validated job timeout; defaults to `30m`. |
 | `jobs_run_dir` | Local advisory-lock state; defaults to `~/.push/run`. |
@@ -182,8 +181,8 @@ user prompt.
 - Claude backend can create and resume a session.
 - Codex backend can create a session, store the Codex thread id, and resume it.
 - Pi backend can create a session, store the Pi session id, and resume it.
-- Agents with write access can propose a validated job draft, but only an exact-revision
-  approval from the bound allowlisted identity can install it.
+- Agents with write access can create and update validated jobs directly under
+  `<assistant_root>/jobs` without a separate approval step.
 - Fresh or lost backend sessions receive bounded recent canonical history;
   resumed sessions receive only the new request.
 - Assistant identity is included in backend runs at instruction priority.

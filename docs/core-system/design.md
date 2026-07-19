@@ -87,8 +87,8 @@ Evals: /resolved/path/to/assistant/evals
 Jobs: /resolved/path/to/assistant/jobs
 
 Begin with context/README.md when user context is relevant.
-Do not modify SOUL.md, installed jobs, or evals directly.
-Propose job changes through Push's approval workflow.
+Do not modify SOUL.md or evals unless the user asks.
+When the user asks to create or change a job, write the complete runbook directly under Jobs and run `push job validate` before saying it succeeded.
 ```
 
 Claude Code and Pi receive the composed text as appended system instructions.
@@ -98,10 +98,10 @@ backend decides which files to inspect. Conversation instructions include the
 absolute `context/` path. The agent's own configuration decides access;
 Push does not create a separate filesystem boundary around `SOUL.md` or
 installed jobs. An agent with write access to the assistant root can change
-them directly, outside Push's draft approval workflow.
+them directly.
 
 Push owns the footer so customising `SOUL.md` cannot remove repository
-locations or ownership rules. Runtime sessions, drafts, databases, audit logs,
+locations or ownership rules. Runtime sessions, databases, audit logs,
 locks, delivery state, configuration secrets, and authentication stay outside
 the assistant repository.
 

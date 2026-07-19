@@ -81,8 +81,6 @@ pub struct Config {
     /// Derived from `assistant_root`. Parsed only for legacy migration.
     #[serde(default = "default_jobs_dir")]
     pub jobs_dir: String,
-    #[serde(default = "default_drafts_dir")]
-    pub drafts_dir: String,
     #[serde(default)]
     pub jobs_agent: Option<String>,
     #[serde(default = "default_jobs_max_timeout")]
@@ -279,13 +277,12 @@ impl Config {
         c.assistant_root = assistant_root.to_string_lossy().to_string();
         c.assistant_dir = c.assistant_root.clone();
         c.jobs_dir = assistant_root.join("jobs").to_string_lossy().to_string();
-        c.drafts_dir = expand_home(&c.drafts_dir);
         c.jobs_run_dir = expand_home(&c.jobs_run_dir);
         if has_assistant_root {
             validate_runtime_outside_assistant(&c)?;
         }
         c.validate()?;
-        c.config_path = validate_resolved_config_path(config_path, &c)?;
+        c.config_path = config_path.to_string_lossy().to_string();
         Ok(c)
     }
 
@@ -410,19 +407,16 @@ impl Config {
             .with_context(|| format!("invalid jobs_max_timeout {}", self.jobs_max_timeout))
     }
 
-    // Jobs run unattended with write access, so every job workdir must stay
-    // clear of Push-owned paths, including the loaded config file itself.
+    // Jobs run unattended with write access. The assistant repository is an
+    // allowed workdir so jobs can use its context, skills, and runbooks.
+    // Push-owned runtime state and configuration stay protected.
     pub fn validate_job_workdir(&self, workdir: &Path) -> Result<()> {
         let workdir = resolved_absolute("job workdir", workdir)?;
         let protected_paths = [
-            ("assistant_root", self.assistant_root.as_str()),
-            ("jobs_dir", self.jobs_dir.as_str()),
-            ("drafts_dir", self.drafts_dir.as_str()),
             ("jobs_run_dir", self.jobs_run_dir.as_str()),
             ("state_path", self.state_path.as_str()),
             ("database_path", self.database_path.as_str()),
             ("audit_log_path", self.audit_log_path.as_str()),
-            ("config file", self.config_path.as_str()),
         ];
         for (label, protected) in protected_paths
             .into_iter()
@@ -434,6 +428,17 @@ impl Config {
                     "job workdir {} overlaps Push-owned {label} {}",
                     workdir.display(),
                     protected.display()
+                );
+            }
+        }
+        if !self.config_path.is_empty() {
+            let config = resolved_absolute("config file", Path::new(&self.config_path))?;
+            let assistant = resolved_absolute("assistant_root", Path::new(&self.assistant_root))?;
+            if !config.starts_with(&assistant) && paths_overlap(&workdir, &config) {
+                bail!(
+                    "job workdir {} overlaps config file {}",
+                    workdir.display(),
+                    config.display()
                 );
             }
         }
@@ -552,11 +557,8 @@ impl Config {
         if self.jobs_max_timeout_dur()?.is_zero() {
             bail!("jobs_max_timeout must be positive");
         }
-        if self.jobs_dir.trim().is_empty()
-            || self.drafts_dir.trim().is_empty()
-            || self.jobs_run_dir.trim().is_empty()
-        {
-            bail!("jobs_dir, drafts_dir, and jobs_run_dir cannot be empty");
+        if self.jobs_dir.trim().is_empty() || self.jobs_run_dir.trim().is_empty() {
+            bail!("jobs_dir and jobs_run_dir cannot be empty");
         }
         if self.jobs_max_workers == 0 {
             bail!("jobs_max_workers must be positive");
@@ -574,46 +576,17 @@ impl Config {
                 ChannelKind::parse(channel).context("invalid route channel")?;
             }
         }
-        validate_protected_paths(self)?;
         self.poll_interval_dur()?;
         self.run_timeout_dur()?;
         Ok(())
     }
 }
 
-fn validate_protected_paths(cfg: &Config) -> Result<()> {
-    let jobs = resolved_absolute("jobs_dir", Path::new(&cfg.jobs_dir))?;
-    let drafts = resolved_absolute("drafts_dir", Path::new(&cfg.drafts_dir))?;
-    let assistant = resolved_absolute("assistant_root", Path::new(&cfg.assistant_root))?;
-    if paths_overlap(&jobs, &drafts) {
-        bail!("jobs_dir and drafts_dir must not overlap");
-    }
-    if assistant.starts_with(&drafts) {
-        bail!("assistant_root must not be inside drafts_dir");
-    }
-    for (label, value) in [
-        ("state_path", cfg.state_path.as_str()),
-        ("database_path", cfg.database_path.as_str()),
-        ("audit_log_path", cfg.audit_log_path.as_str()),
-    ] {
-        let path = resolved_absolute(label, Path::new(value))?;
-        if path.starts_with(&drafts) {
-            bail!("{label} must not be inside drafts_dir");
-        }
-    }
-    Ok(())
-}
-
 fn validate_runtime_outside_assistant(cfg: &Config) -> Result<()> {
     let assistant = resolved_absolute("assistant_root", Path::new(&cfg.assistant_root))?;
-    for (label, value) in [
-        ("drafts_dir", cfg.drafts_dir.as_str()),
-        ("jobs_run_dir", cfg.jobs_run_dir.as_str()),
-    ] {
-        let path = resolved_absolute(label, Path::new(value))?;
-        if paths_overlap(&assistant, &path) {
-            bail!("{label} must stay outside assistant_root");
-        }
+    let jobs_run = resolved_absolute("jobs_run_dir", Path::new(&cfg.jobs_run_dir))?;
+    if paths_overlap(&assistant, &jobs_run) {
+        bail!("jobs_run_dir must stay outside assistant_root");
     }
     for (label, value) in [
         ("state_path", cfg.state_path.as_str()),
@@ -676,14 +649,6 @@ pub(crate) fn validate_inline_slack_token_location(
         );
     }
     Ok(())
-}
-
-fn validate_resolved_config_path(config: PathBuf, cfg: &Config) -> Result<String> {
-    let drafts = resolved_absolute("drafts_dir", Path::new(&cfg.drafts_dir))?;
-    if config.starts_with(&drafts) {
-        bail!("config file must not be inside drafts_dir");
-    }
-    Ok(config.to_string_lossy().to_string())
 }
 
 fn resolve_assistant_root(value: &str, config_path: &Path) -> Result<PathBuf> {
@@ -900,9 +865,6 @@ fn default_jobs_dir() -> String {
     "~/.push/jobs".to_string()
 }
 
-fn default_drafts_dir() -> String {
-    "~/.push/drafts".to_string()
-}
 fn default_jobs_max_timeout() -> String {
     "30m".to_string()
 }
@@ -952,7 +914,6 @@ mod tests {
             routes: Vec::new(),
             assistant_root: root.to_string_lossy().to_string(),
             jobs_dir: root.join("jobs").to_string_lossy().to_string(),
-            drafts_dir: root.join("drafts").to_string_lossy().to_string(),
             jobs_agent: None,
             jobs_max_timeout: "30m".to_string(),
             jobs_run_dir: root.join("run").to_string_lossy().to_string(),
@@ -1031,27 +992,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_uncontained_routes_jobs_and_protected_path_overlap() {
-        let mut cfg = config();
-        assert!(cfg.validate().is_ok());
-
-        cfg.drafts_dir = format!("{}/drafts", cfg.jobs_dir);
-        assert!(cfg
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("must not overlap"));
-
-        let mut cfg = config();
-        cfg.assistant_root = format!("{}/identity", cfg.drafts_dir);
-        assert!(cfg
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("assistant_root must not be inside drafts_dir"));
-    }
-
-    #[test]
     fn job_workdir_must_not_contain_the_loaded_config_file() {
         let mut cfg = config();
         let workdir = crate::test_support::temp_dir("config-shield-workdir");
@@ -1064,6 +1004,20 @@ mod tests {
         assert!(cfg.validate_job_workdir(&sibling).is_ok());
         let _ = std::fs::remove_dir_all(workdir);
         let _ = std::fs::remove_dir_all(sibling);
+    }
+
+    #[test]
+    fn assistant_root_is_a_valid_job_workdir() {
+        let mut cfg = config();
+        let assistant = crate::test_support::temp_dir("job-assistant-workdir");
+        cfg.assistant_root = assistant.to_string_lossy().to_string();
+        cfg.assistant_dir = cfg.assistant_root.clone();
+        cfg.jobs_dir = assistant.join("jobs").to_string_lossy().to_string();
+        cfg.config_path = assistant.join("config.toml").to_string_lossy().to_string();
+
+        assert!(cfg.validate_job_workdir(&assistant).is_ok());
+
+        let _ = std::fs::remove_dir_all(assistant);
     }
 
     #[cfg(unix)]

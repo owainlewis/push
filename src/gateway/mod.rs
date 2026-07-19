@@ -17,7 +17,9 @@ use tokio::task::{JoinHandle, JoinSet};
 use tracing::{error, info, warn};
 
 use crate::agent::Runner;
-use crate::approval::{AnswerOrigin, AnswerOutcome};
+#[cfg(test)]
+use crate::approval::AnswerOrigin;
+use crate::approval::AnswerOutcome;
 use crate::audit::{AuditEvent, AuditLog};
 use crate::channel::{Channel, InboundVoice, RawMessage};
 use crate::config::{AgentBackend, ChannelKind, Config, PrimaryDeliveryConfig};
@@ -39,7 +41,6 @@ struct Job {
     thread: String,
     target: String,
     backend: AgentBackend,
-    approval_origin: AnswerOrigin,
     text: String,
     reply_with_voice: bool,
     voice_attachment: Option<InboundVoice>,
@@ -348,7 +349,6 @@ impl Gateway {
         runners: Arc<HashMap<AgentBackend, Runner>>,
         audit_lock: Arc<Mutex<()>>,
     ) -> Result<Self> {
-        crate::drafts::prepare(&cfg).context("prepare agent job draft boundary")?;
         let ack = Arc::new(Mutex::new(AckState::default()));
         let channel = Channel::new_for(&cfg, kind)?;
         let audit = Arc::new(AuditLog::with_lock(
@@ -550,30 +550,44 @@ impl Gateway {
                     Ok(AnswerOutcome::NotAnAnswer) => {}
                     Ok(outcome @ (AnswerOutcome::Selected(_) | AnswerOutcome::Duplicate(_))) => {
                         self.audit_approval(m.row_id, &thread, &outcome);
-                        let question_id = match &outcome {
-                            AnswerOutcome::Selected(answer) => &answer.correlation_id,
-                            AnswerOutcome::Duplicate(id) => id,
-                            _ => unreachable!(),
-                        };
-                        if let Err(error) = self
-                            .handle_draft_answer(question_id, &approval_origin, &target)
-                            .await
-                        {
-                            error!("[{thread}] draft approval failed: {error:#}");
-                            self.audit(self.ctx.audit.failed(
-                                "draft_approval_failed",
-                                m.row_id,
-                                &thread,
-                                None,
-                                error.to_string(),
-                            ));
-                            return;
-                        }
                         self.complete_row(m.row_id, "approval_answer");
                         continue;
                     }
                     Ok(outcome) => {
+                        let retired_job_approval = match &outcome {
+                            AnswerOutcome::Cancelled(id) => self
+                                .ctx
+                                .history
+                                .lock()
+                                .unwrap()
+                                .legacy_job_approval_was_retired(id),
+                            _ => Ok(false),
+                        };
+                        let retired_job_approval = match retired_job_approval {
+                            Ok(retired) => retired,
+                            Err(error) => {
+                                error!("[{thread}] legacy job approval lookup failed: {error}");
+                                self.audit(self.ctx.audit.failed(
+                                    "approval_answer_failed",
+                                    m.row_id,
+                                    &thread,
+                                    None,
+                                    error.to_string(),
+                                ));
+                                return;
+                            }
+                        };
                         self.audit_approval(m.row_id, &thread, &outcome);
+                        if retired_job_approval
+                            && !reply_to(
+                                &self.ctx,
+                                &target,
+                                "Job approval is no longer used. Ask me to create the job again and I will write it directly to the assistant repository.",
+                            )
+                            .await
+                        {
+                            warn!("legacy job approval notice delivery failed");
+                        }
                         self.complete_row(m.row_id, "approval_answer");
                         continue;
                     }
@@ -640,7 +654,6 @@ impl Gateway {
                     thread,
                     target,
                     backend,
-                    approval_origin,
                     text: message_text,
                     reply_with_voice,
                     voice_attachment: m.voice.clone(),
@@ -952,46 +965,6 @@ impl Gateway {
             AnswerOutcome::NotAnAnswer => return,
         };
         self.audit(self.ctx.audit.approval(event, row_id, thread, reason));
-    }
-
-    async fn handle_draft_answer(
-        &self,
-        question_id: &str,
-        origin: &AnswerOrigin,
-        target: &str,
-    ) -> Result<()> {
-        let approved_by = format!(
-            "channel={} thread={} sender={} chat={}",
-            origin.channel, origin.thread_key, origin.sender_key, origin.chat_key
-        );
-        let outcome = crate::drafts::decide(
-            &self.cfg,
-            &mut self.ctx.history.lock().unwrap(),
-            question_id,
-            &approved_by,
-            now_ms(),
-        )?;
-        let message = match outcome {
-            crate::drafts::DecisionOutcome::Installed(name) => {
-                Some(format!("Installed approved job `{name}`."))
-            }
-            crate::drafts::DecisionOutcome::Rejected(name) => Some(format!(
-                "Rejected job draft `{name}`. It remains inactive in drafts."
-            )),
-            crate::drafts::DecisionOutcome::Invalidated(message) => {
-                Some(format!("Draft approval was invalidated: {message}"))
-            }
-            crate::drafts::DecisionOutcome::Failed(message) => {
-                Some(format!("Draft approval failed safely: {message}"))
-            }
-            crate::drafts::DecisionOutcome::AlreadyHandled => None,
-        };
-        if let Some(message) = message {
-            if !reply_to(&self.ctx, target, &message).await {
-                warn!("draft decision reply delivery failed for question {question_id}");
-            }
-        }
-        Ok(())
     }
 }
 

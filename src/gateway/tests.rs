@@ -1,6 +1,4 @@
-use super::worker::{
-    handle, present_drafts, run_with_periodic_activity, DRAFT_SETUP_FAILURE, SESSION_SETUP_FAILURE,
-};
+use super::worker::{handle, run_with_periodic_activity, SESSION_SETUP_FAILURE};
 use super::*;
 use crate::agent::{FakeRunCall, FakeRunner};
 use crate::approval::Question;
@@ -242,12 +240,6 @@ fn setup_failure_job(row_id: i64) -> Job {
         thread: "imessage:self:me".to_string(),
         target: "me@icloud.com".to_string(),
         backend: AgentBackend::Claude,
-        approval_origin: AnswerOrigin {
-            channel: "imessage".to_string(),
-            thread_key: "imessage:self:me".to_string(),
-            sender_key: "me@icloud.com".to_string(),
-            chat_key: "me@icloud.com".to_string(),
-        },
         text: "hello".to_string(),
         reply_with_voice: false,
         voice_attachment: None,
@@ -563,76 +555,6 @@ async fn session_lookup_failure_completes_in_flight_row() {
     assert_eq!(ack.completed.iter().copied().collect::<Vec<_>>(), [10, 11]);
 
     let _ = std::fs::remove_file(blocker);
-}
-
-#[tokio::test]
-async fn draft_boundary_failure_completes_in_flight_row_and_advances_cursor() {
-    let state_path = temp_state_path();
-    let store = Arc::new(Mutex::new(Store::open(&state_path).unwrap()));
-    let drafts_blocker = temp_path("drafts-blocker");
-    std::fs::write(&drafts_blocker, "not a directory").unwrap();
-    let ack = Arc::new(Mutex::new(AckState::default()));
-    {
-        let mut ack = ack.lock().unwrap();
-        ack.in_flight.insert(10);
-        ack.completed.insert(11);
-    }
-    let mut ctx = setup_failure_ctx(
-        store.clone(),
-        ack.clone(),
-        temp_path("sessions").to_string_lossy().to_string(),
-    );
-    ctx.cfg.drafts_dir = drafts_blocker.to_string_lossy().to_string();
-    let job = setup_failure_job(10);
-
-    handle(&ctx, job).await;
-
-    assert_eq!(
-        ctx.setup_failure_replies.lock().unwrap().as_slice(),
-        [DRAFT_SETUP_FAILURE]
-    );
-    assert_eq!(store.lock().unwrap().last_row(), 11);
-    let ack = ack.lock().unwrap();
-    assert!(ack.in_flight.is_empty());
-    assert!(ack.completed.is_empty());
-
-    let _ = std::fs::remove_file(state_path);
-    let _ = std::fs::remove_file(drafts_blocker);
-}
-
-#[tokio::test]
-async fn draft_boundary_failure_delivers_existing_outbound_without_misreporting_setup() {
-    let state_path = temp_state_path();
-    let store = Arc::new(Mutex::new(Store::open(&state_path).unwrap()));
-    let drafts_blocker = temp_path("drafts-recovery-blocker");
-    std::fs::write(&drafts_blocker, "not a directory").unwrap();
-    let ack = Arc::new(Mutex::new(AckState::default()));
-    ack.lock().unwrap().in_flight.insert(10);
-    let mut ctx = setup_failure_ctx(
-        store.clone(),
-        ack.clone(),
-        temp_path("recovery-sessions").to_string_lossy().to_string(),
-    );
-    ctx.cfg.drafts_dir = drafts_blocker.to_string_lossy().to_string();
-    ctx.history
-        .lock()
-        .unwrap()
-        .record_outbound(1, OutboundOrigin::Backend, Some("claude"), "stored reply")
-        .unwrap();
-    let job = setup_failure_job(10);
-
-    handle(&ctx, job).await;
-
-    assert!(ctx.setup_failure_replies.lock().unwrap().is_empty());
-    assert_eq!(
-        ctx.sent_replies.lock().unwrap().as_slice(),
-        [("me@icloud.com".to_string(), "stored reply".to_string())]
-    );
-    assert_eq!(store.lock().unwrap().last_row(), 10);
-    assert!(ack.lock().unwrap().in_flight.is_empty());
-
-    let _ = std::fs::remove_file(state_path);
-    let _ = std::fs::remove_file(drafts_blocker);
 }
 
 #[tokio::test]
@@ -1820,12 +1742,6 @@ async fn closed_worker_queue_is_recovered_without_another_message() {
         thread: thread.to_string(),
         target: "me@icloud.com".to_string(),
         backend: AgentBackend::Codex,
-        approval_origin: AnswerOrigin {
-            channel: "imessage".to_string(),
-            thread_key: thread.to_string(),
-            sender_key: "me@icloud.com".to_string(),
-            chat_key: "me@icloud.com".to_string(),
-        },
         text: "recover older".to_string(),
         reply_with_voice: false,
         voice_attachment: None,
@@ -2114,12 +2030,6 @@ async fn stop_targets_the_current_row_ahead_of_retained_failures() {
         thread: thread.to_string(),
         target: "me@icloud.com".to_string(),
         backend: AgentBackend::Codex,
-        approval_origin: AnswerOrigin {
-            channel: "imessage".to_string(),
-            thread_key: thread.to_string(),
-            sender_key: "me@icloud.com".to_string(),
-            chat_key: "me@icloud.com".to_string(),
-        },
         text: text.to_string(),
         reply_with_voice: false,
         voice_attachment: None,
@@ -2714,324 +2624,119 @@ async fn group_shutdown_waits_for_an_in_flight_channel_worker() {
 }
 
 #[tokio::test]
-async fn route_agent_draft_requires_bound_approval_before_atomic_install() {
+async fn route_agent_writes_job_directly_without_approval() {
     let state_path = temp_state_path();
-    let sessions_dir = temp_path("draft-e2e-sessions");
-    let assistant_dir = temp_path("draft-e2e-assistant");
-    let workdir = temp_path("draft-e2e-workdir");
+    let sessions_dir = temp_path("direct-job-sessions");
+    let assistant_dir = temp_path("direct-job-assistant");
     std::fs::create_dir_all(&assistant_dir).unwrap();
-    std::fs::create_dir_all(&workdir).unwrap();
-    let cfg = test_config(
+    let mut cfg = test_config(
         &state_path,
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
     );
+    cfg.jobs_dir = assistant_dir.join("jobs").to_string_lossy().to_string();
+    std::fs::create_dir_all(&cfg.jobs_dir).unwrap();
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mut gateway = Gateway::new(cfg.clone()).unwrap();
-    let inbound = message(
-        1,
-        "+15551234567",
-        "+15551234567",
-        false,
-        "Draft a morning job",
-    );
-    let (thread, _) = gateway.channel.accept(&inbound).unwrap();
-    let draft_directory =
-        crate::drafts::origin_directory(&cfg, &gateway.channel.approval_origin(&inbound, &thread))
-            .unwrap();
-    let body = format!(
-        "+++\nversion = 1\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"codex\"\n+++\n\nPrepare a note.\n",
-        workdir.to_string_lossy()
-    );
+    let job_path = Path::new(&cfg.jobs_dir).join("agent-note.md");
     let hook = Arc::new(move || {
-        std::fs::write(draft_directory.join("agent-note.md"), &body).unwrap();
+        std::fs::write(
+            &job_path,
+            "+++\nversion = 1\ntimeout = \"5s\"\nbackend = \"codex\"\n+++\n\nPrepare a note.\n",
+        )
+        .unwrap();
     });
     gateway.ctx.runners = Arc::new(fake_runners_with_hook(calls.clone(), Some(hook)));
-
-    run_messages(&mut gateway, vec![inbound]).await;
-    assert!(!Path::new(&cfg.jobs_dir).join("agent-note.md").exists());
-    let replies = gateway.ctx.sent_replies.lock().unwrap().clone();
-    assert!(replies
-        .iter()
-        .any(|(_, text)| text.contains("Prepare a note.")));
-    let question_text = replies
-        .iter()
-        .find_map(|(_, text)| text.contains("Approve and install").then_some(text))
-        .unwrap();
-    let question_id = question_text
-        .split_whitespace()
-        .map(|part| part.trim_matches(|ch| ch == '`' || ch == ',' || ch == '.'))
-        .find(|part| uuid::Uuid::parse_str(part).is_ok())
-        .unwrap()
-        .to_string();
 
     run_messages(
         &mut gateway,
         vec![message(
-            2,
+            1,
             "+15551234567",
             "+15551234567",
             false,
-            &format!("{question_id} 1"),
+            "Create a morning job",
         )],
     )
     .await;
 
-    assert!(Path::new(&cfg.jobs_dir).join("agent-note.md").is_file());
+    let job = crate::jobs::Catalog::load_named(&cfg, "agent-note").unwrap();
+    assert_eq!(job.workdir, std::fs::canonicalize(&assistant_dir).unwrap());
     assert_eq!(calls.lock().unwrap().len(), 1);
-    let proposal = gateway
-        .ctx
-        .history
-        .lock()
-        .unwrap()
-        .draft_proposal(&question_id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(proposal.status, "installed");
-    assert!(proposal.proposed_by.contains("sender=15551234567"));
-    assert!(proposal
-        .approved_by
-        .as_deref()
-        .unwrap()
-        .contains("sender=15551234567"));
-}
-
-#[tokio::test]
-async fn concurrent_origins_present_only_their_isolated_drafts() {
-    let state_path = temp_state_path();
-    let sessions_dir = temp_path("draft-concurrent-sessions");
-    let assistant_dir = temp_path("draft-concurrent-assistant");
-    let workdir = temp_path("draft-concurrent-workdir");
-    std::fs::create_dir_all(&assistant_dir).unwrap();
-    std::fs::create_dir_all(&workdir).unwrap();
-    let cfg = test_config(
-        &state_path,
-        sessions_dir.to_str().unwrap(),
-        assistant_dir.to_str().unwrap(),
-    );
-    let gateway = Gateway::new(cfg.clone()).unwrap();
-    let first_origin = AnswerOrigin {
-        channel: "imessage".to_string(),
-        thread_key: "imessage:dm:111".to_string(),
-        sender_key: "111".to_string(),
-        chat_key: "111".to_string(),
-    };
-    let second_origin = AnswerOrigin {
-        channel: "imessage".to_string(),
-        thread_key: "imessage:dm:222".to_string(),
-        sender_key: "222".to_string(),
-        chat_key: "222".to_string(),
-    };
-    let first_dir = crate::drafts::origin_directory(&cfg, &first_origin).unwrap();
-    let second_dir = crate::drafts::origin_directory(&cfg, &second_origin).unwrap();
-    assert_ne!(first_dir, second_dir);
-    std::fs::write(
-        first_dir.join("first.md"),
-        draft_runbook(&workdir, "FIRST ONLY"),
-    )
-    .unwrap();
-    std::fs::write(
-        second_dir.join("second.md"),
-        draft_runbook(&workdir, "SECOND ONLY"),
-    )
-    .unwrap();
-    let first = draft_test_job(1, "111", first_origin);
-    let second = draft_test_job(2, "222", second_origin);
-
-    let (first_result, second_result) = tokio::join!(
-        present_drafts(&gateway.ctx, &first, &first_dir),
-        present_drafts(&gateway.ctx, &second, &second_dir),
-    );
-    first_result.unwrap();
-    second_result.unwrap();
-
-    let replies = gateway.ctx.sent_replies.lock().unwrap();
-    let first_replies = replies
-        .iter()
-        .filter(|(target, _)| target == "111")
-        .map(|(_, text)| text)
-        .collect::<Vec<_>>();
-    let second_replies = replies
-        .iter()
-        .filter(|(target, _)| target == "222")
-        .map(|(_, text)| text)
-        .collect::<Vec<_>>();
-    assert!(first_replies.iter().any(|text| text.contains("FIRST ONLY")));
-    assert!(!first_replies
-        .iter()
-        .any(|text| text.contains("SECOND ONLY")));
-    assert!(second_replies
-        .iter()
-        .any(|text| text.contains("SECOND ONLY")));
-    assert!(!second_replies
-        .iter()
-        .any(|text| text.contains("FIRST ONLY")));
-}
-
-#[tokio::test]
-async fn failed_run_and_recovered_outbound_still_reconcile_origin_drafts() {
-    let state_path = temp_state_path();
-    let sessions_dir = temp_path("draft-failure-sessions");
-    let assistant_dir = temp_path("draft-failure-assistant");
-    let workdir = temp_path("draft-failure-workdir");
-    std::fs::create_dir_all(&assistant_dir).unwrap();
-    std::fs::create_dir_all(&workdir).unwrap();
-    let cfg = test_config(
-        &state_path,
-        sessions_dir.to_str().unwrap(),
-        assistant_dir.to_str().unwrap(),
-    );
-    let mut gateway = Gateway::new(cfg.clone()).unwrap();
-    let failed_message = message(1, "+15551234567", "+15551234567", false, "draft then fail");
-    let (thread, _) = gateway.channel.accept(&failed_message).unwrap();
-    let directory = crate::drafts::origin_directory(
-        &cfg,
-        &gateway.channel.approval_origin(&failed_message, &thread),
-    )
-    .unwrap();
-    let failed_body = draft_runbook(&workdir, "CREATED BEFORE FAILURE");
-    let hook = Arc::new(move || {
-        std::fs::write(directory.join("failed-run.md"), &failed_body).unwrap();
-    });
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let mut runners = HashMap::new();
-    runners.insert(
-        AgentBackend::Codex,
-        Runner::Fake(FakeRunner {
-            backend: AgentBackend::Codex,
-            session_id: "failed-session".to_string(),
-            calls: calls.clone(),
-            before_return: Some(hook),
-            wait_for_release: None,
-            failure: Some("boom".to_string()),
-            resume_missing_once: None,
-        }),
-    );
-    gateway.ctx.runners = Arc::new(runners);
-
-    run_messages(&mut gateway, vec![failed_message]).await;
     let replies = gateway.ctx.sent_replies.lock().unwrap().clone();
-    assert!(replies
-        .iter()
-        .any(|(_, text)| text.contains("CREATED BEFORE FAILURE")));
-    assert!(replies.iter().any(|(_, text)| text.contains("boom")));
-    assert_eq!(calls.lock().unwrap().len(), 1);
-
-    let recovered_message = message(2, "+15551234567", "+15551234567", false, "crash window");
-    let (recovered_thread, _) = gateway.channel.accept(&recovered_message).unwrap();
-    let recovered_dir = crate::drafts::origin_directory(
-        &cfg,
-        &gateway
-            .channel
-            .approval_origin(&recovered_message, &recovered_thread),
-    )
-    .unwrap();
-    std::fs::write(
-        recovered_dir.join("recovered.md"),
-        draft_runbook(&workdir, "RECOVERED AFTER CRASH"),
-    )
-    .unwrap();
-    let inbound_id = gateway
-        .ctx
-        .history
-        .lock()
-        .unwrap()
-        .record_inbound(
-            recovered_message.channel,
-            &recovered_thread,
-            &recovered_message.event_id(),
-            recovered_message.text.trim(),
-        )
-        .unwrap();
-    gateway
-        .ctx
-        .history
-        .lock()
-        .unwrap()
-        .record_outbound(
-            inbound_id,
-            OutboundOrigin::Backend,
-            Some("codex"),
-            "stored before crash",
-        )
-        .unwrap();
-    run_messages(&mut gateway, vec![recovered_message]).await;
-    let replies = gateway.ctx.sent_replies.lock().unwrap();
-    assert!(replies
-        .iter()
-        .any(|(_, text)| text.contains("RECOVERED AFTER CRASH")));
-    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert!(!replies.iter().any(|(_, text)| text.contains("Approve")));
 }
 
 #[tokio::test]
-async fn failed_draft_delivery_retries_after_restart_before_expiry() {
+async fn retired_job_approval_reply_explains_direct_creation() {
     let state_path = temp_state_path();
-    let sessions_dir = temp_path("draft-delivery-sessions");
-    let assistant_dir = temp_path("draft-delivery-assistant");
-    let workdir = temp_path("draft-delivery-workdir");
+    let sessions_dir = temp_path("retired-job-approval-sessions");
+    let assistant_dir = temp_path("retired-job-approval-assistant");
     std::fs::create_dir_all(&assistant_dir).unwrap();
-    std::fs::create_dir_all(&workdir).unwrap();
     let cfg = test_config(
         &state_path,
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
     );
-    let origin = AnswerOrigin {
-        channel: "imessage".to_string(),
-        thread_key: "imessage:dm:15551234567".to_string(),
-        sender_key: "15551234567".to_string(),
-        chat_key: "15551234567".to_string(),
-    };
-    let directory = crate::drafts::origin_directory(&cfg, &origin).unwrap();
-    std::fs::write(
-        directory.join("retry.md"),
-        draft_runbook(&workdir, "RETRY THIS OFFER"),
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut gateway = Gateway::new(cfg).unwrap();
+    gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+    let answer = message(1, "+15551234567", "+15551234567", false, "answer");
+    let (thread, target) = gateway.channel.accept(&answer).unwrap();
+    let question = Question::new(
+        gateway.channel.approval_origin(&answer, &thread),
+        target,
+        "Install the old job?",
+        vec![
+            crate::approval::Choice {
+                label: "Approve".to_string(),
+                value: "approve".to_string(),
+            },
+            crate::approval::Choice {
+                label: "Reject".to_string(),
+                value: "reject".to_string(),
+            },
+        ],
+        now_ms() + 60_000,
     )
     .unwrap();
-    let job = draft_test_job(1, "+15551234567", origin);
-    let gateway = Gateway::new(cfg.clone()).unwrap();
-    *gateway.ctx.send_failures_remaining.lock().unwrap() =
-        gateway.ctx.channel.delivery_semantics().retry_attempts;
-
-    assert!(present_drafts(&gateway.ctx, &job, &directory)
-        .await
-        .unwrap_err()
-        .to_string()
-        .contains("retry before expiry"));
-    drop(gateway);
-
-    let restarted = Gateway::new(cfg).unwrap();
-    present_drafts(&restarted.ctx, &job, &directory)
-        .await
-        .unwrap();
-    let replies = restarted.ctx.sent_replies.lock().unwrap();
-    assert!(replies
-        .iter()
-        .any(|(_, text)| text.contains("RETRY THIS OFFER")));
-    assert!(replies
-        .iter()
-        .any(|(_, text)| text.contains("Approve and install")));
-}
-
-fn draft_runbook(workdir: &Path, instruction: &str) -> String {
-    format!(
-        "+++\nversion = 1\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"codex\"\n+++\n\n{instruction}\n",
-        workdir.to_string_lossy()
-    )
-}
-
-fn draft_test_job(row_id: i64, target: &str, origin: AnswerOrigin) -> Job {
-    Job {
-        row_id,
-        inbound_id: row_id,
-        thread: origin.thread_key.clone(),
-        target: target.to_string(),
-        backend: AgentBackend::Codex,
-        approval_origin: origin,
-        text: "draft".to_string(),
-        reply_with_voice: false,
-        voice_attachment: None,
+    {
+        let mut history = gateway.ctx.history.lock().unwrap();
+        history.create_question(&question, now_ms()).unwrap();
+        history.execute_batch_for_test(&format!(
+            "INSERT INTO job_draft_proposals (
+                question_id, name, path, snapshot_hash, contents, proposed_by,
+                proposed_channel, proposed_thread, proposed_sender, proposed_chat,
+                status, proposed_at_ms, decision_at_ms, error
+             ) VALUES ('{}', 'morning-job', '/tmp/morning-job.md', 'hash', 'body',
+                       'legacy', 'imessage', 'imessage:dm:15551234567',
+                       '15551234567', '15551234567', 'invalidated', 1000, 1000,
+                       'job approval was removed; request direct job creation');
+             UPDATE approval_questions SET status = 'cancelled' WHERE id = '{}';",
+            question.id, question.id
+        ));
     }
+
+    run_messages(
+        &mut gateway,
+        vec![message(
+            1,
+            "+15551234567",
+            "+15551234567",
+            false,
+            &format!("{} 1", question.id),
+        )],
+    )
+    .await;
+
+    assert!(gateway
+        .ctx
+        .sent_replies
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(_, text)| text.contains("approval is no longer used")));
+    assert!(calls.lock().unwrap().is_empty());
 }
 
 fn test_config(state_path: &str, _sessions_dir: &str, assistant_dir: &str) -> Config {
@@ -3056,7 +2761,6 @@ fn test_config(state_path: &str, _sessions_dir: &str, assistant_dir: &str) -> Co
         routes: Vec::new(),
         assistant_root: assistant_dir.to_string(),
         jobs_dir: format!("{state_path}.jobs"),
-        drafts_dir: format!("{state_path}.drafts"),
         jobs_agent: None,
         jobs_max_timeout: "30m".to_string(),
         jobs_run_dir: format!("{state_path}.run"),

@@ -348,22 +348,11 @@ the rehydrated conversation transcript. Workflows can poll the durable question
 state and consume an answered value once; crossing the expiry first records an
 expired terminal state, so later cancellation cannot overwrite the timeout.
 
-Agent-written job proposals live separately under origin-specific inboxes in
-`drafts_dir`. Push creates the exact inbox and includes its path in the route's
-instructions. The selected agent's configuration decides whether it and the
-assistant root are writable. Push's approval flow governs drafts it installs;
-it does not prevent a write-enabled agent from changing installed jobs
-directly. Push snapshots
-and validates a changed regular file, stores its exact bytes, hash, proposer,
-and bound approval question in SQLite, then sends the full proposal to the
-originating channel. Reconciliation also runs after backend failure or timeout
-and before replaying a persisted outbound reply, so a crash cannot orphan an
-unrecorded revision. Approval rechecks the path, symlink status, revision, job
-schema and protected work directory. A valid
-stored revision is staged inside the derived assistant `jobs/` directory and
-installed with an atomic
-no-clobber link. Rejection and revision mismatch never activate the draft, and
-consumed or duplicate answers cannot repeat installation.
+Agent-created jobs live directly under `<assistant_root>/jobs`. The gateway
+includes that absolute path in its in-memory instructions and tells the agent
+to run `push job validate` after a change. Job creation has no separate draft
+or approval step. The selected agent's filesystem permissions control whether
+it can change the assistant repository.
 
 `audit_log_path` stores a local JSONL event stream for production debugging.
 Audit events record message metadata, routing decisions, approval outcomes,
@@ -382,13 +371,13 @@ registries, active selections, or multi-assistant commands.
 For every conversation and scheduled or manual job run, Push reads `SOUL.md`
 and appends a gateway-owned footer in memory containing the resolved absolute
 assistant, context, and jobs paths. The footer directs the backend to begin
-with `context/README.md` when useful, protect `SOUL.md` and installed jobs, and
-use the job draft approval flow. Push does not write the footer to the
-repository or inject all context files into each prompt. The selected backend
-and its configuration decide what to inspect. Instructions include the absolute
-`context/` path; Push does not add it as a writable root.
+with `context/README.md` when useful, protect `SOUL.md` and evals unless asked,
+write requested jobs directly under `jobs/`, and validate them before reporting
+success. Push does not write the footer to the repository or inject all context
+files into each prompt. The selected backend and its configuration decide what
+to inspect.
 
-Sessions, databases, drafts, audit logs, delivery state, locks, config secrets,
+Sessions, databases, audit logs, delivery state, locks, config secrets,
 and other runtime state stay outside the Git-versioned assistant repository.
 Project-scoped skills and their helper scripts may live in the assistant
 repository. The backend still owns skill discovery and execution, global

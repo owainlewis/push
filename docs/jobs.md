@@ -22,7 +22,6 @@ Create `<assistant_root>/jobs/repo-review.md`:
 +++
 version = 1
 timeout = "5m"
-workdir = "~/Code"
 backend = "codex"
 +++
 
@@ -41,13 +40,14 @@ Frontmatter fields:
 | --- | --- | --- |
 | `version` | yes | Format version, currently `1` |
 | `timeout` | yes | Positive duration no greater than `jobs_max_timeout` |
-| `workdir` | yes | Existing working directory for the backend |
+| `workdir` | no | Existing working directory for the backend; defaults to `assistant_root` |
 | `backend` | no | `claude`, `codex`, or `pi`; defaults to `jobs_agent`, then root `agent` |
 | `evals` | no | Reusable Markdown agent eval names from `<assistant_root>/evals/` |
 | `triggers` | no | One or more cron trigger tables |
 
-Unknown fields are errors. A job work directory may not overlap the assistant
-root, loaded Push config, state, database, audit log, drafts, or job lock paths.
+Unknown fields are errors. The assistant repository is a valid work directory.
+A job work directory may not overlap Push state, database, audit log, job lock
+paths, or a loaded config stored outside the assistant repository.
 
 ## Validate and inspect jobs
 
@@ -156,12 +156,6 @@ SOUL.md
 jobs/daily-inbox-triage.md
 ```
 
-Create its external working directory before installing the job:
-
-```sh
-mkdir -p ~/.push/workspaces/daily-inbox-triage
-```
-
 That one job file contains its schedule, triage priorities, output format, and
 safety rules. It uses email tools configured in the selected agent, drafts no
 replies, and performs no external side effects. Its schedule is disabled by
@@ -191,26 +185,24 @@ and primary delivery destination.
 Use `push job runs [<name>]` to inspect execution state, evaluation state,
 delivery attempts, destination, bounded results, and error details.
 
-## Agent-drafted jobs
+## Agent-created jobs
 
-An agent with write access can propose a new job by writing one complete
-runbook to its origin-specific drafts inbox. Push creates the opaque inbox and
-includes its path in the instructions. The agent configuration controls access,
-and different senders, chats, and topics cannot claim each other's drafts.
+When a user asks for a job, the assistant writes the complete runbook directly
+to `<assistant_root>/jobs/<lowercase-slug>.md` and runs `push job validate`.
+There is no separate draft or approval step. The selected agent's filesystem
+permissions control whether it can change the assistant repository.
 
-Push validates the filename, complete contents, work directory, timeout,
-backend, trigger, symlink status, and protected paths before presenting the
-proposal. It sends the exact draft to the originating chat with Approve and
-Reject choices.
+For an assistant repository created before this change, replace any `AGENTS.md`
+instruction that says to propose jobs through approval with the direct-write
+rule above. The gateway's runtime instruction overrides that old rule, but
+updating the repository keeps its checked-in guidance accurate.
 
-Approval is bound to the channel, sender, chat, thread or topic, and the exact
-SHA-256 revision shown. Any edit after presentation invalidates approval. A
-valid approved revision is installed atomically without replacing an existing
-job. Rejection leaves the proposal inactive.
+Pending job approvals from older Push versions are cancelled during database
+migration. Replying to one explains that the job must be requested again.
 
 !!! warning
 
     Jobs have no interactive approval path. Push runs Codex jobs with full
     access and no prompts and Claude jobs in `bypassPermissions` mode. Treat
-    every enabled job as code execution by the Push service user, keep job work
-    directories narrow, and allow only trusted senders and job definitions.
+    every enabled job as code execution by the Push service user, review
+    changes to the assistant repository, and allow only trusted senders.

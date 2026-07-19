@@ -24,10 +24,9 @@ Use absolute paths in service files. The service user needs:
 - write access to `state_path`
 - write access to `audit_log_path`
 - write access to `database_path`
-- write access to `drafts_dir` and `jobs_run_dir`
+- write access to `jobs_run_dir`
 - filesystem access to `assistant_root` as allowed by the selected agent
-- write access to `assistant_root/jobs/` for Push to install approved drafts;
-  agent write access can also change installed jobs outside that workflow
+- agent write access to `assistant_root/jobs/` when jobs should be created from chat
 - access to the selected `claude`, `codex`, or `pi` executable on `PATH`
 - backend login, tokens, settings, MCP config, and project credentials
 - for iMessage on macOS, Full Disk Access and `osascript`
@@ -46,7 +45,7 @@ service resumes after the last completed row and reuses existing backend
 sessions when the backend for that thread has not changed.
 
 Keep `assistant_root` in its own Git repository. Keep config secrets, state,
-databases, drafts, logs, locks, and service credentials outside it.
+databases, logs, locks, and service credentials outside it.
 
 ## macOS launchd
 
@@ -210,14 +209,11 @@ pending result delivery; it does not catch up missed cron times or rerun
 interrupted agent execution. Use `push job runs` to distinguish execution state
 from delivery attempts.
 
-## Drafted Jobs
+## Agent-created jobs
 
-The service prepares `drafts_dir` and the derived assistant `jobs/` directory
-with owner-only permissions. Push exposes only the route's origin-specific
-drafts inbox, and the agent's configuration decides whether it may write there.
-Proposals remain inactive until the exact revision
-is approved from its originating allowlisted channel identity. Pending
-questions survive service restart.
+When asked, the agent writes jobs directly under `<assistant_root>/jobs` and
+runs `push job validate`. There is no approval step. The agent's configuration
+decides whether it may write to the assistant repository.
 
 ## Restart Behavior
 
