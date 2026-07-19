@@ -259,12 +259,14 @@ async fn run_job_command(config_path: &str, command: JobCommand) -> Result<()> {
         }
         JobCommand::List => {
             let catalog = jobs::Catalog::load(&cfg)?;
+            let mut rows = Vec::new();
             for job in catalog.jobs.values() {
-                println!("{}\tvalid\t{}", job.name, job.backend.as_str());
+                rows.push((job.name.as_str(), "valid", job.backend.as_str()));
             }
-            for error in catalog.errors {
-                println!("{}\tinvalid\t{}", error.name, error.message);
+            for error in &catalog.errors {
+                rows.push((error.name.as_str(), "invalid", error.message.as_str()));
             }
+            print_job_list(&rows);
             Ok(())
         }
         JobCommand::Show(name) => {
@@ -336,6 +338,49 @@ async fn run_job_command(config_path: &str, command: JobCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn print_job_list(rows: &[(&str, &str, &str)]) {
+    let rows = rows
+        .iter()
+        .map(|(name, status, detail)| {
+            (
+                escape_table_cell(name),
+                escape_table_cell(status),
+                escape_table_cell(detail),
+            )
+        })
+        .collect::<Vec<_>>();
+    let name_width = rows
+        .iter()
+        .map(|(name, _, _)| name.len())
+        .max()
+        .unwrap_or(0)
+        .max("NAME".len());
+    let status_width = rows
+        .iter()
+        .map(|(_, status, _)| status.len())
+        .max()
+        .unwrap_or(0)
+        .max("STATUS".len());
+
+    println!(
+        "{:<name_width$}  {:<status_width$}  BACKEND / ERROR",
+        "NAME", "STATUS"
+    );
+    println!(
+        "{:<name_width$}  {:<status_width$}  {}",
+        "-".repeat(name_width),
+        "-".repeat(status_width),
+        "-".repeat("BACKEND / ERROR".len())
+    );
+    for (name, status, detail) in rows {
+        println!("{name:<name_width$}  {status:<status_width$}  {detail}");
+    }
+}
+
+fn escape_table_cell(value: &str) -> String {
+    value.chars().flat_map(|c| c.escape_default()).collect()
 }
 
 fn report_invalid_jobs(cfg: &config::Config) -> Result<()> {
