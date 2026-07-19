@@ -15,8 +15,9 @@ Ownership is split deliberately:
 
 ```text
 Push runtime         = channels, scheduling, history, security, delivery
-Assistant repository = SOUL.md, context, jobs
-Agent runtime        = reasoning, tools, skills, MCP, authentication
+Assistant repository = SOUL.md, context, jobs, optional project skills
+Agent runtime        = reasoning, tool and skill execution, permissions,
+                       global skills, MCP, authentication
 ```
 
 ## Principles
@@ -74,7 +75,7 @@ flowchart LR
         gateway --> worker[Per-thread worker]
         store[(state.json)] <--> gateway
         history[(push.db)] <--> gateway
-        assistant[/assistant repo: SOUL.md, context, jobs/] --> worker
+        assistant[/assistant repo: SOUL.md, context, jobs, project skills/] --> worker
         worker --> adapter[Agent adapter]
     end
     adapter -->|claude -p| claude[Claude Code]
@@ -389,7 +390,9 @@ and its configuration decide what to inspect. Instructions include the absolute
 
 Sessions, databases, drafts, audit logs, delivery state, locks, config secrets,
 and other runtime state stay outside the Git-versioned assistant repository.
-The backend still owns tools, skills, MCP, authentication, and execution.
+Project-scoped skills and their helper scripts may live in the assistant
+repository. The backend still owns skill discovery and execution, global
+skills, permissions, MCP, and authentication.
 
 ## Concurrency
 

@@ -33,16 +33,19 @@ const AGENTS: &str = r#"# Assistant repository instructions
 - Keep secrets, sessions, databases, drafts, logs, and other runtime state outside this repository.
 "#;
 
+const CLAUDE: &str = "@AGENTS.md\n";
+
 const README: &str = r#"# Assistant
 
 This Git repository contains the durable, user-owned parts of one Push assistant.
 
 - `SOUL.md` defines the assistant's identity and working style.
+- `AGENTS.md` contains shared agent instructions; `CLAUDE.md` references it.
 - `context/` contains durable context the assistant may read and update.
 - `evals/` contains reusable agent evaluation criteria.
 - `jobs/` contains installed Push job runbooks.
 
-Push owns channels, scheduling, history, security, approvals, and delivery outside this repository. The configured agent runtime owns reasoning, tools, skills, MCP servers, and authentication.
+Push owns channels, scheduling, history, security, approvals, and delivery outside this repository. Project skills may live here, while the configured agent runtime owns discovery, execution, permissions, global skills, MCP servers, and authentication.
 "#;
 
 const CONTEXT_README: &str = r#"# Context
@@ -346,6 +349,7 @@ fn scaffold(root: &Path) -> Result<()> {
     create_directory(&root.join("jobs"))?;
     create_file(&root.join("SOUL.md"), SOUL)?;
     create_file(&root.join("AGENTS.md"), AGENTS)?;
+    create_file(&root.join("CLAUDE.md"), CLAUDE)?;
     create_file(&root.join("README.md"), README)?;
     create_file(&root.join("context/README.md"), CONTEXT_README)?;
     Ok(())
@@ -373,11 +377,14 @@ fn create_file(path: &Path, contents: &str) -> Result<()> {
                 .with_context(|| format!("sync {}", path.display()))
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            if fs::symlink_metadata(path)?.file_type().is_file() {
+            let file_type = fs::symlink_metadata(path)?.file_type();
+            if file_type.is_file()
+                || (file_type.is_symlink() && fs::metadata(path).is_ok_and(|meta| meta.is_file()))
+            {
                 Ok(())
             } else {
                 bail!(
-                    "cannot create file {} because it is not a regular file",
+                    "cannot create file {} because it is not a regular file or a symlink to one",
                     path.display()
                 )
             }
@@ -559,6 +566,10 @@ mod tests {
         assert!(result.git_initialized);
         assert!(target.join("SOUL.md").is_file());
         assert!(target.join("AGENTS.md").is_file());
+        assert_eq!(
+            fs::read_to_string(target.join("CLAUDE.md")).unwrap(),
+            CLAUDE
+        );
         assert!(target.join("README.md").is_file());
         assert!(target.join("context/README.md").is_file());
         assert!(target.join("evals").is_dir());
@@ -581,6 +592,7 @@ mod tests {
         init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap();
         fs::write(target.join("SOUL.md"), "My identity\n").unwrap();
         fs::write(target.join("context/private.md"), "Keep me\n").unwrap();
+        fs::remove_file(target.join("CLAUDE.md")).unwrap();
         let config_before = fs::read_to_string(&config).unwrap();
 
         let result = init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap();
@@ -594,7 +606,37 @@ mod tests {
             fs::read_to_string(target.join("context/private.md")).unwrap(),
             "Keep me\n"
         );
+        assert_eq!(
+            fs::read_to_string(target.join("CLAUDE.md")).unwrap(),
+            CLAUDE
+        );
         assert_eq!(fs::read_to_string(config).unwrap(), config_before);
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repeat_initialization_preserves_symlinked_claude_instructions() {
+        use std::os::unix::fs::symlink;
+
+        let parent = temp_dir("assistant-reinit-claude-symlink");
+        let target = parent.join("assistant");
+        let config = parent.join("push.toml");
+        init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap();
+        fs::remove_file(target.join("CLAUDE.md")).unwrap();
+        symlink("AGENTS.md", target.join("CLAUDE.md")).unwrap();
+
+        let result = init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap();
+
+        assert!(!result.git_initialized);
+        assert!(fs::symlink_metadata(target.join("CLAUDE.md"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_link(target.join("CLAUDE.md")).unwrap(),
+            Path::new("AGENTS.md")
+        );
         let _ = fs::remove_dir_all(parent);
     }
 

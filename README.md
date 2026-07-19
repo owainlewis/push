@@ -85,6 +85,10 @@ Create a Git-backed home for your assistant:
 push init ~/Code/assistant
 ```
 
+This creates a Git repository containing `SOUL.md`, shared instructions in
+`AGENTS.md`, a `CLAUDE.md` reference to those instructions, `context/`, `evals/`,
+and `jobs/`, then records its path in `~/.push/config.toml`.
+
 Edit `~/.push/config.toml` to connect a chat channel. A small Telegram setup
 looks like this:
 
@@ -105,8 +109,9 @@ push doctor
 push
 ```
 
-For channel setup, service installation, jobs, permissions, and every config
-option, follow the [developer docs](https://owainlewis.github.io/push/).
+For channel setup, assistant design, service installation, jobs, permissions,
+and every config option, follow the
+[developer docs](https://owainlewis.github.io/push/).
 
 ## Build from source
 

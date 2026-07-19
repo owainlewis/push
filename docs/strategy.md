@@ -20,8 +20,8 @@ Push should not compete there.
 
 Push should own the durable gateway layer: messages, routing, scheduling,
 history, security, and delivery. The user should own one portable assistant
-repository with identity, context, and jobs. The agent runtime should be
-replaceable.
+repository with identity, context, jobs, and optional project skills. The agent
+runtime should be replaceable.
 
 ## Product Thesis
 
@@ -60,10 +60,10 @@ A personal assistant needs:
 - Permission and routing rules that match the user's life.
 
 Push supports exactly one assistant. `push init [path]` creates its user-owned,
-Git-versioned repository with `SOUL.md`, `context/`, and `jobs/`. One canonical
-root is configured; the other paths are derived. There are no assistant names,
-IDs, registries, or selection flows. This stays small, legible, and stable
-across backends and machines.
+Git-versioned repository with `SOUL.md`, `context/`, and `jobs/`; the user may
+add project-scoped skills. One canonical root is configured; the other paths
+are derived. There are no assistant names, IDs, registries, or selection flows.
+This stays small, legible, and stable across backends and machines.
 
 ## What The Gateway Owns
 
@@ -88,9 +88,10 @@ across backends and machines.
 - Repo context.
 - Long-running task mechanics.
 
-The assistant repository owns `SOUL.md`, editable context, and installed job
-runbooks. The runtime owns skills, tools, MCP, and authentication. Push runtime
-state and secrets remain outside the repository.
+The assistant repository owns `SOUL.md`, editable context, installed job
+runbooks, and optional project-scoped skills. The runtime owns skill discovery
+and execution, global skills, tools, MCP, permissions, and authentication. Push
+runtime state and secrets remain outside the repository.
 
 The gateway should not rebuild these unless there is no reliable backend
 contract for the job.
