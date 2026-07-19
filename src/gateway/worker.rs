@@ -2,28 +2,23 @@
 //! outcome in canonical history, and delivers the reply.
 
 use std::future::{pending, Future};
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
 use crate::agent::{Request, RunError};
-use crate::approval::{Choice, DeliveryStatus as ApprovalDeliveryStatus, Question};
 use crate::history::{DeliveryStatus, OutboundMessage, OutboundOrigin};
 use crate::rehydration::{self, RehydrationPrompt};
 use crate::soul;
-use crate::util::now_ms;
 use crate::voice::MAX_AUDIO_BYTES;
 
-use super::{audit, complete_row, reply_to, Ctx, Job, WorkerState};
+use super::{audit, complete_row, Ctx, Job, WorkerState};
 
 pub(super) const SESSION_SETUP_FAILURE: &str =
     "Push could not prepare this conversation. Check the local logs, then resend.";
-pub(super) const DRAFT_SETUP_FAILURE: &str =
-    "Push could not prepare its draft workspace. Check the local logs, then resend.";
 
 /// Processes one thread's jobs strictly in order, exiting when the queue closes.
 pub(super) async fn run(
@@ -68,37 +63,7 @@ where
             return;
         }
     };
-    // Push exposes the draft boundary. The selected agent's own configuration
-    // decides whether it may write there.
-    let draft_directory = match crate::drafts::origin_directory(&ctx.cfg, &job.approval_origin) {
-        Ok(directory) => Some(directory),
-        Err(error) => {
-            error!("[{}] draft boundary error: {error:#}", job.thread);
-            if let Some(outbound) = &existing_outbound {
-                report_delivery(
-                    ctx,
-                    &job,
-                    deliver_stored(ctx, &job, outbound).await,
-                    &outbound.content,
-                    "recovered_outbound",
-                    "recover outbound",
-                );
-            } else {
-                complete_setup_failure(ctx, &job, DRAFT_SETUP_FAILURE).await;
-            }
-            return;
-        }
-    };
     if let Some(outbound) = existing_outbound {
-        if let Some(directory) = &draft_directory {
-            if let Err(error) = present_drafts(ctx, &job, directory).await {
-                error!(
-                    "[{}] recovered draft presentation failed: {error:#}",
-                    job.thread
-                );
-                return;
-            }
-        }
         report_delivery(
             ctx,
             &job,
@@ -221,7 +186,7 @@ where
         }
     };
 
-    let mut instructions = match soul::load(&work_dir) {
+    let instructions = match soul::load(&work_dir) {
         Ok(instructions) => instructions,
         Err(error) => {
             error!("[{}] assistant identity error: {error}", job.thread);
@@ -239,7 +204,6 @@ where
             return;
         }
     };
-    let draft_write_dir = draft_directory.as_ref().and_then(|path| path.to_str());
     if let Err(error) = ctx.cfg.backend_context_dir() {
         error!("[{}] assistant context error: {error:#}", job.thread);
         audit(
@@ -254,12 +218,6 @@ where
         );
         complete_setup_failure(ctx, &job, SESSION_SETUP_FAILURE).await;
         return;
-    }
-    if let Some(draft_write_dir) = draft_write_dir {
-        instructions.push_str(&format!(
-            "\n\nTo propose a recurring job, write one complete validated Markdown runbook to {}/<lowercase-slug>.md. This drafts directory is the only Push-owned path you may write. Your agent configuration decides whether the user-owned context directory is editable. A draft remains inactive until the allowlisted user approves its exact revision. Never write to the installed jobs directory, Push configuration, or Push state.",
-            draft_write_dir
-        ));
     }
 
     let run = async {
@@ -461,25 +419,7 @@ where
                 );
                 return;
             }
-            // Deliver the reply before presenting drafts so the user reads the
-            // answer first, then any job proposal it produced.
             let delivery = deliver_stored(ctx, &job, &outbound).await;
-            if let Some(directory) = &draft_directory {
-                if let Err(error) = present_drafts(ctx, &job, directory).await {
-                    error!("[{}] draft presentation failed: {error:#}", job.thread);
-                    audit(
-                        ctx,
-                        ctx.audit.failed(
-                            "draft_presentation_failed",
-                            job.row_id,
-                            &job.thread,
-                            Some(job.backend),
-                            error.to_string(),
-                        ),
-                    );
-                    return;
-                }
-            }
             if delivery.is_ok() {
                 info!("[{}] reply sent via {}", job.thread, ctx.channel.id());
             }
@@ -508,11 +448,9 @@ where
             finish_run_with_gateway_reply(
                 ctx,
                 &job,
-                draft_directory.as_deref(),
                 reply,
                 ReplyLabels {
                     record: "record timeout reply",
-                    present: "present timed-out run drafts",
                     deliver: "deliver timeout reply",
                     completion: "timeout",
                 },
@@ -534,11 +472,9 @@ where
             finish_run_with_gateway_reply(
                 ctx,
                 &job,
-                draft_directory.as_deref(),
                 "Stopped the current request.",
                 ReplyLabels {
                     record: "record interrupted reply",
-                    present: "present interrupted run drafts",
                     deliver: "deliver interrupted reply",
                     completion: "interrupted",
                 },
@@ -561,11 +497,9 @@ where
             finish_run_with_gateway_reply(
                 ctx,
                 &job,
-                draft_directory.as_deref(),
                 &reply,
                 ReplyLabels {
                     record: "record failure reply",
-                    present: "present failed run drafts",
                     deliver: "deliver failure reply",
                     completion: "backend_failed",
                 },
@@ -642,21 +576,13 @@ async fn prepare_voice(ctx: &Ctx, job: &Job) -> std::result::Result<String, Voic
 /// Error and completion labels for one gateway-authored reply flow.
 struct ReplyLabels {
     record: &'static str,
-    present: &'static str,
     deliver: &'static str,
     completion: &'static str,
 }
 
-/// Records a gateway-authored reply, presents any pending job drafts, then
-/// delivers the reply and completes the row. Shared by the timeout and
-/// failure arms of `handle`.
-async fn finish_run_with_gateway_reply(
-    ctx: &Ctx,
-    job: &Job,
-    draft_directory: Option<&Path>,
-    reply: &str,
-    labels: ReplyLabels,
-) {
+/// Records a gateway-authored reply, delivers it, and completes the row.
+/// Shared by the timeout and failure arms of `handle`.
+async fn finish_run_with_gateway_reply(ctx: &Ctx, job: &Job, reply: &str, labels: ReplyLabels) {
     let outbound = match ctx.history.lock().unwrap().record_outbound(
         job.inbound_id,
         OutboundOrigin::Gateway,
@@ -666,11 +592,6 @@ async fn finish_run_with_gateway_reply(
         Ok(outbound) => outbound,
         Err(error) => return history_error(ctx, job, labels.record, error),
     };
-    if let Some(directory) = draft_directory {
-        if let Err(error) = present_drafts(ctx, job, directory).await {
-            return history_error(ctx, job, labels.present, error);
-        }
-    }
     report_delivery(
         ctx,
         job,
@@ -707,97 +628,6 @@ fn report_delivery(
         }
         Err(error) => history_error(ctx, job, deliver_action, error),
     }
-}
-
-pub(super) async fn present_drafts(ctx: &Ctx, job: &Job, directory: &Path) -> Result<()> {
-    for (display_name, result) in crate::drafts::candidates(&ctx.cfg, directory)? {
-        let candidate = match result {
-            Ok(candidate) => candidate,
-            Err(error) => {
-                let message = format!(
-                    "Job draft `{display_name}` is inactive and cannot be approved: {error:#}"
-                );
-                if !reply_to(ctx, &job.target, &message).await {
-                    warn!("[{}] invalid draft notice delivery failed", job.thread);
-                }
-                continue;
-            }
-        };
-        let existing = ctx
-            .history
-            .lock()
-            .unwrap()
-            .draft_revision(&candidate.path, &candidate.snapshot_hash)?;
-        let proposal = if let Some(proposal) = existing {
-            proposal
-        } else {
-            let question = Question::new(
-                job.approval_origin.clone(),
-                job.target.clone(),
-                format!(
-                    "Install job draft `{}` at exact revision `{}`?",
-                    candidate.name, candidate.snapshot_hash
-                ),
-                vec![
-                    Choice {
-                        label: "Approve and install".to_string(),
-                        value: "approve".to_string(),
-                    },
-                    Choice {
-                        label: "Reject and leave inactive".to_string(),
-                        value: "reject".to_string(),
-                    },
-                ],
-                now_ms() + 86_400_000,
-            )?;
-            let proposed_by = format!(
-                "channel={} thread={} sender={} chat={}",
-                job.approval_origin.channel,
-                job.approval_origin.thread_key,
-                job.approval_origin.sender_key,
-                job.approval_origin.chat_key
-            );
-            let proposal = crate::drafts::proposal(question.id.clone(), &candidate, proposed_by);
-            let _ = ctx.history.lock().unwrap().create_draft_question(
-                &question,
-                &proposal,
-                now_ms(),
-            )?;
-            ctx.history
-                .lock()
-                .unwrap()
-                .draft_revision(&candidate.path, &candidate.snapshot_hash)?
-                .context("persisted draft revision disappeared")?
-        };
-        let Some(question) = ctx
-            .history
-            .lock()
-            .unwrap()
-            .pending_draft_question(&proposal.question_id, now_ms())?
-        else {
-            continue;
-        };
-        let full = format!(
-            "Proposed job `{}`\nRevision: `{}`\n\n{}",
-            candidate.name, candidate.snapshot_hash, candidate.contents
-        );
-        let contents_delivered = reply_to(ctx, &question.target, &full).await;
-        let delivered =
-            contents_delivered && reply_to(ctx, &question.target, &question.render_text()).await;
-        ctx.history.lock().unwrap().mark_question_delivery(
-            &proposal.question_id,
-            if delivered {
-                ApprovalDeliveryStatus::Delivered
-            } else {
-                ApprovalDeliveryStatus::Failed
-            },
-        )?;
-        if !delivered {
-            warn!("[{}] draft proposal delivery failed", job.thread);
-            anyhow::bail!("draft proposal delivery failed; retry before expiry");
-        }
-    }
-    Ok(())
 }
 
 pub(super) async fn run_with_periodic_activity<O, A, AF>(

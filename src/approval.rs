@@ -1,12 +1,17 @@
 //! Channel-neutral, durable user questions and normalized answers.
 
+#[cfg(test)]
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[cfg(test)]
 pub const MAX_CHOICES: usize = 9;
+#[cfg(test)]
 const MAX_PROMPT_CHARS: usize = 2_000;
+#[cfg(test)]
 const MAX_LABEL_CHARS: usize = 256;
+#[cfg(test)]
 const MAX_VALUE_CHARS: usize = 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -15,6 +20,7 @@ pub struct Choice {
     pub value: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Question {
     pub id: String,
@@ -28,6 +34,7 @@ pub struct Question {
     pub expires_at_ms: i64,
 }
 
+#[cfg(test)]
 impl Question {
     pub fn new(
         origin: AnswerOrigin,
@@ -151,6 +158,7 @@ pub enum AnswerOutcome {
     Ambiguous,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryStatus {
     Delivered,
@@ -181,6 +189,7 @@ impl QuestionState {
     }
 }
 
+#[cfg(test)]
 impl DeliveryStatus {
     pub fn as_str(self) -> &'static str {
         match self {

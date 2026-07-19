@@ -63,7 +63,6 @@ pub fn test_config() -> crate::config::Config {
         routes: Vec::new(),
         assistant_root: "/fake/assistant".to_string(),
         jobs_dir: "/fake/jobs".to_string(),
-        drafts_dir: "/fake/drafts".to_string(),
         jobs_agent: None,
         jobs_max_timeout: "30m".to_string(),
         jobs_run_dir: "/fake/run".to_string(),

@@ -249,14 +249,13 @@ requests. Review [permissions and security](security.md) before enabling jobs.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `drafts_dir` | `~/.push/drafts` | Inactive agent-authored proposals |
 | `jobs_agent` | root `agent` | Default jobs backend |
 | `jobs_max_timeout` | `"30m"` | Maximum accepted job timeout |
 | `jobs_run_dir` | `~/.push/run` | Local advisory locks |
 | `jobs_max_workers` | `2` | Concurrent scheduled job workers |
 
-Push validates that state, the assistant root, drafts, locks, the
-loaded config file, and job work directories do not overlap in unsafe ways.
+Push validates that runtime state, locks, external config files, and job work
+directories do not overlap in unsafe ways.
 Runtime state and secrets must stay outside the Git-versioned assistant
 repository.
 

@@ -11,7 +11,6 @@ mod claude;
 mod codex;
 mod config;
 mod doctor;
-mod drafts;
 mod gateway;
 mod history;
 mod imessage;

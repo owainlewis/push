@@ -34,7 +34,7 @@ cargo test --locked
 | Claude Code, Codex, and Pi adapters | `src/claude.rs`, `src/codex.rs`, `src/pi.rs` |
 | Canonical SQLite history | `src/history.rs` |
 | Jobs, scheduling, locks, run ledger | `src/jobs.rs` |
-| Agent-authored draft approval | `src/drafts.rs`, `src/approval.rs` |
+| Durable user questions | `src/approval.rs`, `src/history.rs` |
 | Production diagnostics | `src/doctor.rs`, `src/audit.rs` |
 
 Read [architecture](architecture.md) before changing state, crash recovery,

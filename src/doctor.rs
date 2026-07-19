@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
-use crate::{channel::Channel, config, drafts, history, jobs};
+use crate::{channel::Channel, config, history, jobs};
 use config::{SLACK_APP_TOKEN_ENV, SLACK_BOT_TOKEN_ENV, TELEGRAM_BOT_TOKEN_ENV};
 
 /// Fails fast with actionable messages when the environment is not ready.
@@ -59,7 +59,6 @@ fn run_checks(cfg: &config::Config) -> CheckReport {
         &cfg.state_path,
         &mut checks,
     );
-    check_drafts_dir(cfg, &mut checks);
     check_parent_dir(
         "audit log directory",
         "audit_log_path",
@@ -251,22 +250,6 @@ fn check_writable_dir(name: &str, field: &str, dir: &Path, checks: &mut Vec<Chec
             format!(
                 "cannot create {}: {e}. Create it or choose a writable {field}.",
                 dir.display()
-            ),
-        )),
-    }
-}
-
-fn check_drafts_dir(cfg: &config::Config, checks: &mut Vec<Check>) {
-    match drafts::prepare(cfg) {
-        Ok(()) => checks.push(Check::pass(
-            "drafts directory",
-            format!("{} is writable and protected", cfg.drafts_dir),
-        )),
-        Err(error) => checks.push(Check::fail(
-            "drafts directory",
-            format!(
-                "cannot prepare {}: {error}. Create it with owner-only permissions or choose a writable drafts_dir.",
-                cfg.drafts_dir
             ),
         )),
     }

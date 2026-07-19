@@ -72,7 +72,7 @@ This stays small, legible, and stable across backends and machines.
 - Conversation ids.
 - Backend session ids.
 - Assistant root loading and runtime instruction composition.
-- Job validation, approval, scheduling, history, and delivery.
+- Job validation, scheduling, history, and delivery.
 - Runtime selection.
 - User-visible delivery.
 - The audit trail in plain files and JSON state.

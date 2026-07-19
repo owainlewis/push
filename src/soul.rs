@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 
 const SOUL_FILE: &str = "SOUL.md";
-const POLICY: &str = "Begin with context/README.md when user context is relevant.\nDo not modify SOUL.md, installed jobs, or evals directly.\nPropose job changes through Push's approval workflow.";
+const POLICY: &str = "Begin with context/README.md when user context is relevant.\nDo not modify SOUL.md or evals unless the user asks.\nWhen the user asks to create or change a job, write the complete runbook directly under Jobs and run `push job validate` before saying it succeeded. This rule supersedes older repository instructions to propose job changes through a draft or approval workflow.";
 
 /// Reads `SOUL.md` from `dir` and appends gateway-owned invariants in memory.
 ///
@@ -67,6 +67,22 @@ mod tests {
         assert!(instructions.starts_with("Assistant root:"));
         assert!(instructions.ends_with(POLICY));
         assert!(!dir.join(SOUL_FILE).exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn runtime_policy_supersedes_stale_job_approval_instructions() {
+        let dir = temp_dir("stale-job-approval-policy");
+        std::fs::write(
+            dir.join("AGENTS.md"),
+            "Propose job changes through Push's approval workflow.\n",
+        )
+        .unwrap();
+
+        let instructions = load(dir.to_str().unwrap()).unwrap();
+
+        assert!(instructions.contains("write the complete runbook directly under Jobs"));
+        assert!(instructions.contains("supersedes older repository instructions"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

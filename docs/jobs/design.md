@@ -39,7 +39,6 @@ an agent runtime.
 - Automatic retries of agent execution.
 - Reusing conversation or backend sessions.
 - Allowing jobs to define tools or raw backend permission flags.
-- Agent-authored drafts or approval flows in the first jobs runtime.
 - A distributed queue shared across multiple gateway processes or machines.
 
 ## Constraints
@@ -72,7 +71,8 @@ Markdown instruction body. Version 1 supports these fields:
 
 - `version`: required and equal to `1`.
 - `timeout`: required positive duration, capped by the configured job maximum.
-- `workdir`: required fixed directory, expanded and canonicalised at validation.
+- `workdir`: optional fixed directory, expanded and canonicalised at validation;
+  defaults to `assistant_root`.
 - `backend`: optional `claude`, `codex`, or `pi` override; otherwise use the configured
   jobs default.
 - `evals`: optional list of reusable Markdown agent eval names loaded from the
@@ -257,33 +257,9 @@ execution:
 - `push job runs [<name>]`
 
 Push is the only writer to the run ledger. The CLI owns the manual run it
-claims, and the gateway owns scheduled runs. Push installs draft jobs only
-after approval, but an agent with assistant-root write access can change
-installed job files outside that workflow.
-
-### Agent-authored draft extension
-
-Route agents may write proposals only in an opaque, exact-origin inbox under
-`~/.push/drafts/`. Push creates the inbox and includes its path in the
-instructions. The agent's own configuration decides whether it is writable.
-Concurrent channels, senders, chats, and topics therefore cannot claim each other's files. Job work
-directories may not overlap the assistant
-root, configuration, session, draft, installed-job, lock, audit, or database
-paths.
-
-After a route run completes, fails, times out, or resumes from a persisted
-outbound reply, Push reconciles unrecorded revisions in that origin's inbox.
-It validates each full runbook and sends its complete contents to the
-originating allowlisted channel. The
-following `ask_user` question binds Approve and Reject to that channel, sender,
-chat, thread or topic, and exact SHA-256 revision. SQLite stores the exact bytes
-and proposer identity with the question. Approval rereads and revalidates the
-draft. A changed revision is invalidated; a
-valid stored revision is staged inside the derived assistant `jobs/` directory
-and installed with an atomic
-no-clobber link. Rejection leaves the draft inactive. Proposal and approver
-identities, terminal status, and errors remain durable across restart, while
-duplicate answers cannot repeat installation.
+claims, and the gateway owns scheduled runs. Agents may write requested job
+files directly under `<assistant_root>/jobs` when their filesystem permissions
+allow it, then validate the catalog with `push job validate`.
 
 ## Alternatives and tradeoffs
 
@@ -357,8 +333,8 @@ fewer moving parts.
    manual run is claimed and recorded before execution.
 2. Add cron evaluation and primary-channel delivery behind the same
    transactional claim and execution path.
-3. Enable agent-authored drafts only after approval and filesystem isolation
-   rules are implemented.
+3. Let agents create jobs directly in the assistant repository under the
+   selected agent's filesystem permissions.
 
 Backout disables scheduling and manual execution while preserving job files
 and ledger history. Existing messaging, cursor, and backend-session behavior

@@ -47,8 +47,9 @@ filesystem sandbox or interactive permission prompt. Evaluators remain
 read-only with tools disabled.
 
 This makes job bodies equivalent to unattended code execution as the Push
-service user. Push requires a fixed, existing work directory and rejects overlap
-with Push-owned files, including the loaded config file. Keep allowed senders
+service user. The assistant repository is the default work directory. An
+explicit work directory must exist. Push rejects overlap with runtime state and
+a loaded config stored outside the assistant repository. Keep allowed senders
 and job definitions trusted, and run the service with only the OS permissions
 its jobs require.
 
@@ -64,7 +65,6 @@ service environment using the narrowest policy that works.
 | `~/.push/state.json` | channel cursors and backend session IDs |
 | `~/.push/push.db` | conversation history, approvals, and job runs |
 | `~/.push/audit.jsonl` | metadata, errors, handles, and optional content |
-| `~/.push/drafts/` | inactive agent-authored proposals |
 
 Keep them on local durable storage with permissions restricted to the service
 user. Keep the assistant directory in its own private Git repository. Never
@@ -85,16 +85,13 @@ outbound HTTPS long polling and Slack uses an authenticated outbound Socket
 Mode WebSocket. Neither needs a webhook.
 This reduces exposure, but it does not make an allowed message harmless.
 
-## Durable approval
+## Durable questions
 
-Agent-drafted jobs remain inactive until the exact revision is approved from
-the originating allowed identity. Approval questions are stored before
-delivery, survive restart, expire, and can be consumed once. Mismatched,
-duplicate, ambiguous, cancelled, and expired answers do not reach an agent.
-This protects proposals submitted through Push's drafts directory. It is not a
-filesystem sandbox. If the selected agent can write to `assistant_root`, it can
-also change `SOUL.md` or installed jobs directly. Restrict that access in the
-agent's own configuration when the approval boundary must be enforced.
+Bounded `ask_user` questions are stored before delivery, survive restart,
+expire, and can be consumed once. Mismatched, duplicate, ambiguous, cancelled,
+and expired answers do not reach an agent. Job creation does not use this
+mechanism. The selected agent's filesystem permissions control access to jobs
+in the assistant repository.
 
 ## Audit log
 
@@ -115,5 +112,5 @@ IDs, file paths, and backend errors. Protect and rotate it like a service log.
 - protect config credentials with mode `0600` on Unix
 - use absolute config paths in service files
 - keep Push state and job work directories separate
-- inspect agent-authored jobs before approving them
+- review agent-authored job changes in the assistant repository
 - review the audit log after routing or agent permission changes
