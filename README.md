@@ -2,7 +2,7 @@
 
 # Push
 
-### Put your coding agent on call.
+### Turn your coding agent into a 24/7 personal assistant.
 
 Message Claude Code, Codex, or Pi from your phone. Schedule work for later.
 Keep the agent and its data on your own machine.
