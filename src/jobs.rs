@@ -1952,7 +1952,7 @@ async fn execute(cfg: &Config, job: &Job) -> std::result::Result<String, Executi
         workdir,
         humantime::format_duration(job.timeout),
     );
-    match runner.run(request, job.timeout).await {
+    match runner.run_unattended(request, job.timeout).await {
         Ok(output) => Ok(output.reply),
         Err(RunError::Timeout) => Err(ExecutionError::Timeout),
         Err(RunError::Failed(error) | RunError::SessionMissing(error)) => {

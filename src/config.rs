@@ -190,7 +190,7 @@ impl Config {
         }
         if root.contains_key("job_permission_profiles") {
             bail!(
-                "job_permission_profiles is no longer supported; jobs run with the backend's own permission configuration, so remove this key"
+                "job_permission_profiles is no longer supported; jobs run unattended, so remove this key"
             );
         }
         let has_assistant_root = root.contains_key("assistant_root");
@@ -410,9 +410,8 @@ impl Config {
             .with_context(|| format!("invalid jobs_max_timeout {}", self.jobs_max_timeout))
     }
 
-    // Jobs run with the backend's own permission configuration, which may
-    // allow writes, so every job workdir must stay clear of Push-owned paths,
-    // including the loaded config file itself.
+    // Jobs run unattended with write access, so every job workdir must stay
+    // clear of Push-owned paths, including the loaded config file itself.
     pub fn validate_job_workdir(&self, workdir: &Path) -> Result<()> {
         let workdir = resolved_absolute("job workdir", workdir)?;
         let protected_paths = [

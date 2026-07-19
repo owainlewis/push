@@ -43,8 +43,8 @@ allow_user_ids = [123456789]
 ```
 
 `channel` is the easiest single-provider setup. `agent` is `claude`, `codex`,
-or `pi`. Push does not set sandbox, approval, permission-mode, or tool flags.
-Configure those in the selected agent.
+or `pi`. Push preserves backend permission settings for chats. Codex and Claude
+jobs bypass interactive permissions so unattended runs can complete.
 
 ### Pi setup
 
@@ -177,10 +177,10 @@ Thread keys are:
 
 ## Agent permissions
 
-Permissions belong to the agent, not the gateway. Push invokes Claude Code,
-Codex, and Pi without overriding their sandbox, approval mode, or tool lists.
-This keeps interactive and gateway behavior aligned. Configure permissions in
-the selected agent and review [permissions and security](security.md).
+For chats, Push invokes Claude Code, Codex, and Pi without overriding their
+sandbox, approval mode, or tool lists. Codex and Claude jobs bypass interactive
+permissions because scheduled work has no operator available to approve
+requests. Review [permissions and security](security.md) before enabling jobs.
 
 ## Settings reference
 
