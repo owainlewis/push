@@ -9,8 +9,8 @@ use crate::{channel::Channel, config, drafts, history, jobs};
 use config::TELEGRAM_BOT_TOKEN_ENV;
 
 /// Fails fast with actionable messages when the environment is not ready.
-pub fn preflight(cfg: &config::Config) -> Result<()> {
-    let report = run_checks(cfg);
+pub async fn preflight(cfg: &config::Config) -> Result<()> {
+    let report = run_checks(cfg).await;
     if report.preflight_is_ok() {
         return Ok(());
     }
@@ -24,7 +24,7 @@ pub fn preflight(cfg: &config::Config) -> Result<()> {
     bail!("{}: {}", failed.name, failed.message);
 }
 
-pub fn doctor(config_path: &str) -> Result<()> {
+pub async fn doctor(config_path: &str) -> Result<()> {
     let cfg = match config::Config::load(config_path) {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -40,7 +40,7 @@ pub fn doctor(config_path: &str) -> Result<()> {
             bail!("doctor found 1 failed check");
         }
     };
-    let report = run_checks(&cfg);
+    let report = run_checks(&cfg).await;
     print!("{report}");
     if report.is_ok() {
         Ok(())
@@ -49,7 +49,7 @@ pub fn doctor(config_path: &str) -> Result<()> {
     }
 }
 
-fn run_checks(cfg: &config::Config) -> CheckReport {
+async fn run_checks(cfg: &config::Config) -> CheckReport {
     let mut checks = Vec::new();
     check_config(cfg, &mut checks);
     check_voice_config_permissions(cfg, &mut checks);
@@ -73,18 +73,19 @@ fn run_checks(cfg: &config::Config) -> CheckReport {
                 match channel {
                     config::ChannelKind::IMessage => check_imessage_db(cfg, &mut checks),
                     config::ChannelKind::Telegram => check_telegram_config(cfg, &mut checks),
+                    config::ChannelKind::Simplex => check_simplex_config(cfg, &mut checks),
                 }
             }
         }
         Err(e) => checks.push(Check::fail("channels", e.to_string())),
     }
-    check_scheduled_delivery(cfg, &mut checks);
+    check_scheduled_delivery(cfg, &mut checks).await;
     check_bins(cfg, &mut checks);
     check_voice(cfg, &mut checks);
     CheckReport { checks }
 }
 
-fn check_scheduled_delivery(cfg: &config::Config, checks: &mut Vec<Check>) {
+async fn check_scheduled_delivery(cfg: &config::Config, checks: &mut Vec<Check>) {
     let catalog = match jobs::Catalog::load(cfg) {
         Ok(catalog) => catalog,
         Err(error) => {
@@ -127,15 +128,23 @@ fn check_scheduled_delivery(cfg: &config::Config, checks: &mut Vec<Check>) {
         ));
         return;
     };
-    let result = (|| {
+    let result = async {
         let kind = config::ChannelKind::parse(&primary.channel)?;
         if !cfg.enabled_channel_kinds()?.contains(&kind) {
             anyhow::bail!("primary channel {:?} is not enabled", primary.channel);
         }
-        let channel = Channel::new_for(cfg, kind)?;
+        // NOTE: for `ChannelKind::Simplex` this establishes a real connection
+        // to the daemon at 127.0.0.1:<simplex.port> (see src/simplex.rs) —
+        // unlike iMessage/Telegram, whose `Channel::new_for` never performs
+        // I/O. `push doctor`'s scheduled-delivery check therefore also
+        // verifies the SimpleX daemon is actually reachable for this one
+        // channel kind, which is a reasonable (if asymmetric) doctor-check
+        // property, not a bug — flagged here so it isn't mistaken for one.
+        let channel = Channel::new_for(cfg, kind).await?;
         channel.primary_target(&primary.target)?;
         Ok::<_, anyhow::Error>(())
-    })();
+    }
+    .await;
     match result {
         Ok(()) => checks.push(Check::pass(
             "scheduled delivery",
@@ -328,6 +337,26 @@ fn check_telegram_config(cfg: &config::Config, checks: &mut Vec<Check>) {
     }
 }
 
+fn check_simplex_config(cfg: &config::Config, checks: &mut Vec<Check>) {
+    // Config-only check, deliberately not a live connection attempt (see
+    // check_scheduled_delivery's own SimpleX comment) — mirrors
+    // check_telegram_config's scope, not check_imessage_db's file-probe scope.
+    if cfg.simplex_allow_contact_ids.is_empty() {
+        checks.push(Check::fail(
+            "SimpleX allowlist",
+            "simplex.allow_contact_ids is empty; no contact can reach this bot",
+        ));
+    } else {
+        checks.push(Check::pass(
+            "SimpleX allowlist",
+            format!(
+                "{} allowlisted contact id(s)",
+                cfg.simplex_allow_contact_ids.len()
+            ),
+        ));
+    }
+}
+
 fn ensure_writable_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let probe = dir.join(format!(".push-doctor-write-test-{}", std::process::id()));
@@ -504,28 +533,28 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    #[test]
-    fn doctor_reports_config_load_failure() {
+    #[tokio::test]
+    async fn doctor_reports_config_load_failure() {
         let path = temp_path("missing-config");
 
-        let err = doctor(path.to_str().unwrap()).unwrap_err();
+        let err = doctor(path.to_str().unwrap()).await.unwrap_err();
 
         assert!(err.to_string().contains("doctor found 1 failed check"));
     }
 
-    #[test]
-    fn doctor_reports_invalid_toml_config() {
+    #[tokio::test]
+    async fn doctor_reports_invalid_toml_config() {
         let path = temp_path("invalid-toml-config");
         std::fs::write(&path, "{").unwrap();
 
-        let err = doctor(path.to_str().unwrap()).unwrap_err();
+        let err = doctor(path.to_str().unwrap()).await.unwrap_err();
 
         assert!(err.to_string().contains("doctor found 1 failed check"));
         let _ = std::fs::remove_file(path);
     }
 
-    #[test]
-    fn doctor_reports_invalid_config_value() {
+    #[tokio::test]
+    async fn doctor_reports_invalid_config_value() {
         let path = temp_path("invalid-value-config");
         std::fs::write(
             &path,
@@ -535,14 +564,14 @@ agent = "bogus"
         )
         .unwrap();
 
-        let err = doctor(path.to_str().unwrap()).unwrap_err();
+        let err = doctor(path.to_str().unwrap()).await.unwrap_err();
 
         assert!(err.to_string().contains("doctor found 1 failed check"));
         let _ = std::fs::remove_file(path);
     }
 
-    #[test]
-    fn doctor_rejects_an_inline_token_inside_the_assistant_repository() {
+    #[tokio::test]
+    async fn doctor_rejects_an_inline_token_inside_the_assistant_repository() {
         let root = temp_dir("doctor-inline-token");
         let path = root.join("config.toml");
         std::fs::write(
@@ -551,14 +580,14 @@ agent = "bogus"
         )
         .unwrap();
 
-        let error = doctor(path.to_str().unwrap()).unwrap_err();
+        let error = doctor(path.to_str().unwrap()).await.unwrap_err();
 
         assert!(error.to_string().contains("doctor found 1 failed check"));
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn doctor_reports_empty_claude_tool_filter() {
+    #[tokio::test]
+    async fn doctor_reports_empty_claude_tool_filter() {
         let path = temp_path("empty-claude-tool-config");
         std::fs::write(
             &path,
@@ -568,14 +597,14 @@ claude_allowed_tools = ["Read", " "]
         )
         .unwrap();
 
-        let err = doctor(path.to_str().unwrap()).unwrap_err();
+        let err = doctor(path.to_str().unwrap()).await.unwrap_err();
 
         assert!(err.to_string().contains("doctor found 1 failed check"));
         let _ = std::fs::remove_file(path);
     }
 
-    #[test]
-    fn doctor_reports_empty_claude_tools_list() {
+    #[tokio::test]
+    async fn doctor_reports_empty_claude_tools_list() {
         let path = temp_path("empty-claude-tools-config");
         std::fs::write(
             &path,
@@ -585,7 +614,7 @@ claude_tools = []
         )
         .unwrap();
 
-        let err = doctor(path.to_str().unwrap()).unwrap_err();
+        let err = doctor(path.to_str().unwrap()).await.unwrap_err();
 
         assert!(err.to_string().contains("doctor found 1 failed check"));
         let _ = std::fs::remove_file(path);
@@ -698,8 +727,8 @@ claude_tools = []
         assert!(!format!("{:?}", checks[0].message).contains("secret"));
     }
 
-    #[test]
-    fn full_preflight_checks_only_enabled_reply_channels() {
+    #[tokio::test]
+    async fn full_preflight_checks_only_enabled_reply_channels() {
         let mut cfg = test_config();
         cfg.channels = vec!["telegram".to_string()];
         cfg.self_handles.clear();
@@ -707,7 +736,7 @@ claude_tools = []
         cfg.telegram_bot_token = Some("secret".to_string());
         cfg.telegram_allow_user_ids = vec![7];
 
-        let report = run_checks(&cfg);
+        let report = run_checks(&cfg).await;
 
         assert!(report
             .checks
@@ -719,8 +748,8 @@ claude_tools = []
             .any(|check| check.name == "iMessage database"));
     }
 
-    #[test]
-    fn run_checks_reports_config_and_writable_paths() {
+    #[tokio::test]
+    async fn run_checks_reports_config_and_writable_paths() {
         let db_path = temp_path("chat-db");
         std::fs::write(&db_path, "").unwrap();
         let state_path = temp_path("state-dir").join("state.json");
@@ -735,7 +764,7 @@ claude_tools = []
             .with_extension("push.db")
             .to_string_lossy()
             .to_string();
-        let report = run_checks(&cfg);
+        let report = run_checks(&cfg).await;
 
         assert!(report
             .checks
@@ -760,8 +789,8 @@ claude_tools = []
         let _ = std::fs::remove_file(cfg.database_path);
     }
 
-    #[test]
-    fn enabled_schedules_require_a_valid_primary_destination() {
+    #[tokio::test]
+    async fn enabled_schedules_require_a_valid_primary_destination() {
         let jobs_dir = temp_dir("doctor-scheduled-jobs");
         let workdir = temp_dir("doctor-scheduled-work");
         let mut cfg = test_config();
@@ -776,7 +805,7 @@ claude_tools = []
         .unwrap();
         let mut checks = Vec::new();
 
-        check_scheduled_delivery(&cfg, &mut checks);
+        check_scheduled_delivery(&cfg, &mut checks).await;
         assert!(matches!(checks[0].status, CheckStatus::Fail));
         assert!(checks[0].message.contains("require [primary_delivery]"));
 
@@ -785,7 +814,7 @@ claude_tools = []
             target: "me@icloud.com".to_string(),
         });
         checks.clear();
-        check_scheduled_delivery(&cfg, &mut checks);
+        check_scheduled_delivery(&cfg, &mut checks).await;
         assert!(matches!(checks[0].status, CheckStatus::Pass));
     }
 
@@ -802,15 +831,15 @@ claude_tools = []
         assert!(!gateway_failure.preflight_is_ok());
     }
 
-    #[test]
-    fn invalid_jobs_do_not_report_that_no_schedules_are_enabled() {
+    #[tokio::test]
+    async fn invalid_jobs_do_not_report_that_no_schedules_are_enabled() {
         let jobs_dir = temp_dir("doctor-invalid-scheduled-job");
         let mut cfg = test_config();
         cfg.jobs_dir = jobs_dir.to_string_lossy().to_string();
         std::fs::write(jobs_dir.join("daily.md"), "invalid").unwrap();
         let mut checks = Vec::new();
 
-        check_scheduled_delivery(&cfg, &mut checks);
+        check_scheduled_delivery(&cfg, &mut checks).await;
 
         assert!(matches!(checks[0].status, CheckStatus::Fail));
         assert!(checks[0].message.contains("push job validate"));

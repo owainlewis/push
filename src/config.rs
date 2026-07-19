@@ -60,6 +60,16 @@ pub struct Config {
     #[serde(default)]
     pub telegram_allow_chat_ids: Vec<i64>,
     #[serde(default)]
+    pub simplex_port: Option<u16>,
+    /// Must exactly match the display name of the profile already created on
+    /// the `simplex-chat` daemon before Push connects (see `src/simplex.rs`'s
+    /// module doc for why — a mismatch silently scopes Push's connection to
+    /// the wrong/empty user instead of erroring).
+    #[serde(default = "default_simplex_display_name")]
+    pub simplex_display_name: String,
+    #[serde(default)]
+    pub simplex_allow_contact_ids: Vec<i64>,
+    #[serde(default)]
     pub voice_openai_api_key: Option<String>,
     #[serde(default = "default_voice_name")]
     pub voice_name: String,
@@ -209,6 +219,15 @@ impl Config {
                 ("bot_token", "telegram_bot_token"),
                 ("allow_user_ids", "telegram_allow_user_ids"),
                 ("allow_chat_ids", "telegram_allow_chat_ids"),
+            ],
+        )?;
+        flatten_provider_section(
+            root,
+            "simplex",
+            &[
+                ("port", "simplex_port"),
+                ("display_name", "simplex_display_name"),
+                ("allow_contact_ids", "simplex_allow_contact_ids"),
             ],
         )?;
         flatten_provider_section(
@@ -491,6 +510,22 @@ impl Config {
                         bail!("telegram.bot_token cannot be empty");
                     }
                 }
+                ChannelKind::Simplex => {
+                    if self.simplex_allow_contact_ids.is_empty() {
+                        bail!("set simplex.allow_contact_ids for SimpleX");
+                    }
+                    if self.simplex_display_name.trim().is_empty() {
+                        bail!(
+                            "simplex.display_name cannot be empty; it must match the daemon's pre-created profile display name"
+                        );
+                    }
+                    // No further validation needed: simplex_port is a typed
+                    // Option<u16> (TOML parsing itself rejects a non-numeric
+                    // or out-of-range value before validate() ever runs), and
+                    // None just means "use the default port" in
+                    // Channel::new_for — there is no equivalent "empty
+                    // string" invalid state the way telegram_bot_token has.
+                }
             }
         }
         self.agent_backend()?;
@@ -741,6 +776,7 @@ impl RouteRule {
 pub enum ChannelKind {
     IMessage,
     Telegram,
+    Simplex,
 }
 
 impl ChannelKind {
@@ -748,7 +784,10 @@ impl ChannelKind {
         match s {
             "imessage" => Ok(Self::IMessage),
             "telegram" => Ok(Self::Telegram),
-            other => bail!("invalid channel {other:?}; expected \"imessage\" or \"telegram\""),
+            "simplex" => Ok(Self::Simplex),
+            other => {
+                bail!("invalid channel {other:?}; expected \"imessage\", \"telegram\", or \"simplex\"")
+            }
         }
     }
 
@@ -756,6 +795,7 @@ impl ChannelKind {
         match self {
             Self::IMessage => "imessage",
             Self::Telegram => "telegram",
+            Self::Simplex => "simplex",
         }
     }
 }
@@ -804,6 +844,9 @@ fn default_agent() -> String {
 fn default_voice_name() -> String {
     DEFAULT_VOICE_NAME.to_string()
 }
+fn default_simplex_display_name() -> String {
+    "push".to_string()
+}
 fn default_jobs_dir() -> String {
     "~/.push/jobs".to_string()
 }
@@ -851,6 +894,9 @@ mod tests {
             telegram_bot_token: None,
             telegram_allow_user_ids: Vec::new(),
             telegram_allow_chat_ids: Vec::new(),
+            simplex_port: None,
+            simplex_display_name: "push".to_string(),
+            simplex_allow_contact_ids: Vec::new(),
             voice_openai_api_key: None,
             voice_name: DEFAULT_VOICE_NAME.to_string(),
             agent: "codex".to_string(),

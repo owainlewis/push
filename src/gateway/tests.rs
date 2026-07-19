@@ -595,7 +595,7 @@ async fn fake_channel_e2e_replies_once_ignores_unallowlisted_and_reuses_session(
         channel: None,
         agent: "codex".to_string(),
     }];
-    let mut gateway = Gateway::new(cfg).unwrap();
+    let mut gateway = Gateway::new(cfg).await.unwrap();
     gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
 
     gateway
@@ -687,7 +687,7 @@ async fn fake_channel_e2e_replies_once_ignores_unallowlisted_and_reuses_session(
         &state_path,
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
-    ))
+    )).await
     .unwrap();
     replay_gateway.ctx.runners = Arc::new(fake_runners(replay_calls.clone()));
     replay_gateway
@@ -722,7 +722,7 @@ async fn imessage_question_delivers_and_plain_number_resolves_once() {
         &state_path,
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
-    ))
+    )).await
     .unwrap();
     gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
     let question = approval_question(
@@ -799,7 +799,7 @@ async fn telegram_question_rejects_wrong_topic_sender_and_duplicate() {
     cfg.allow_from.clear();
     cfg.telegram_bot_token = Some("secret".to_string());
     cfg.telegram_allow_user_ids = vec![7, 8];
-    let mut gateway = Gateway::new(cfg).unwrap();
+    let mut gateway = Gateway::new(cfg).await.unwrap();
     gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
     let question = approval_question("telegram", "telegram:dm:7:topic:9", "7", "7", "7:9");
     let id = gateway.ask_user(question).await.unwrap();
@@ -877,7 +877,7 @@ async fn failed_question_delivery_keeps_the_durable_pending_question() {
         &state_path,
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
-    ))
+    )).await
     .unwrap();
     *gateway.ctx.send_failures_remaining.lock().unwrap() = 1;
     let question = approval_question(
@@ -922,7 +922,7 @@ async fn expired_answer_is_audited_without_reaching_the_backend() {
         &state_path,
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
-    ))
+    )).await
     .unwrap();
     gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
     let mut question = approval_question(
@@ -977,7 +977,7 @@ async fn missing_backend_session_rotates_and_rehydrates_once() {
         &state_path,
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
-    ))
+    )).await
     .unwrap();
     let mut runners = HashMap::new();
     runners.insert(
@@ -1051,7 +1051,7 @@ async fn backend_switch_and_clear_start_fresh_sessions_with_history() {
         &state_path,
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
-    ))
+    )).await
     .unwrap();
     let mut runners = HashMap::new();
     runners.insert(
@@ -1144,7 +1144,7 @@ async fn canonical_history_failure_prevents_backend_dispatch_and_cursor_advance(
         &state_path,
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
-    ))
+    )).await
     .unwrap();
     gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
     gateway
@@ -1199,7 +1199,7 @@ async fn pending_outbound_is_delivered_after_restart_without_backend_rerun() {
         )
         .unwrap();
     drop(history);
-    let mut gateway = Gateway::new(config).unwrap();
+    let mut gateway = Gateway::new(config).await.unwrap();
     gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
     gateway
         .tick_fake(vec![message(1, "me@icloud.com", "", true, "hello")])
@@ -1249,7 +1249,7 @@ async fn session_state_save_failure_keeps_reply_for_restart_without_backend_reru
         &state_path,
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
-    ))
+    )).await
     .unwrap();
     let store = gateway.store.clone();
     let broken_state_path = state_blocker.join("state.json");
@@ -1301,7 +1301,7 @@ async fn session_state_save_failure_keeps_reply_for_restart_without_backend_reru
         &state_path,
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
-    ))
+    )).await
     .unwrap();
     restarted.ctx.runners = Arc::new(fake_runners(second_calls.clone()));
     restarted
@@ -1339,7 +1339,7 @@ async fn exhausted_delivery_batch_retries_without_blocking_cursor() {
         &state_path,
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
-    ))
+    )).await
     .unwrap();
     gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
     *gateway.ctx.send_failures_remaining.lock().unwrap() =
@@ -1402,7 +1402,7 @@ async fn telegram_filters_before_agent_and_replies_to_originating_chat() {
     cfg.allow_from.clear();
     cfg.telegram_bot_token = Some("secret".to_string());
     cfg.telegram_allow_user_ids = vec![7];
-    let mut gateway = Gateway::new(cfg).unwrap();
+    let mut gateway = Gateway::new(cfg).await.unwrap();
     gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
 
     gateway
@@ -1446,7 +1446,7 @@ async fn telegram_topic_gets_own_thread_and_reply_targets_the_topic() {
     cfg.allow_from.clear();
     cfg.telegram_bot_token = Some("secret".to_string());
     cfg.telegram_allow_user_ids = vec![7];
-    let mut gateway = Gateway::new(cfg).unwrap();
+    let mut gateway = Gateway::new(cfg).await.unwrap();
     gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
 
     let mut topic_message = telegram_message(20, 7, 7, false, "in topic");
@@ -1494,7 +1494,7 @@ async fn enabled_channels_process_concurrently_with_isolated_state_and_origin_re
     cfg.channels = vec!["imessage".to_string(), "telegram".to_string()];
     cfg.telegram_bot_token = Some("secret".to_string());
     cfg.telegram_allow_user_ids = vec![7];
-    let mut group = GatewayGroup::new(cfg).unwrap();
+    let mut group = GatewayGroup::new(cfg).await.unwrap();
     for gateway in &mut group.gateways {
         gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
     }
@@ -1562,7 +1562,7 @@ async fn telegram_voice_is_transcribed_and_gets_text_and_voice_replies() {
     cfg.channel = "telegram".to_string();
     cfg.telegram_bot_token = Some("secret".to_string());
     cfg.telegram_allow_user_ids = vec![7];
-    let mut gateway = Gateway::new(cfg).unwrap();
+    let mut gateway = Gateway::new(cfg).await.unwrap();
     gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
     gateway.ctx.voice = Some(Voice::with_provider(Arc::new(FakeVoice)));
 
@@ -1614,7 +1614,7 @@ async fn telegram_voice_without_openai_key_falls_back_without_running_agent() {
     cfg.channel = "telegram".to_string();
     cfg.telegram_bot_token = Some("secret".to_string());
     cfg.telegram_allow_user_ids = vec![7];
-    let mut gateway = Gateway::new(cfg).unwrap();
+    let mut gateway = Gateway::new(cfg).await.unwrap();
     gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
     gateway.ctx.voice = None;
 
@@ -1649,7 +1649,7 @@ async fn slow_voice_transcription_does_not_block_another_telegram_thread() {
     cfg.channel = "telegram".to_string();
     cfg.telegram_bot_token = Some("secret".to_string());
     cfg.telegram_allow_user_ids = vec![7, 8];
-    let mut gateway = Gateway::new(cfg).unwrap();
+    let mut gateway = Gateway::new(cfg).await.unwrap();
     gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
     let (release, blocked) = tokio::sync::oneshot::channel();
     gateway.ctx.voice = Some(Voice::with_provider(Arc::new(BlockingVoice {
@@ -1710,7 +1710,7 @@ async fn closed_worker_queue_is_recovered_without_another_message() {
         &state_path,
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
-    ))
+    )).await
     .unwrap();
     gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
 
@@ -1793,7 +1793,7 @@ async fn stop_interrupts_active_run_and_preserves_queued_messages() {
         &state_path,
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
-    ))
+    )).await
     .unwrap();
     let mut runners = HashMap::new();
     runners.insert(
@@ -1890,7 +1890,7 @@ async fn stop_interrupts_a_worker_queued_in_the_same_poll_batch() {
         &state_path,
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
-    ))
+    )).await
     .unwrap();
     let mut runners = HashMap::new();
     runners.insert(
@@ -1961,7 +1961,7 @@ async fn stale_stop_signal_does_not_interrupt_a_later_row() {
         &state_path,
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
-    ))
+    )).await
     .unwrap();
     gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
     let thread = "imessage:self:me@icloud.com";
@@ -2014,7 +2014,7 @@ async fn stop_targets_the_current_row_ahead_of_retained_failures() {
         &state_path,
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
-    ))
+    )).await
     .unwrap();
     let thread = "imessage:self:me@icloud.com";
     let make_job = |row_id, inbound_id, text: &str| Job {
@@ -2093,7 +2093,7 @@ async fn failed_stop_history_write_retries_before_later_rows() {
         &state_path,
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
-    ))
+    )).await
     .unwrap();
     gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
     gateway.ctx.history.lock().unwrap().execute_batch_for_test(
@@ -2157,7 +2157,7 @@ async fn retried_stop_acknowledgement_does_not_cancel_the_next_request() {
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
     );
-    let mut gateway = Gateway::new(config.clone()).unwrap();
+    let mut gateway = Gateway::new(config.clone()).await.unwrap();
     let mut runners = HashMap::new();
     runners.insert(
         AgentBackend::Codex,
@@ -2222,7 +2222,7 @@ async fn retried_stop_acknowledgement_does_not_cancel_the_next_request() {
 
     let restart_calls = Arc::new(Mutex::new(Vec::new()));
     let restart_release = Arc::new(tokio::sync::Notify::new());
-    let mut restarted = Gateway::new(config).unwrap();
+    let mut restarted = Gateway::new(config).await.unwrap();
     let mut restart_runners = HashMap::new();
     restart_runners.insert(
         AgentBackend::Codex,
@@ -2287,7 +2287,7 @@ async fn failed_stop_acknowledgement_does_not_block_later_messages() {
         &state_path,
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
-    ))
+    )).await
     .unwrap();
     gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
     *gateway.ctx.send_failures_remaining.lock().unwrap() = 1;
@@ -2331,7 +2331,7 @@ async fn primary_delivery_is_scoped_validated_and_non_fatal_when_missing_or_inva
     cfg.telegram_bot_token = Some("secret".to_string());
     cfg.telegram_allow_user_ids = vec![7];
 
-    let missing = GatewayGroup::new(cfg.clone()).unwrap();
+    let missing = GatewayGroup::new(cfg.clone()).await.unwrap();
     assert!(missing
         .primary_destination()
         .unwrap_err()
@@ -2342,7 +2342,7 @@ async fn primary_delivery_is_scoped_validated_and_non_fatal_when_missing_or_inva
         channel: "telegram".to_string(),
         target: "99".to_string(),
     });
-    let invalid = GatewayGroup::new(cfg.clone()).unwrap();
+    let invalid = GatewayGroup::new(cfg.clone()).await.unwrap();
     assert!(invalid
         .primary_destination()
         .unwrap_err()
@@ -2353,7 +2353,7 @@ async fn primary_delivery_is_scoped_validated_and_non_fatal_when_missing_or_inva
         channel: "telegram".to_string(),
         target: "7:42".to_string(),
     });
-    let valid = GatewayGroup::new(cfg).unwrap();
+    let valid = GatewayGroup::new(cfg).await.unwrap();
     let destination = valid.deliver_primary("scheduled result").await.unwrap();
     assert_eq!(
         destination,
@@ -2392,7 +2392,7 @@ async fn scheduled_telegram_retry_resumes_at_the_first_unsent_rich_chunk() {
     cfg.channel = "telegram".to_string();
     cfg.telegram_bot_token = Some("secret".to_string());
     cfg.telegram_allow_user_ids = vec![7];
-    let gateway = Gateway::new(cfg).unwrap();
+    let gateway = Gateway::new(cfg).await.unwrap();
     *gateway.ctx.send_failure_after.lock().unwrap() = Some(1);
     let checkpoints = Arc::new(Mutex::new(Vec::new()));
     let text = "x".repeat(crate::telegram::TEXT_LIMIT + 1);
@@ -2456,7 +2456,7 @@ async fn ordinary_telegram_retry_resumes_at_the_first_unsent_chunk() {
     cfg.allow_from.clear();
     cfg.telegram_bot_token = Some("secret".to_string());
     cfg.telegram_allow_user_ids = vec![7];
-    let mut gateway = Gateway::new(cfg).unwrap();
+    let mut gateway = Gateway::new(cfg).await.unwrap();
     gateway.ctx.runners = Arc::new(fake_runners(Arc::new(Mutex::new(Vec::new()))));
     *gateway.ctx.send_failure_after.lock().unwrap() = Some(1);
     let prompt = "x".repeat(crate::telegram::TEXT_LIMIT + 1);
@@ -2509,7 +2509,7 @@ async fn missing_primary_disables_new_schedules_without_stopping_gateway() {
         ),
     )
     .unwrap();
-    let group = GatewayGroup::new(cfg.clone()).unwrap();
+    let group = GatewayGroup::new(cfg.clone()).await.unwrap();
     group.gateways[0]
         .store
         .lock()
@@ -2585,7 +2585,7 @@ async fn group_shutdown_waits_for_an_in_flight_channel_worker() {
         &state_path,
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
-    ))
+    )).await
     .unwrap();
     group.gateways[0].ctx.runners = Arc::new(fake_runners_with_hook(
         Arc::new(Mutex::new(Vec::new())),
@@ -2636,7 +2636,7 @@ async fn route_agent_draft_requires_bound_approval_before_atomic_install() {
         assistant_dir.to_str().unwrap(),
     );
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let mut gateway = Gateway::new(cfg.clone()).unwrap();
+    let mut gateway = Gateway::new(cfg.clone()).await.unwrap();
     let inbound = message(
         1,
         "+15551234567",
@@ -2718,7 +2718,7 @@ async fn concurrent_origins_present_only_their_isolated_drafts() {
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
     );
-    let gateway = Gateway::new(cfg.clone()).unwrap();
+    let gateway = Gateway::new(cfg.clone()).await.unwrap();
     let first_origin = AnswerOrigin {
         channel: "imessage".to_string(),
         thread_key: "imessage:dm:111".to_string(),
@@ -2790,7 +2790,7 @@ async fn failed_run_and_recovered_outbound_still_reconcile_origin_drafts() {
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
     );
-    let mut gateway = Gateway::new(cfg.clone()).unwrap();
+    let mut gateway = Gateway::new(cfg.clone()).await.unwrap();
     let failed_message = message(1, "+15551234567", "+15551234567", false, "draft then fail");
     let (thread, _) = gateway.channel.accept(&failed_message).unwrap();
     let directory = crate::drafts::origin_directory(
@@ -2898,7 +2898,7 @@ async fn failed_draft_delivery_retries_after_restart_before_expiry() {
     )
     .unwrap();
     let job = draft_test_job(1, "+15551234567", origin);
-    let gateway = Gateway::new(cfg.clone()).unwrap();
+    let gateway = Gateway::new(cfg.clone()).await.unwrap();
     *gateway.ctx.send_failures_remaining.lock().unwrap() =
         gateway.ctx.channel.delivery_semantics().retry_attempts;
 
@@ -2909,7 +2909,7 @@ async fn failed_draft_delivery_retries_after_restart_before_expiry() {
         .contains("retry before expiry"));
     drop(gateway);
 
-    let restarted = Gateway::new(cfg).unwrap();
+    let restarted = Gateway::new(cfg).await.unwrap();
     present_drafts(&restarted.ctx, &job, &directory)
         .await
         .unwrap();
@@ -2956,6 +2956,9 @@ fn test_config(state_path: &str, _sessions_dir: &str, assistant_dir: &str) -> Co
         telegram_bot_token: None,
         telegram_allow_user_ids: Vec::new(),
         telegram_allow_chat_ids: Vec::new(),
+        simplex_port: None,
+            simplex_display_name: "push".to_string(),
+        simplex_allow_contact_ids: Vec::new(),
         voice_openai_api_key: None,
         voice_name: crate::config::DEFAULT_VOICE_NAME.to_string(),
         agent: "codex".to_string(),

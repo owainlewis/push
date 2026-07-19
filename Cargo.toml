@@ -27,6 +27,7 @@ chrono = "0.4"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 pulldown-cmark = { version = "0.13", default-features = false }
+simploxide-client = "0.13"
 
 [profile.release]
 strip = true

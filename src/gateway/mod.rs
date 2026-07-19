@@ -113,7 +113,7 @@ struct WorkerState {
 }
 
 impl GatewayGroup {
-    pub fn new(cfg: Config) -> Result<Self> {
+    pub async fn new(cfg: Config) -> Result<Self> {
         let enabled = cfg.enabled_channel_kinds()?;
         let store = Arc::new(Mutex::new(Store::open(&cfg.state_path)?));
         let history = Arc::new(Mutex::new(History::open(&cfg.database_path).with_context(
@@ -123,14 +123,17 @@ impl GatewayGroup {
         let audit_lock = Arc::new(Mutex::new(()));
         let mut gateways = Vec::with_capacity(enabled.len());
         for kind in enabled {
-            gateways.push(Gateway::new_with_shared(
-                cfg.clone(),
-                kind,
-                store.clone(),
-                history.clone(),
-                runners.clone(),
-                audit_lock.clone(),
-            )?);
+            gateways.push(
+                Gateway::new_with_shared(
+                    cfg.clone(),
+                    kind,
+                    store.clone(),
+                    history.clone(),
+                    runners.clone(),
+                    audit_lock.clone(),
+                )
+                .await?,
+            );
         }
         Ok(Self {
             gateways,
@@ -326,7 +329,7 @@ where
 
 impl Gateway {
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn new(cfg: Config) -> Result<Self> {
+    pub async fn new(cfg: Config) -> Result<Self> {
         let store = Arc::new(Mutex::new(Store::open(&cfg.state_path)?));
         let history = Arc::new(Mutex::new(History::open(&cfg.database_path).with_context(
             || format!("open canonical history database {}", cfg.database_path),
@@ -337,10 +340,10 @@ impl Gateway {
             .into_iter()
             .next()
             .context("at least one reply channel must be enabled")?;
-        Self::new_with_shared(cfg, kind, store, history, runners, Arc::new(Mutex::new(())))
+        Self::new_with_shared(cfg, kind, store, history, runners, Arc::new(Mutex::new(()))).await
     }
 
-    fn new_with_shared(
+    async fn new_with_shared(
         cfg: Config,
         kind: ChannelKind,
         store: Arc<Mutex<Store>>,
@@ -350,7 +353,7 @@ impl Gateway {
     ) -> Result<Self> {
         crate::drafts::prepare(&cfg).context("prepare agent job draft boundary")?;
         let ack = Arc::new(Mutex::new(AckState::default()));
-        let channel = Channel::new_for(&cfg, kind)?;
+        let channel = Channel::new_for(&cfg, kind).await?;
         let audit = Arc::new(AuditLog::with_lock(
             cfg.audit_log_path.clone(),
             cfg.audit_log_content,
@@ -457,6 +460,7 @@ impl Gateway {
         // its queue, and exit. Then wait, bounded by a grace period.
         self.queues.clear();
         self.drain_workers().await;
+        self.channel.shutdown().await;
         info!("shut down cleanly");
         Ok(())
     }

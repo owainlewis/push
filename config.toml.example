@@ -12,6 +12,17 @@ bot_token = "replace-with-the-token-from-BotFather"
 # Replace this once with your numeric Telegram user ID.
 allow_user_ids = [123456789]
 
+# SimpleX is also supported (channel = "simplex"). Requires an already-running
+# `simplex-chat` daemon Push connects to — it does not spawn/manage one:
+#   simplex-chat -d ~/.simplex/push -p 5225 -y --create-bot-display-name push
+# `display_name` below MUST exactly match the daemon's pre-created profile
+# name, or Push's connection silently attaches to the wrong user. See
+# src/simplex.rs's module doc for why.
+# [simplex]
+# port = 5225
+# display_name = "push"
+# allow_contact_ids = [123456789]
+
 # Required when a job contains an enabled cron trigger.
 # [primary_delivery]
 # channel = "telegram"

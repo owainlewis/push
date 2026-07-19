@@ -20,6 +20,7 @@ mod markdown;
 mod pi;
 mod rehydration;
 mod restart;
+mod simplex;
 mod soul;
 mod store;
 mod telegram;
@@ -94,14 +95,18 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Doctor => doctor::doctor(&args.config_path),
+        Command::Doctor => doctor::doctor(&args.config_path).await,
         Command::Restart => restart::gateway(),
         Command::Job(command) => run_job_command(&args.config_path, command).await,
         Command::Run => {
             let cfg = load_run_config(&args.config_path)?;
-            doctor::preflight(&cfg).context("preflight")?;
+            doctor::preflight(&cfg).await.context("preflight")?;
             report_invalid_jobs(&cfg)?;
-            gateway::GatewayGroup::new(cfg).context("init")?.run().await
+            gateway::GatewayGroup::new(cfg)
+                .await
+                .context("init")?
+                .run()
+                .await
         }
     }
 }
@@ -530,8 +535,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn invalid_jobs_are_non_fatal_during_gateway_startup() {
+    #[tokio::test]
+    async fn invalid_jobs_are_non_fatal_during_gateway_startup() {
         let jobs_dir = temp_dir("invalid-startup-jobs");
         std::fs::write(jobs_dir.join("invalid.md"), "not a runbook").unwrap();
         let state_path = temp_path("invalid-startup-state");
@@ -545,7 +550,7 @@ mod tests {
         cfg.jobs_dir = jobs_dir.to_string_lossy().to_string();
 
         assert!(report_invalid_jobs(&cfg).is_ok());
-        assert!(gateway::Gateway::new(cfg).is_ok());
+        assert!(gateway::Gateway::new(cfg).await.is_ok());
     }
 
     #[test]
