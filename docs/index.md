@@ -6,33 +6,109 @@ hide:
 
 <div class="push-hero" markdown>
 
-<span class="push-kicker">Always-on assistant infrastructure</span>
+<span class="push-kicker">Open source · Runs on your machine</span>
 
-# Your coding agent, always within reach.
+# Your coding agent has a phone now.
 
-Message and schedule Claude Code, Codex, or Pi from iMessage, Telegram, or
-Slack, with durable state on your machine.
+Text Claude Code, Codex, or Pi from iMessage, Telegram, or Slack. Ask for work,
+walk away, and get the result back in chat.
 
 <p class="push-actions">
-  <a class="md-button md-button--primary" href="getting-started/">Get started</a>
-  <a class="md-button" href="architecture/">See how it works&nbsp; →</a>
+  <a class="md-button md-button--primary" href="getting-started/">Build your assistant</a>
+  <a class="md-button" href="#what-can-it-do">See what it can do&nbsp; ↓</a>
 </p>
 
 <p class="push-install">curl -fsSL https://raw.githubusercontent.com/owainlewis/push/main/install.sh | sh</p>
 
 <ul class="push-signals">
-  <li><strong>One small binary</strong>No new agent runtime</li>
-  <li><strong>Your machine</strong>State stays under your control</li>
-  <li><strong>No inbound port</strong>Private by default</li>
+  <li><strong>Use your existing agent</strong>No new model stack</li>
+  <li><strong>Your machine</strong>Push state stays under your control</li>
+  <li><strong>Beyond the terminal</strong>Available from the chat apps you use</li>
 </ul>
 
 </div>
 
+<section class="push-demo" markdown>
+
+<div class="push-section-heading" markdown>
+
+<span class="push-section-label">A task in Push</span>
+
+## Send the work. Get on with your day.
+
+Push carries the conversation between your phone and the coding agent already
+set up on your machine.
+
+</div>
+
+<div class="push-chat" markdown="0">
+<div class="push-chat-bar"><span>Telegram</span><span><i></i> Push is online</span></div>
+<div class="push-chat-body">
+<div class="push-chat-message push-chat-message--user"><span>You · 08:42</span><p>Check why the nightly build failed and send me the likely fix.</p></div>
+<div class="push-chat-status"><span>Push → Codex</span><span>Working on your machine</span></div>
+<div class="push-chat-message push-chat-message--assistant"><span>Push · 08:47</span><p>The failure comes from an expired fixture in the integration suite. I prepared the change and ran the focused tests: 18 passed.</p></div>
+</div>
+<div class="push-chat-footer"><span>Delivered in chat</span><span>Conversation saved</span></div>
+</div>
+
+</section>
+
+<section class="push-outcomes" id="what-can-it-do" markdown>
+
+<span class="push-section-label">Your personal assistant</span>
+
+## Useful work, without reopening the terminal.
+
+<div class="push-use-cases" markdown="0">
+  <article>
+    <span>01</span>
+    <h3>Start work from anywhere</h3>
+    <p>Ask your agent to inspect a repository, investigate a failure, or prepare an update while you are away from your desk.</p>
+  </article>
+  <article>
+    <span>02</span>
+    <h3>Wake up to a useful brief</h3>
+    <p>Run Markdown routines every morning, evening, or week and deliver the result automatically to your primary chat.</p>
+  </article>
+  <article>
+    <span>03</span>
+    <h3>Keep the conversation moving</h3>
+    <p>Continue across messages with durable history instead of rebuilding context every time you open a terminal.</p>
+  </article>
+  <article>
+    <span>04</span>
+    <h3>Bring the tools you trust</h3>
+    <p>Use the MCP servers, skills, permissions, and integrations already configured in Claude Code, Codex, or Pi.</p>
+  </article>
+</div>
+
+</section>
+
+<section class="push-model" markdown>
+
+<span class="push-section-label">How it works</span>
+
+## Your agent leaves the terminal.
+
+<div class="push-steps" markdown="0">
+  <div><span>01</span><strong>Send a message</strong><p>Use iMessage, Telegram, or Slack from wherever you are.</p></div>
+  <div><span>02</span><strong>Your agent does the work</strong><p>Push restores the conversation and hands the task to your chosen coding agent.</p></div>
+  <div><span>03</span><strong>The answer comes back</strong><p>Push saves the result and delivers it to the same chat.</p></div>
+</div>
+
+Push is a gateway, not another agent runtime. You own a Git-versioned assistant
+repository containing identity, context, and jobs. Your backend continues to
+own models, tools, MCP servers, skills, permissions, and authentication.
+
+[See the full architecture](architecture.md){ .push-inline-link }
+
+</section>
+
 <section class="push-paths" markdown>
 
-<span class="push-section-label">Start here</span>
+<span class="push-section-label">Set up Push</span>
 
-## Choose a path
+## Build your assistant
 
 <div class="grid cards" markdown>
 
@@ -82,29 +158,6 @@ Slack, with durable state on your machine.
     [:octicons-arrow-right-24: Operations guide](services.md)
 
 </div>
-
-</section>
-
-<section class="push-model" markdown>
-
-<span class="push-section-label">The mental model</span>
-
-## A gateway, not another agent.
-
-```text
-message or cron trigger
-        ↓
-Push: filter → route → persist → schedule → deliver
-        ↓
-Claude Code, Codex, or Pi: reason → use tools → produce result
-```
-
-You own one Git-versioned assistant repository containing identity, context,
-jobs, and optional project skills. Push owns channels, history, scheduling,
-approvals, security, and delivery. The selected backend owns models, skill and
-tool execution, global skills, MCP servers, permissions, and authentication.
-That boundary keeps Push small and lets the backend change without rebuilding
-your assistant.
 
 </section>
 
