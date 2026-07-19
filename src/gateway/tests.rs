@@ -380,6 +380,46 @@ fn empty_text_dropped() {
     );
 }
 
+#[tokio::test]
+async fn delivery_fails_when_channel_produces_no_chunks() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("empty-delivery-sessions");
+    let assistant_dir = temp_path("empty-delivery-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let gateway = Gateway::new(test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    ))
+    .unwrap();
+
+    assert!(!reply_to(&gateway.ctx, "me@icloud.com", " \t\n ").await);
+    assert!(gateway.ctx.sent_replies.lock().unwrap().is_empty());
+
+    let checkpoints = Arc::new(Mutex::new(Vec::new()));
+    let scheduled = scheduled_reply_to(
+        &gateway.ctx,
+        "me@icloud.com",
+        " \t\n ",
+        0,
+        jobs::DeliveryProgress::accepting_for_test(checkpoints.clone()),
+    )
+    .await;
+    assert!(!scheduled.delivered);
+    assert_eq!(scheduled.next_chunk, 0);
+    assert_eq!(
+        scheduled.error.as_deref(),
+        Some("channel produced no outbound chunks")
+    );
+    assert!(checkpoints.lock().unwrap().is_empty());
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
 #[test]
 fn group_chat_dropped_even_from_allowlisted_sender() {
     assert_eq!(
@@ -394,7 +434,7 @@ fn ack_does_not_advance_past_in_flight_row() {
     ack.in_flight.insert(10);
     ack.completed.insert(11);
 
-    assert_eq!(ack.advance_to(), None);
+    assert_eq!(ack.next_cursor(), None);
 }
 
 #[test]
@@ -405,8 +445,11 @@ fn ack_advances_completed_rows_below_first_in_flight() {
     ack.completed.insert(11);
     ack.completed.insert(13);
 
-    assert_eq!(ack.advance_to(), Some(11));
+    assert_eq!(ack.next_cursor(), Some(11));
     assert!(ack.completed.contains(&13));
+    assert!(ack.completed.contains(&10));
+    assert!(ack.completed.contains(&11));
+    ack.mark_persisted(11);
     assert!(!ack.completed.contains(&10));
     assert!(!ack.completed.contains(&11));
 }
@@ -417,8 +460,55 @@ fn ack_advances_to_highest_completed_when_nothing_in_flight() {
     ack.completed.insert(10);
     ack.completed.insert(14);
 
-    assert_eq!(ack.advance_to(), Some(14));
+    assert_eq!(ack.next_cursor(), Some(14));
+    assert_eq!(ack.completed.len(), 2);
+    ack.mark_persisted(14);
     assert!(ack.completed.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cursor_save_failure_retries_without_rerunning_or_redelivering() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("cursor-retry-sessions");
+    let assistant_dir = temp_path("cursor-retry-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut gateway = Gateway::new(test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    ))
+    .unwrap();
+    gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+    gateway
+        .store
+        .lock()
+        .unwrap()
+        .fail_next_cursor_save_for_test();
+    let inbound = message(1, "me@icloud.com", "", true, "hello");
+
+    gateway.tick_fake(vec![inbound.clone()]).await;
+    gateway.queues.clear();
+    gateway.drain_workers().await;
+
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(gateway.ctx.sent_replies.lock().unwrap().len(), 1);
+    assert_eq!(gateway.store.lock().unwrap().cursor("imessage"), 0);
+    assert!(gateway.ack.lock().unwrap().completed.contains(&1));
+
+    gateway.tick_fake(vec![inbound]).await;
+
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(gateway.ctx.sent_replies.lock().unwrap().len(), 1);
+    assert_eq!(gateway.store.lock().unwrap().cursor("imessage"), 1);
+    assert!(gateway.ack.lock().unwrap().completed.is_empty());
+    assert_eq!(Store::open(&state_path).unwrap().cursor("imessage"), 1);
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
 }
 
 #[test]
@@ -470,7 +560,7 @@ async fn session_lookup_failure_completes_in_flight_row() {
     );
     let ack = ack.lock().unwrap();
     assert!(ack.in_flight.is_empty());
-    assert!(ack.completed.is_empty());
+    assert_eq!(ack.completed.iter().copied().collect::<Vec<_>>(), [10, 11]);
 
     let _ = std::fs::remove_file(blocker);
 }

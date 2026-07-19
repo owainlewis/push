@@ -10,7 +10,7 @@ use serde_json::Value;
 use tokio::process::Command;
 use uuid::Uuid;
 
-use crate::agent::{Request, RunError, RunOutput};
+use crate::agent::{final_reply, Request, RunError, RunOutput};
 
 /// Runner invokes `codex exec` in non-interactive mode.
 pub struct Runner {
@@ -107,14 +107,8 @@ impl Runner {
                 "codex did not report a session id".to_string(),
             ));
         }
-        if reply.trim().is_empty() {
-            return Err(RunError::Failed(
-                "codex exited without a final reply".to_string(),
-            ));
-        }
-
         Ok(RunOutput {
-            reply: reply.trim().to_string(),
+            reply: final_reply("codex", &reply)?,
             session_id,
         })
     }
@@ -350,6 +344,22 @@ mod tests {
         assert_arg_pair(&args, "-c", &developer_instructions("assistant identity"));
         assert_eq!(args.last().unwrap(), "continue");
         assert!(!args.contains(&"-C".to_string()));
+    }
+
+    #[tokio::test]
+    async fn rejects_successful_whitespace_only_reply() {
+        let args_path = temp_path("codex-empty-reply-args");
+        let work_dir = temp_dir("codex-empty-reply-work");
+        let script = codex_success_script(&args_path, " \t\n ", Some("codex-thread"));
+        let cli = FakeCli::new("codex", &script);
+        let runner = runner(cli.bin());
+
+        let error = runner
+            .run(request(work_dir.to_str().unwrap()), Duration::from_secs(5))
+            .await
+            .unwrap_err();
+
+        assert_failed(error, "codex exited without a final reply");
     }
 
     #[tokio::test]

@@ -32,6 +32,17 @@ pub enum RunError {
     Failed(String),
 }
 
+pub(crate) fn final_reply(backend: &str, reply: &str) -> Result<String, RunError> {
+    let reply = reply.trim();
+    if reply.is_empty() {
+        Err(RunError::Failed(format!(
+            "{backend} exited without a final reply"
+        )))
+    } else {
+        Ok(reply.to_string())
+    }
+}
+
 pub enum Runner {
     Claude(claude::Runner),
     Codex(codex::Runner),

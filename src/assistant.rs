@@ -377,11 +377,14 @@ fn create_file(path: &Path, contents: &str) -> Result<()> {
                 .with_context(|| format!("sync {}", path.display()))
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            if fs::symlink_metadata(path)?.file_type().is_file() {
+            let file_type = fs::symlink_metadata(path)?.file_type();
+            if file_type.is_file()
+                || (file_type.is_symlink() && fs::metadata(path).is_ok_and(|meta| meta.is_file()))
+            {
                 Ok(())
             } else {
                 bail!(
-                    "cannot create file {} because it is not a regular file",
+                    "cannot create file {} because it is not a regular file or a symlink to one",
                     path.display()
                 )
             }
@@ -608,6 +611,32 @@ mod tests {
             CLAUDE
         );
         assert_eq!(fs::read_to_string(config).unwrap(), config_before);
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repeat_initialization_preserves_symlinked_claude_instructions() {
+        use std::os::unix::fs::symlink;
+
+        let parent = temp_dir("assistant-reinit-claude-symlink");
+        let target = parent.join("assistant");
+        let config = parent.join("push.toml");
+        init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap();
+        fs::remove_file(target.join("CLAUDE.md")).unwrap();
+        symlink("AGENTS.md", target.join("CLAUDE.md")).unwrap();
+
+        let result = init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap();
+
+        assert!(!result.git_initialized);
+        assert!(fs::symlink_metadata(target.join("CLAUDE.md"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_link(target.join("CLAUDE.md")).unwrap(),
+            Path::new("AGENTS.md")
+        );
         let _ = fs::remove_dir_all(parent);
     }
 

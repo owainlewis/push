@@ -32,6 +32,8 @@ struct State {
 pub struct Store {
     path: PathBuf,
     state: State,
+    #[cfg(test)]
+    cursor_save_failures_remaining: usize,
 }
 
 impl Store {
@@ -42,7 +44,12 @@ impl Store {
             Err(e) if e.kind() == ErrorKind::NotFound => State::default(),
             Err(e) => return Err(anyhow!("read state {path}: {e}")),
         };
-        Ok(Store { path: p, state })
+        Ok(Store {
+            path: p,
+            state,
+            #[cfg(test)]
+            cursor_save_failures_remaining: 0,
+        })
     }
 
     #[cfg(test)]
@@ -69,11 +76,33 @@ impl Store {
         if self.has_cursor(channel) && id <= self.cursor(channel) {
             return Ok(());
         }
-        self.state.cursors.insert(channel.to_string(), id);
+        let previous_cursor = self.state.cursors.insert(channel.to_string(), id);
+        let previous_last_row_id = self.state.last_row_id;
         if channel == "imessage" {
             self.state.last_row_id = id;
         }
-        self.save()
+        #[cfg(test)]
+        let result = if self.cursor_save_failures_remaining > 0 {
+            self.cursor_save_failures_remaining -= 1;
+            Err(anyhow!("injected cursor save failure"))
+        } else {
+            self.save()
+        };
+        #[cfg(not(test))]
+        let result = self.save();
+        if let Err(error) = result {
+            match previous_cursor {
+                Some(previous) => {
+                    self.state.cursors.insert(channel.to_string(), previous);
+                }
+                None => {
+                    self.state.cursors.remove(channel);
+                }
+            }
+            self.state.last_row_id = previous_last_row_id;
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Returns the agent session id for a thread, creating one if needed. The
@@ -175,6 +204,11 @@ impl Store {
     #[cfg(test)]
     pub fn set_path_for_test(&mut self, path: PathBuf) {
         self.path = path;
+    }
+
+    #[cfg(test)]
+    pub fn fail_next_cursor_save_for_test(&mut self) {
+        self.cursor_save_failures_remaining += 1;
     }
 }
 

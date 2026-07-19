@@ -30,6 +30,7 @@ const MAX_DELIVERY_WORKERS: usize = 4;
 const DELIVERY_CLAIM_LEASE_MS: i64 = 15 * 60 * 1_000;
 // Include worker queueing and sending while leaving a five-minute lease margin.
 const DELIVERY_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const SCHEDULER_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1220,6 +1221,14 @@ impl Ledger {
         Ok(())
     }
 
+    fn release_delivery_claims(&mut self, owner: &str) -> Result<usize> {
+        Ok(self.conn.execute(
+            "UPDATE job_runs SET delivery_claim_owner = NULL, delivery_claimed_at_ms = NULL
+             WHERE delivery_state = 'pending' AND delivery_claim_owner = ?1",
+            [owner],
+        )?)
+    }
+
     #[cfg(test)]
     fn state(&self, id: &str) -> String {
         self.conn
@@ -1469,28 +1478,67 @@ impl Scheduler {
     }
 
     pub async fn shutdown(&mut self) {
-        while let Some(result) = self.workers.join_next().await {
-            match result {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    tracing::error!("scheduled worker failed during shutdown: {error:#}")
+        self.shutdown_with_grace(SCHEDULER_SHUTDOWN_GRACE).await;
+    }
+
+    async fn shutdown_with_grace(&mut self, grace: Duration) {
+        let deadline = tokio::time::sleep(grace);
+        tokio::pin!(deadline);
+        let mut grace_expired = false;
+        while !self.workers.is_empty() || !self.delivery_workers.is_empty() {
+            tokio::select! {
+                _ = &mut deadline => {
+                    grace_expired = true;
+                    break;
                 }
-                Err(error) => {
-                    tracing::error!("scheduled worker task failed during shutdown: {error}")
+                result = self.workers.join_next(), if !self.workers.is_empty() => {
+                    log_shutdown_result("scheduled worker", result);
+                }
+                result = self.delivery_workers.join_next(), if !self.delivery_workers.is_empty() => {
+                    log_shutdown_result("delivery worker", result);
                 }
             }
         }
-        while let Some(result) = self.delivery_workers.join_next().await {
-            match result {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    tracing::error!("delivery worker failed during shutdown: {error:#}")
-                }
+        if grace_expired {
+            let execution_count = self.workers.len();
+            let delivery_count = self.delivery_workers.len();
+            self.workers.abort_all();
+            self.delivery_workers.abort_all();
+            tracing::warn!(
+                execution_count,
+                delivery_count,
+                "scheduler shutdown grace expired; remaining workers were aborted"
+            );
+            while self.workers.join_next().await.is_some() {}
+            while self.delivery_workers.join_next().await.is_some() {}
+        }
+        self.recover_interrupted_work();
+    }
+
+    fn recover_interrupted_work(&mut self) {
+        let mut ledger = match self.ledger.take() {
+            Some(ledger) => ledger,
+            None => match Ledger::open(&self.cfg.database_path) {
+                Ok(ledger) => ledger,
                 Err(error) => {
-                    tracing::error!("delivery task failed during shutdown: {error}")
+                    tracing::error!("open job ledger during scheduler shutdown: {error:#}");
+                    return;
                 }
+            },
+        };
+        if let Err(error) = ledger.recover_stale_runs(&self.cfg, now_ms()) {
+            tracing::error!("recover interrupted scheduled runs during shutdown: {error:#}");
+        }
+        match ledger.release_delivery_claims(&self.delivery_owner) {
+            Ok(count) if count > 0 => {
+                tracing::info!(count, "released interrupted scheduled delivery claims")
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::error!("release scheduled delivery claims during shutdown: {error:#}")
             }
         }
+        self.ledger = Some(ledger);
     }
 
     fn report_catalog_errors(&mut self, catalog: &Catalog) {
@@ -1518,6 +1566,17 @@ impl Scheduler {
         }
         self.validation_errors = current;
         self.validation_initialized = true;
+    }
+}
+
+fn log_shutdown_result(
+    worker: &str,
+    result: Option<std::result::Result<Result<()>, tokio::task::JoinError>>,
+) {
+    match result {
+        Some(Ok(Ok(()))) | None => {}
+        Some(Ok(Err(error))) => tracing::error!("{worker} failed during shutdown: {error:#}"),
+        Some(Err(error)) => tracing::error!("{worker} task failed during shutdown: {error}"),
     }
 }
 
@@ -2705,6 +2764,125 @@ mod tests {
 
         release.notify_one();
         scheduler.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn scheduler_shutdown_is_bounded_and_recovers_interrupted_claims() {
+        let jobs_dir = temp_dir("bounded-shutdown-jobs");
+        let workdir = temp_dir("bounded-shutdown-work");
+        let database = temp_path("bounded-shutdown-db");
+        let run_dir = temp_dir("bounded-shutdown-run");
+        let slow = FakeCli::new("codex", "#!/bin/sh\nsleep 10\n");
+        write_job(&jobs_dir, "execution", &scheduled_job(&workdir, true));
+        write_job(&jobs_dir, "delivery", &scheduled_job(&workdir, false));
+        let mut cfg = cfg(&jobs_dir, &database, &run_dir);
+        cfg.agent_commands.codex = slow.bin();
+        let catalog = Catalog::load(&cfg).unwrap();
+        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let execution_id = ledger
+            .enqueue_scheduled(
+                &catalog.jobs["execution"],
+                &catalog.jobs["execution"].triggers[0],
+                60_000,
+                60_000,
+                "telegram",
+                "7",
+            )
+            .unwrap();
+        let delivery_id = ledger
+            .enqueue_scheduled(
+                &catalog.jobs["delivery"],
+                &catalog.jobs["delivery"].triggers[0],
+                60_000,
+                60_000,
+                "telegram",
+                "7",
+            )
+            .unwrap();
+        ledger
+            .conn
+            .execute(
+                "UPDATE job_runs SET state = 'skipped_overlap', finished_at_ms = 60000,
+                    delivery_state = 'pending' WHERE id = ?1",
+                [&delivery_id],
+            )
+            .unwrap();
+        drop(ledger);
+
+        let checkpoint_saved = Arc::new(tokio::sync::Notify::new());
+        let captured = checkpoint_saved.clone();
+        let mut scheduler = Scheduler::new(cfg.clone(), "telegram".into(), "7".into());
+        scheduler
+            .tick(60_000, move |_, _, _, _, progress| {
+                let checkpoint_saved = captured.clone();
+                async move {
+                    progress.checkpoint(2).await.unwrap();
+                    checkpoint_saved.notify_one();
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    DeliveryAttempt::delivered(3)
+                }
+            })
+            .await
+            .unwrap();
+        checkpoint_saved.notified().await;
+        for _ in 0..100 {
+            if Ledger::open(&cfg.database_path)
+                .unwrap()
+                .state(&execution_id)
+                == "running"
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            Ledger::open(&cfg.database_path)
+                .unwrap()
+                .state(&execution_id),
+            "running"
+        );
+
+        let started = Instant::now();
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            scheduler.shutdown_with_grace(Duration::from_millis(20)),
+        )
+        .await
+        .expect("scheduler shutdown must finish within its grace plus cleanup");
+        assert!(started.elapsed() < Duration::from_millis(500));
+
+        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let execution = ledger.runs(Some("execution")).unwrap().remove(0);
+        assert_eq!(execution.state, "failed");
+        assert_eq!(execution.delivery_state, "pending");
+        assert!(execution
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("executor exited before completion")));
+        let delivery = ledger
+            .conn
+            .query_row(
+                "SELECT delivery_state, delivery_attempts, delivery_chunk_index,
+                        delivery_claim_owner, delivery_claimed_at_ms
+                 FROM job_runs WHERE id = ?1",
+                [&delivery_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(delivery, ("pending".to_string(), 0, 2, None, None));
+        let reclaimed = ledger
+            .claim_due_deliveries(60_001, "restart-worker", 10)
+            .unwrap();
+        assert!(reclaimed.iter().any(|row| row.id == delivery_id));
+        assert!(reclaimed.iter().any(|row| row.id == execution_id));
     }
 
     #[tokio::test]

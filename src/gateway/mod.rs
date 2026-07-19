@@ -520,6 +520,7 @@ impl Gateway {
 
     async fn process_messages(&mut self, msgs: Vec<RawMessage>) {
         self.recover_closed_workers();
+        persist_cursor(&self.store, &self.ack, self.channel.id());
         let since = self.store.lock().unwrap().cursor(self.channel.id());
         for m in &msgs {
             if m.row_id <= since {
@@ -1002,6 +1003,10 @@ fn audit(ctx: &Ctx, event: AuditEvent) {
 
 async fn reply_to(ctx: &Ctx, target: &str, text: &str) -> bool {
     let chunks = ctx.channel.outbound_chunks(text, &ctx.reply_marker);
+    if chunks.is_empty() {
+        error!("send error to {target}: channel produced no outbound chunks");
+        return false;
+    }
     for chunk in chunks {
         if let Err(error) = send_reply_chunk(ctx, target, &chunk).await {
             error!("send error to {target}: {error}");
@@ -1071,6 +1076,11 @@ async fn scheduled_reply_to(
     let chunks = ctx
         .channel
         .scheduled_outbound_chunks(text, &ctx.reply_marker);
+    if chunks.is_empty() {
+        let error = "channel produced no outbound chunks";
+        tracing::error!("scheduled send error to {target}: {error}");
+        return jobs::DeliveryAttempt::failed(0, error.to_string());
+    }
     if start_chunk >= chunks.len() {
         return jobs::DeliveryAttempt::delivered(chunks.len());
     }
@@ -1096,16 +1106,22 @@ async fn send_scheduled_chunk(
 }
 
 fn complete_row(store: &Arc<Mutex<Store>>, ack: &Arc<Mutex<AckState>>, channel: &str, row_id: i64) {
-    let next = {
+    {
         let mut ack = ack.lock().unwrap();
         ack.in_flight.remove(&row_id);
         ack.completed.insert(row_id);
-        ack.advance_to()
+    }
+    persist_cursor(store, ack, channel);
+}
+
+fn persist_cursor(store: &Arc<Mutex<Store>>, ack: &Arc<Mutex<AckState>>, channel: &str) {
+    let mut ack = ack.lock().unwrap();
+    let Some(row_id) = ack.next_cursor() else {
+        return;
     };
-    if let Some(row_id) = next {
-        if let Err(e) = store.lock().unwrap().set_cursor(channel, row_id) {
-            error!("save state error: {e}");
-        }
+    match store.lock().unwrap().set_cursor(channel, row_id) {
+        Ok(()) => ack.mark_persisted(row_id),
+        Err(e) => error!("save state error: {e}"),
     }
 }
 
@@ -1121,16 +1137,17 @@ impl AckState {
         self.in_flight.contains(&row_id) || self.completed.contains(&row_id)
     }
 
-    fn advance_to(&mut self) -> Option<i64> {
+    fn next_cursor(&self) -> Option<i64> {
         let limit = self.in_flight.first().copied().unwrap_or(i64::MAX);
-        let next = self
-            .completed
+        self.completed
             .iter()
             .copied()
             .take_while(|id| *id < limit)
-            .max()?;
-        self.completed.retain(|id| *id > next);
-        Some(next)
+            .max()
+    }
+
+    fn mark_persisted(&mut self, row_id: i64) {
+        self.completed.retain(|id| *id > row_id);
     }
 }
 

@@ -8,16 +8,29 @@ hide:
 
 <span class="push-kicker">Always-on assistant infrastructure</span>
 
-# Put your coding agent on call.
+# Your coding agent, always within reach.
 
-Push turns Claude Code, Codex, or Pi into a personal assistant you can message and
-schedule. It runs on your machine, keeps durable state, and sends results back
-to iMessage, Telegram, or Slack.
+Message and schedule Claude Code, Codex, or Pi from iMessage, Telegram, or
+Slack, with durable state on your machine.
 
-[Get started](getting-started.md){ .md-button .md-button--primary }
-[See the architecture](architecture.md){ .md-button }
+<p class="push-actions">
+  <a class="md-button md-button--primary" href="getting-started/">Get started</a>
+  <a class="md-button" href="architecture/">See how it works&nbsp; →</a>
+</p>
+
+<p class="push-install">curl -fsSL https://raw.githubusercontent.com/owainlewis/push/main/install.sh | sh</p>
+
+<ul class="push-signals">
+  <li><strong>One small binary</strong>No new agent runtime</li>
+  <li><strong>Your machine</strong>State stays under your control</li>
+  <li><strong>No inbound port</strong>Private by default</li>
+</ul>
 
 </div>
+
+<section class="push-paths" markdown>
+
+<span class="push-section-label">Start here</span>
 
 ## Choose a path
 
@@ -36,8 +49,8 @@ to iMessage, Telegram, or Slack.
 
     ---
 
-    Set up private [iMessage](channels/imessage.md) or
-    [Telegram](telegram.md), or [Slack](slack.md) conversations with narrow sender allowlists.
+    Set up private [iMessage](channels/imessage.md), [Telegram](telegram.md), or
+    [Slack](slack.md) conversations with narrow sender allowlists.
 
     [:octicons-arrow-right-24: Configure channels](configuration.md#channels)
 
@@ -70,9 +83,13 @@ to iMessage, Telegram, or Slack.
 
 </div>
 
-## The mental model
+</section>
 
-Push is a gateway, not an agent runtime:
+<section class="push-model" markdown>
+
+<span class="push-section-label">The mental model</span>
+
+## A gateway, not another agent.
 
 ```text
 message or cron trigger
@@ -89,7 +106,13 @@ tool execution, global skills, MCP servers, permissions, and authentication.
 That boundary keeps Push small and lets the backend change without rebuilding
 your assistant.
 
-## Documentation map
+</section>
+
+<section class="push-doc-map" markdown>
+
+<span class="push-section-label">Documentation</span>
+
+## Find what you need
 
 | If you need to… | Read… |
 | --- | --- |
@@ -107,3 +130,5 @@ your assistant.
     These pages are generated directly from the Markdown in the repository's
     `docs/` directory. If the site and source ever disagree, update the
     Markdown source and rebuild the site.
+
+</section>

@@ -7,7 +7,7 @@ use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use crate::agent::{Request, RunError, RunOutput};
+use crate::agent::{final_reply, Request, RunError, RunOutput};
 
 /// Runner invokes `pi` in non-interactive JSON event mode.
 pub struct Runner {
@@ -85,14 +85,9 @@ impl Runner {
             ));
         }
         let reply = parsed.reply.unwrap_or_default();
-        if reply.trim().is_empty() {
-            return Err(RunError::Failed(
-                "pi exited without a final assistant reply".to_string(),
-            ));
-        }
 
         Ok(RunOutput {
-            reply: reply.trim().to_string(),
+            reply: final_reply("pi", &reply)?,
             session_id: req.is_new.then_some(parsed.session_id).flatten(),
         })
     }
@@ -371,7 +366,15 @@ mod tests {
             ),
             (
                 "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"session\",\"id\":\"id\"}'\n",
-                "without a final assistant reply",
+                "without a final reply",
+            ),
+            (
+                r#"#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"type":"session","id":"id"}'
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":" \t "}],"stopReason":"stop"}}'
+"#,
+                "without a final reply",
             ),
         ] {
             let work_dir = temp_dir("pi-bad-output");

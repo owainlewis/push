@@ -41,6 +41,9 @@ jobs:
       - name: Test installer
         run: bash tests/install.sh
 
+      - name: Test release tooling
+        run: bash tests/release-version.sh
+
       - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt,clippy
