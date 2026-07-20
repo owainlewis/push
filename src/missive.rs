@@ -256,12 +256,17 @@ impl Missive {
                 tokio::time::sleep(remaining).await;
             }
         }
+        let request_started = Instant::now();
+        *previous = Some(request_started);
         let mut response = request().send().await.context("call Missive API")?;
-        *previous = Some(Instant::now());
         if response.status() == StatusCode::TOO_MANY_REQUESTS {
-            tokio::time::sleep(retry_after(response.headers())).await;
-            response = request().send().await.context("retry Missive API")?;
+            let delay = retry_after(response.headers()).max(
+                self.request_interval
+                    .saturating_sub(request_started.elapsed()),
+            );
+            tokio::time::sleep(delay).await;
             *previous = Some(Instant::now());
+            response = request().send().await.context("retry Missive API")?;
         }
         Ok(response)
     }
@@ -373,11 +378,14 @@ fn retry_after(headers: &reqwest::header::HeaderMap) -> Duration {
 pub fn split_text(text: &str) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current = String::new();
+    let mut current_chars = 0;
     for character in text.chars() {
-        if current.chars().count() == MAX_POST_CHARS {
+        if current_chars == MAX_POST_CHARS {
             chunks.push(std::mem::take(&mut current));
+            current_chars = 0;
         }
         current.push(character);
+        current_chars += 1;
     }
     if !current.is_empty() || chunks.is_empty() {
         chunks.push(current);
@@ -518,10 +526,36 @@ mod tests {
             http_json("201 Created", r#"{"posts":{"id":"post-1"}}"#),
         ])
         .await;
-        let missive = client(api);
+        let mut missive = client(api);
+        missive.request_interval = Duration::from_millis(20);
+        let started = Instant::now();
 
         missive.send_message("conv-1", "hello").await.unwrap();
 
+        assert!(started.elapsed() >= Duration::from_millis(20));
+        assert_eq!(requests.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn failed_requests_still_advance_the_rate_gate() {
+        let (api, requests) = server(vec![
+            String::new(),
+            http_json("201 Created", r#"{"posts":{"id":"post-1"}}"#),
+        ])
+        .await;
+        let mut missive = client(api);
+        missive.request_interval = Duration::from_millis(30);
+
+        assert!(missive.send_message("conv-1", "first").await.is_err());
+        assert!(tokio::time::timeout(
+            Duration::from_millis(5),
+            missive.send_message("conv-1", "second")
+        )
+        .await
+        .is_err());
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        missive.send_message("conv-1", "second").await.unwrap();
         assert_eq!(requests.lock().unwrap().len(), 2);
     }
 
