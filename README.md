@@ -24,7 +24,7 @@ https://pushassistant.com/
 Good coding agents should be useful beyond an open terminal.
 
 Push makes the agent you already trust available through iMessage, Telegram,
-or Slack. It can answer a message, continue a conversation, or run a Markdown
+Slack, or Missive. It can answer a message, continue a conversation, or run a Markdown
 job on a schedule. Give it clear context and a useful set of jobs, and it can
 act as your AI chief of staff. Your assistant files stay in a Git repository
 you own.
@@ -46,7 +46,7 @@ schedules to Claude Code, Codex, or Pi.
 
 ```mermaid
 flowchart TD
-    Message["Message from you<br/>iMessage · Telegram · Slack"]
+    Message["Message from you<br/>iMessage · Telegram · Slack · Missive"]
     Jobs["Scheduled<br/>Markdown jobs"]
     Repo["Assistant repository<br/>SOUL.md · context · jobs"]
     Push["Push<br/>message gateway · scheduler · history"]
@@ -63,7 +63,7 @@ flowchart TD
 ## What it does
 
 - Runs on your Mac or Linux machine
-- Connects private iMessage, Telegram, and Slack chats
+- Connects private iMessage, Telegram, Slack, and Missive conversations
 - Uses your existing Claude Code, Codex, or Pi setup
 - Keeps conversations and job history between restarts
 - Runs one-off or scheduled Markdown jobs
