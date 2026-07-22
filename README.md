@@ -19,6 +19,10 @@ Keep the agent and its data on your own machine.
 
 https://pushassistant.com/
 
+## Examples
+
+Email triage: https://github.com/owainlewis/push/blob/main/examples/assistant/jobs/daily-inbox-triage.md
+
 ## The mission
 
 Good coding agents should be useful beyond an open terminal.
