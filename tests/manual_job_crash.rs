@@ -41,7 +41,9 @@ printf '%s\n' '{"type":"thread.started","thread_id":"cli-thread"}'
 
     let list = run_cli(binary, &config, &["job", "list"]);
     assert!(list.status.success());
-    assert!(stdout(&list).contains("crash-test\tvalid\tcodex"));
+    let list_output = stdout(&list);
+    assert!(list_output.contains("NAME        STATUS  BACKEND / ERROR"));
+    assert!(list_output.contains("crash-test  valid   codex"));
 
     let show = run_cli(binary, &config, &["job", "show", "crash-test"]);
     assert!(show.status.success());
@@ -77,6 +79,29 @@ printf '%s\n' '{"type":"thread.started","thread_id":"cli-thread"}'
     assert!(!invalid.status.success());
     assert!(stdout(&invalid).contains("INVALID\tinvalid"));
     assert!(String::from_utf8_lossy(&invalid.stderr).contains("1 invalid job(s)"));
+
+    let list_with_invalid = run_cli(binary, &config, &["job", "list"]);
+    assert!(list_with_invalid.status.success());
+    assert!(stdout(&list_with_invalid)
+        .lines()
+        .any(|line| line.ends_with("invalid  job must start with a +++ frontmatter delimiter")));
+
+    std::fs::write(jobs.join("bad\nname.md"), "not a runbook").unwrap();
+    let list_with_malformed_name = run_cli(binary, &config, &["job", "list"]);
+    assert!(list_with_malformed_name.status.success());
+    let malformed_output = stdout(&list_with_malformed_name);
+    assert_eq!(malformed_output.lines().count(), 5);
+    assert!(malformed_output.contains(r"bad\nname.md  invalid  "));
+
+    std::fs::remove_file(jobs.join("crash-test.md")).unwrap();
+    std::fs::remove_file(jobs.join("invalid.md")).unwrap();
+    std::fs::remove_file(jobs.join("bad\nname.md")).unwrap();
+    let empty_list = run_cli(binary, &config, &["job", "list"]);
+    assert!(empty_list.status.success());
+    assert_eq!(
+        stdout(&empty_list),
+        "NAME  STATUS  BACKEND / ERROR\n----  ------  ---------------\n"
+    );
 
     let _ = std::fs::remove_dir_all(root);
 }
