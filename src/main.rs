@@ -258,12 +258,7 @@ async fn run_job_command(config_path: &str, command: JobCommand) -> Result<()> {
         }
         JobCommand::List => {
             let catalog = jobs::Catalog::load(&cfg)?;
-            for job in catalog.jobs.values() {
-                println!("{}\tvalid\t{}", job.name, job.backend.as_str());
-            }
-            for error in catalog.errors {
-                println!("{}\tinvalid\t{}", error.name, error.message);
-            }
+            print!("{}", jobs::format_catalog_table(&catalog));
             Ok(())
         }
         JobCommand::Show(name) => {

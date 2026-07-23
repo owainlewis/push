@@ -1978,6 +1978,51 @@ fn bound_result(value: &str) -> String {
     format!("{}{SUFFIX}", &value[..boundary])
 }
 
+pub fn format_catalog_table(catalog: &Catalog) -> String {
+    let header = ("NAME", "STATUS", "DETAIL");
+    let mut rows: Vec<(String, &'static str, String)> = catalog
+        .jobs
+        .values()
+        .map(|job| (job.name.clone(), "valid", job.backend.as_str().to_string()))
+        .collect();
+    rows.extend(
+        catalog
+            .errors
+            .iter()
+            .map(|error| (error.name.clone(), "invalid", error.message.clone())),
+    );
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+
+    if rows.is_empty() {
+        return "no jobs installed\n".to_string();
+    }
+
+    let name_width = rows
+        .iter()
+        .map(|row| row.0.len())
+        .chain(std::iter::once(header.0.len()))
+        .max()
+        .unwrap_or(header.0.len());
+    let status_width = rows
+        .iter()
+        .map(|row| row.1.len())
+        .chain(std::iter::once(header.1.len()))
+        .max()
+        .unwrap_or(header.1.len());
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{:name_width$}  {:status_width$}  {}\n",
+        header.0, header.1, header.2
+    ));
+    for (name, status, detail) in rows {
+        out.push_str(&format!(
+            "{name:name_width$}  {status:status_width$}  {detail}\n"
+        ));
+    }
+    out
+}
+
 pub fn format_job(job: &Job) -> String {
     let evals = if job.evals.is_empty() {
         "none".to_string()

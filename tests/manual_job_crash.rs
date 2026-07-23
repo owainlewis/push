@@ -41,7 +41,9 @@ printf '%s\n' '{"type":"thread.started","thread_id":"cli-thread"}'
 
     let list = run_cli(binary, &config, &["job", "list"]);
     assert!(list.status.success());
-    assert!(stdout(&list).contains("crash-test\tvalid\tcodex"));
+    assert!(stdout(&list).contains("crash-test"));
+    assert!(stdout(&list).contains("valid"));
+    assert!(stdout(&list).contains("codex"));
 
     let show = run_cli(binary, &config, &["job", "show", "crash-test"]);
     assert!(show.status.success());
