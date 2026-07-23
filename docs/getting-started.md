@@ -1,7 +1,7 @@
 # Quickstart
 
 This guide gets one private chat working with one coding-agent backend. Start
-with Telegram or Slack on macOS or Linux, or iMessage on macOS. Add multiple channels,
+with Telegram, Slack, or Missive on macOS or Linux, or iMessage on macOS. Add multiple channels,
 routes, and scheduled jobs after the basic path passes `push doctor`.
 
 ## 1. Check the requirements
@@ -9,7 +9,7 @@ routes, and scheduled jobs after the basic path passes `push doctor`.
 You need:
 
 - Apple Silicon macOS or x86_64 Linux for the current prebuilt release
-- macOS for iMessage, or macOS/Linux for Telegram or Slack
+- macOS for iMessage, or macOS/Linux for Telegram, Slack, or Missive
 - Claude Code, Codex, or Pi installed, authenticated, and runnable by the same
   user that will run Push
 - Git for the assistant repository created by `push init`
@@ -141,6 +141,27 @@ practical structure for identity, context, shared skills, jobs, and evals.
 
     Read the [Slack guide](slack.md) for app setup, scopes, token storage,
     filtering, and recovery behavior.
+
+=== "Missive"
+
+    Create a Missive API token, choose one private conversation, and collect
+    the stable IDs for that conversation and the trusted comment author. Put
+    the token in the service environment, then edit `~/.push/config.toml`:
+
+    ```toml
+    channel = "missive"
+    agent = "codex"
+    assistant_root = "~/Code/assistant"
+    poll_interval = "3s"
+
+    [missive]
+    conversation_ids = ["00000000-0000-0000-0000-000000000000"]
+    allow_user_ids = ["00000000-0000-0000-0000-000000000000"]
+    ```
+
+    Set `MISSIVE_API_TOKEN` for the service. Read the [Missive
+    guide](missive.md) for the comments-only command model, rate limit,
+    allowlists, and first-run behavior.
 
 Replace `codex` with `claude` for Claude Code or `pi` for Pi. Pi must already
 have a configured model provider or authenticated account for the service user.

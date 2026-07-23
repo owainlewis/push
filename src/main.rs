@@ -1,6 +1,6 @@
-//! push is a tiny iMessage gateway for personal assistant agents. It polls the
-//! macOS Messages database for new messages, sends each through a configured
-//! coding-agent backend, and texts the reply back.
+//! Push is a small messaging gateway for personal assistant agents. It accepts
+//! allowlisted messages from built-in channels, sends each through a configured
+//! coding-agent backend, and returns the reply to the originating conversation.
 
 mod agent;
 mod approval;
@@ -16,6 +16,7 @@ mod history;
 mod imessage;
 mod jobs;
 mod markdown;
+mod missive;
 mod pi;
 mod rehydration;
 mod restart;
@@ -824,6 +825,11 @@ app_token = "xapp-config"
 bot_token = "xoxb-config"
 allow_user_ids = ["U1"]
 
+[missive]
+api_token = "missive-config"
+conversation_ids = ["conv-1"]
+allow_user_ids = ["user-1"]
+
 [voice]
 openai_api_key = "config-openai-key"
 name = "onyx"
@@ -840,6 +846,9 @@ name = "onyx"
         assert_eq!(cfg.slack_app_token.as_deref(), Some("xapp-config"));
         assert_eq!(cfg.slack_bot_token.as_deref(), Some("xoxb-config"));
         assert_eq!(cfg.slack_allow_user_ids, ["U1"]);
+        assert_eq!(cfg.missive_api_token.as_deref(), Some("missive-config"));
+        assert_eq!(cfg.missive_conversation_ids, ["conv-1"]);
+        assert_eq!(cfg.missive_allow_user_ids, ["user-1"]);
         assert_eq!(
             cfg.voice_openai_api_key.as_deref(),
             Some("config-openai-key")
@@ -867,6 +876,43 @@ allow_user_ids = []
             .to_string()
             .contains("set slack.allow_user_ids to explicit Slack user IDs"));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn missive_config_requires_explicit_allowlists_and_safe_polling() {
+        let missing_users = temp_path("missive-user-allowlist-config");
+        std::fs::write(
+            &missing_users,
+            r#"channel = "missive"
+[missive]
+conversation_ids = ["conversation-1"]
+allow_user_ids = []
+"#,
+        )
+        .unwrap();
+        let error = Config::load(missing_users.to_str().unwrap()).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("set missive.allow_user_ids to explicit Missive user IDs"));
+
+        let fast_polling = temp_path("missive-poll-rate-config");
+        std::fs::write(
+            &fast_polling,
+            r#"channel = "missive"
+poll_interval = "1s"
+[missive]
+conversation_ids = ["conversation-1", "conversation-2"]
+allow_user_ids = ["user-1"]
+"#,
+        )
+        .unwrap();
+        let error = Config::load(fast_polling.to_str().unwrap()).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("one second per Missive conversation"));
+
+        let _ = std::fs::remove_file(missing_users);
+        let _ = std::fs::remove_file(fast_polling);
     }
 
     #[test]

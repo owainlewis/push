@@ -102,6 +102,21 @@ Slack requires both `SLACK_APP_TOKEN` and `SLACK_BOT_TOKEN`, or the matching
 `slack.app_token` and `slack.bot_token` values in the private config. At least
 one exact Slack member ID is required. See the [Slack guide](slack.md).
 
+### Missive
+
+```toml
+poll_interval = "3s"
+
+[missive]
+conversation_ids = ["00000000-0000-0000-0000-000000000000"]
+allow_user_ids = ["00000000-0000-0000-0000-000000000000"]
+```
+
+Missive requires `MISSIVE_API_TOKEN`, or `missive.api_token` in a private
+config. Both an explicit conversation allowlist and an explicit user allowlist
+are required. The polling interval must allow at least one second per configured
+conversation. See the [Missive guide](missive.md).
+
 Telegram voice notes are optional. Configure the shared voice provider with:
 
 ```toml
@@ -122,7 +137,7 @@ See [Voice Messages](telegram.md#voice-messages).
 Use `channels` instead of `channel`:
 
 ```toml
-channels = ["imessage", "telegram", "slack"]
+channels = ["imessage", "telegram", "slack", "missive"]
 agent = "codex"
 
 [imessage]
@@ -145,6 +160,7 @@ provider does not stop the other.
 must be enabled and the target must appear in that channel's allowlist.
 Telegram topic targets use `"<chat-id>:<topic-id>"`.
 Slack primary targets use an allowlisted member ID such as `U012ABCDEF`.
+Missive primary targets use an allowlisted conversation ID.
 
 ## Routing
 
@@ -174,6 +190,7 @@ Thread keys are:
 - `telegram:dm:<chat-id>`
 - `telegram:dm:<chat-id>:topic:<topic-id>`
 - `slack:dm:<workspace-id>:<dm-channel-id>`
+- `missive:conversation:<conversation-id>`
 
 ## Agent permissions
 
@@ -217,6 +234,14 @@ requests. Review [permissions and security](security.md) before enabling jobs.
 | `slack.app_token` | `SLACK_APP_TOKEN` fallback | App-level Socket Mode token with `connections:write` |
 | `slack.bot_token` | `SLACK_BOT_TOKEN` fallback | Bot token used for `auth.test`, replies, and progress |
 | `slack.allow_user_ids` | `[]` | Trusted stable Slack member IDs |
+
+### Missive
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `missive.api_token` | `MISSIVE_API_TOKEN` fallback | API token; the environment value is used when this is omitted |
+| `missive.conversation_ids` | `[]` | Exact conversations whose comments Push may poll and reply to |
+| `missive.allow_user_ids` | `[]` | Trusted stable Missive comment-author IDs |
 
 ### Voice
 

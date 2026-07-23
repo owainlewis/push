@@ -11,7 +11,7 @@ hide:
 # Build your own 24/7 AI chief of staff.
 
 Push turns Claude Code, Codex, or Pi into an always-on personal assistant.
-Message it from iMessage, Telegram, or Slack, give it recurring jobs, and let it
+Message it from iMessage, Telegram, Slack, or Missive, give it recurring jobs, and let it
 handle work in the background.
 
 <p class="push-actions">
@@ -92,7 +92,7 @@ sends the result back when the work is done.
 ## One lightweight bridge. Your agent does the work.
 
 <div class="push-steps" markdown="0">
-  <div><span>01</span><strong>Message your assistant</strong><p>Use iMessage, Telegram, or Slack from wherever you are.</p></div>
+  <div><span>01</span><strong>Message your assistant</strong><p>Use iMessage, Telegram, Slack, or Missive from wherever you are.</p></div>
   <div><span>02</span><strong>Push starts the work</strong><p>It restores the conversation and runs your chosen coding agent in the background.</p></div>
   <div><span>03</span><strong>Get the result</strong><p>Push saves the response and sends it back to the same chat.</p></div>
 </div>
@@ -128,8 +128,9 @@ finish without an operator.
 
     ---
 
-    Set up private [iMessage](channels/imessage.md), [Telegram](telegram.md), or
-    [Slack](slack.md) conversations with narrow sender allowlists.
+    Set up private [iMessage](channels/imessage.md), [Telegram](telegram.md),
+    [Slack](slack.md), or [Missive](missive.md) conversations with narrow
+    sender allowlists.
 
     [:octicons-arrow-right-24: Configure channels](configuration.md#channels)
 
