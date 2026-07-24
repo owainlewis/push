@@ -14,10 +14,25 @@ pub struct Runner {
     pub bin: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RunMode {
+    Configured,
+    Unattended,
+    Evaluator,
+}
+
 impl Runner {
     /// Executes one turn and returns Pi's final reply plus its stable session id.
     pub async fn run(&self, req: Request<'_>, timeout: Duration) -> Result<RunOutput, RunError> {
-        self.run_with_mode(req, timeout, false).await
+        self.run_with_mode(req, timeout, RunMode::Configured).await
+    }
+
+    pub async fn run_unattended(
+        &self,
+        req: Request<'_>,
+        timeout: Duration,
+    ) -> Result<RunOutput, RunError> {
+        self.run_with_mode(req, timeout, RunMode::Unattended).await
     }
 
     pub async fn run_evaluator(
@@ -25,17 +40,17 @@ impl Runner {
         req: Request<'_>,
         timeout: Duration,
     ) -> Result<RunOutput, RunError> {
-        self.run_with_mode(req, timeout, true).await
+        self.run_with_mode(req, timeout, RunMode::Evaluator).await
     }
 
     async fn run_with_mode(
         &self,
         req: Request<'_>,
         timeout: Duration,
-        evaluator: bool,
+        mode: RunMode,
     ) -> Result<RunOutput, RunError> {
         let attempt = crate::agent::output_with_retry(|| {
-            let mut cmd = self.command(&req, evaluator);
+            let mut cmd = self.command(&req, mode);
             let prompt = req.prompt.as_bytes().to_vec();
             async move {
                 let mut child = cmd.spawn()?;
@@ -92,16 +107,19 @@ impl Runner {
         })
     }
 
-    fn command(&self, req: &Request<'_>, evaluator: bool) -> Command {
+    fn command(&self, req: &Request<'_>, mode: RunMode) -> Command {
         let mut cmd = Command::new(&self.bin);
         cmd.arg("--print").arg("--mode").arg("json");
-        if evaluator {
-            cmd.arg("--no-tools")
+        if mode == RunMode::Evaluator {
+            cmd.arg("--no-approve")
+                .arg("--no-tools")
                 .arg("--no-extensions")
                 .arg("--no-skills")
                 .arg("--no-prompt-templates")
                 .arg("--no-context-files")
                 .arg("--no-session");
+        } else if mode == RunMode::Unattended {
+            cmd.arg("--approve");
         }
         if !req.instructions.trim().is_empty() {
             cmd.arg("--append-system-prompt")
@@ -252,10 +270,32 @@ mod tests {
         let args = read_args(&args_path);
         assert_arg_pair(&args, "--mode", "json");
         assert_arg_pair(&args, "--append-system-prompt", "SOUL instructions");
+        assert!(!args.contains(&"--approve".to_string()));
+        assert!(!args.contains(&"--no-approve".to_string()));
         assert!(!args.contains(&"--tools".to_string()));
         assert!(!args.contains(&"--session".to_string()));
         assert_eq!(read_prompt(&args_path), "user message");
         assert!(!args.contains(&"user message".to_string()));
+    }
+
+    #[tokio::test]
+    async fn unattended_run_trusts_project_local_resources() {
+        let args_path = temp_path("pi-unattended-args");
+        let work_dir = temp_dir("pi-unattended-work");
+        let cli = FakeCli::new("pi", &success_script(&args_path, "pi-session", "done"));
+        let runner = Runner { bin: cli.bin() };
+
+        runner
+            .run_unattended(
+                request(work_dir.to_str().unwrap(), true),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+
+        let args = read_args(&args_path);
+        assert!(args.iter().any(|arg| arg == "--approve"));
+        assert!(!args.iter().any(|arg| arg == "--no-approve"));
     }
 
     #[tokio::test]
@@ -455,6 +495,8 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         assert!(args.iter().any(|arg| arg == "--no-extensions"));
         assert!(args.iter().any(|arg| arg == "--no-skills"));
         assert!(args.iter().any(|arg| arg == "--no-context-files"));
+        assert!(args.iter().any(|arg| arg == "--no-approve"));
+        assert!(!args.iter().any(|arg| arg == "--approve"));
     }
 
     fn success_script(args_path: &std::path::Path, session: &str, reply: &str) -> String {

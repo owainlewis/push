@@ -139,7 +139,7 @@ impl Runner {
         match self {
             Runner::Claude(r) => r.run_unattended(req, timeout).await,
             Runner::Codex(r) => r.run_unattended(req, timeout).await,
-            Runner::Pi(r) => r.run(req, timeout).await,
+            Runner::Pi(r) => r.run_unattended(req, timeout).await,
             #[cfg(test)]
             Runner::Fake(r) => r.run(req, timeout).await,
         }
