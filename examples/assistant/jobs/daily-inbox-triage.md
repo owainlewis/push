@@ -1,15 +1,14 @@
 +++
 version = 1
 timeout = "10m"
-workdir = "/Users/owainlewis/.cos/work"
-backend = "codex"
 
 [[triggers]]
 id = "daily-evening"
 kind = "cron"
 schedule = "30 17 * * *"
 timezone = "Europe/London"
-enabled = true
+# Enable only after configuring Gmail tools and a primary delivery route.
+enabled = false
 +++
 
 Triage Owain's Gmail inbox from the last 48 hours and apply the existing
