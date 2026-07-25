@@ -17,7 +17,7 @@ pub struct Runner {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RunMode {
     Configured,
-    Unattended,
+    Unattended { trust_project_resources: bool },
     Evaluator,
 }
 
@@ -31,8 +31,16 @@ impl Runner {
         &self,
         req: Request<'_>,
         timeout: Duration,
+        trust_project_resources: bool,
     ) -> Result<RunOutput, RunError> {
-        self.run_with_mode(req, timeout, RunMode::Unattended).await
+        self.run_with_mode(
+            req,
+            timeout,
+            RunMode::Unattended {
+                trust_project_resources,
+            },
+        )
+        .await
     }
 
     pub async fn run_evaluator(
@@ -118,8 +126,15 @@ impl Runner {
                 .arg("--no-prompt-templates")
                 .arg("--no-context-files")
                 .arg("--no-session");
-        } else if mode == RunMode::Unattended {
-            cmd.arg("--approve");
+        } else if let RunMode::Unattended {
+            trust_project_resources,
+        } = mode
+        {
+            cmd.arg(if trust_project_resources {
+                "--approve"
+            } else {
+                "--no-approve"
+            });
         }
         if !req.instructions.trim().is_empty() {
             cmd.arg("--append-system-prompt")
@@ -289,6 +304,7 @@ mod tests {
             .run_unattended(
                 request(work_dir.to_str().unwrap(), true),
                 Duration::from_secs(5),
+                true,
             )
             .await
             .unwrap();
@@ -296,6 +312,27 @@ mod tests {
         let args = read_args(&args_path);
         assert!(args.iter().any(|arg| arg == "--approve"));
         assert!(!args.iter().any(|arg| arg == "--no-approve"));
+    }
+
+    #[tokio::test]
+    async fn unattended_run_does_not_trust_external_project_resources() {
+        let args_path = temp_path("pi-unattended-untrusted-args");
+        let work_dir = temp_dir("pi-unattended-untrusted-work");
+        let cli = FakeCli::new("pi", &success_script(&args_path, "pi-session", "done"));
+        let runner = Runner { bin: cli.bin() };
+
+        runner
+            .run_unattended(
+                request(work_dir.to_str().unwrap(), true),
+                Duration::from_secs(5),
+                false,
+            )
+            .await
+            .unwrap();
+
+        let args = read_args(&args_path);
+        assert!(args.iter().any(|arg| arg == "--no-approve"));
+        assert!(!args.iter().any(|arg| arg == "--approve"));
     }
 
     #[tokio::test]

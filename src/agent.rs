@@ -135,11 +135,15 @@ impl Runner {
         &self,
         req: Request<'_>,
         timeout: Duration,
+        trust_project_resources: bool,
     ) -> Result<RunOutput, RunError> {
         match self {
             Runner::Claude(r) => r.run_unattended(req, timeout).await,
             Runner::Codex(r) => r.run_unattended(req, timeout).await,
-            Runner::Pi(r) => r.run_unattended(req, timeout).await,
+            Runner::Pi(r) => {
+                r.run_unattended(req, timeout, trust_project_resources)
+                    .await
+            }
             #[cfg(test)]
             Runner::Fake(r) => r.run(req, timeout).await,
         }

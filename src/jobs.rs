@@ -1941,6 +1941,8 @@ async fn execute(cfg: &Config, job: &Job) -> std::result::Result<String, Executi
     let runner = Runner::for_backend(job.backend, cfg);
     let session_id = runner.initial_session_id();
     let workdir = job.workdir.to_string_lossy().to_string();
+    let trust_project_resources = std::fs::canonicalize(&cfg.assistant_root)
+        .is_ok_and(|assistant_root| assistant_root == current_workdir);
     cfg.backend_context_dir()
         .map_err(|error| ExecutionError::Failed(format!("prepare assistant context: {error}")))?;
     let request = Request {
@@ -1957,7 +1959,10 @@ async fn execute(cfg: &Config, job: &Job) -> std::result::Result<String, Executi
         workdir,
         humantime::format_duration(job.timeout),
     );
-    match runner.run_unattended(request, job.timeout).await {
+    match runner
+        .run_unattended(request, job.timeout, trust_project_resources)
+        .await
+    {
         Ok(output) => Ok(output.reply),
         Err(RunError::Timeout) => Err(ExecutionError::Timeout),
         Err(RunError::Failed(error) | RunError::SessionMissing(error)) => {
@@ -4009,10 +4014,40 @@ printf '%s\n' ok > {}
         let args = std::fs::read_to_string(&args_path).unwrap();
         assert!(args.lines().any(|line| line == "--mode"));
         assert!(args.lines().any(|line| line == "json"));
+        assert!(args.lines().any(|line| line == "--no-approve"));
+        assert!(!args.lines().any(|line| line == "--approve"));
         assert!(!args.lines().any(|line| line == "--session"));
         assert_eq!(
             std::fs::read_to_string(format!("{}.stdin", args_path.to_string_lossy())).unwrap(),
             "\nInspect this directory.\n"
         );
+    }
+
+    #[tokio::test]
+    async fn pi_job_trusts_resources_only_at_the_assistant_root() {
+        let jobs_dir = temp_dir("jobs-pi-assistant-root");
+        let database = temp_path("jobs-pi-assistant-root-db");
+        let run_dir = temp_dir("jobs-pi-assistant-root-run");
+        let args_path = temp_path("jobs-pi-assistant-root-args");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\ncat > {}.stdin\nprintf '%s\\n' '{{\"type\":\"session\",\"id\":\"pi-job-session\"}}'\nprintf '%s\\n' '{{\"type\":\"message_end\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"pi result\"}}],\"stopReason\":\"stop\"}}}}'\n",
+            sh_arg(&args_path),
+            sh_arg(&args_path)
+        );
+        let cli = FakeCli::new("pi", &script);
+        let mut cfg = cfg(&jobs_dir, &database, &run_dir);
+        cfg.agent_commands.pi = cli.bin();
+        let runbook =
+            "+++\nversion = 1\ntimeout = \"5s\"\nbackend = \"pi\"\n+++\n\nInspect this directory.\n";
+        write_job(&jobs_dir, "pi-job", runbook);
+
+        let output = run_manual(&cfg, Catalog::load_named(&cfg, "pi-job").unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(output.1, "pi result");
+        let args = std::fs::read_to_string(args_path).unwrap();
+        assert!(args.lines().any(|line| line == "--approve"));
+        assert!(!args.lines().any(|line| line == "--no-approve"));
     }
 }
