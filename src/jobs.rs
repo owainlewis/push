@@ -1985,17 +1985,24 @@ fn bound_result(value: &str) -> String {
 
 pub fn format_catalog_table(catalog: &Catalog) -> String {
     let header = ("NAME", "STATUS", "DETAIL");
-    let mut rows: Vec<(String, &'static str, String)> = catalog
+    let mut rows: Vec<(String, String, String)> = catalog
         .jobs
         .values()
-        .map(|job| (job.name.clone(), "valid", job.backend.as_str().to_string()))
+        .map(|job| {
+            (
+                escape_table_cell(&job.name),
+                "valid".to_string(),
+                escape_table_cell(job.backend.as_str()),
+            )
+        })
         .collect();
-    rows.extend(
-        catalog
-            .errors
-            .iter()
-            .map(|error| (error.name.clone(), "invalid", error.message.clone())),
-    );
+    rows.extend(catalog.errors.iter().map(|error| {
+        (
+            escape_table_cell(&error.name),
+            "invalid".to_string(),
+            escape_table_cell(&error.message),
+        )
+    }));
     rows.sort_by(|a, b| a.0.cmp(&b.0));
 
     if rows.is_empty() {
@@ -2026,6 +2033,18 @@ pub fn format_catalog_table(catalog: &Catalog) -> String {
         ));
     }
     out
+}
+
+fn escape_table_cell(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_control() {
+            escaped.extend(character.escape_default());
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
 }
 
 pub fn format_job(job: &Job) -> String {
@@ -2295,6 +2314,26 @@ mod tests {
         );
         assert_eq!(job.triggers.len(), 1);
         assert!(!job.triggers[0].enabled);
+    }
+
+    #[test]
+    fn catalog_table_escapes_control_characters_in_invalid_jobs() {
+        let catalog = Catalog {
+            jobs: BTreeMap::new(),
+            errors: vec![JobError {
+                name: "bad\nname.md".to_string(),
+                path: PathBuf::from("bad\nname.md"),
+                message: "invalid \"value\" at café\\repo\n\u{1b}[31mred".to_string(),
+            }],
+        };
+
+        let table = format_catalog_table(&catalog);
+
+        assert_eq!(table.lines().count(), 2);
+        assert!(table.contains(r"bad\nname.md"));
+        assert!(table.contains("invalid \"value\" at café\\repo"));
+        assert!(table.contains(r"\n\u{1b}[31mred"));
+        assert!(!table.contains('\u{1b}'));
     }
 
     #[test]
