@@ -83,15 +83,23 @@ impl AuditLog {
 
     pub fn record(&self, event: AuditEvent) -> Result<()> {
         let _guard = self.lock.lock().unwrap();
-        if let Some(parent) = Path::new(&self.path).parent() {
+        let path = Path::new(&self.path);
+        if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create audit log directory {}", parent.display()))?;
         }
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(path)
             .with_context(|| format!("open audit log {}", self.path))?;
+        crate::util::restrict_permissions(path, false)
+            .with_context(|| format!("restrict audit log permissions {}", self.path))?;
         serde_json::to_writer(&mut file, &event).context("write audit event")?;
         use std::io::Write;
         writeln!(file).context("finish audit event")?;
@@ -378,6 +386,29 @@ mod tests {
         let event: AuditEvent = serde_json::from_str(raw.trim()).unwrap();
         assert_eq!(event.event, "message_completed");
         assert_eq!(event.row_id, Some(42));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_file_is_private_and_existing_permissions_are_repaired() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = temp_path("audit-permissions");
+        let audit = AuditLog::new(path.to_string_lossy().to_string(), false, "imessage");
+        audit.record(audit.completed(1, "created")).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        audit.record(audit.completed(2, "repaired")).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
 
         let _ = std::fs::remove_file(path);
     }

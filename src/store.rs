@@ -2,7 +2,8 @@
 //! conversation thread to the active agent backend session.
 
 use std::collections::HashMap;
-use std::io::ErrorKind;
+use std::fs::OpenOptions;
+use std::io::{ErrorKind, Write};
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
@@ -40,7 +41,11 @@ impl Store {
     pub fn open(path: &str) -> Result<Store> {
         let p = PathBuf::from(path);
         let state = match std::fs::read_to_string(&p) {
-            Ok(s) => serde_json::from_str(&s).with_context(|| format!("parse state {path}"))?,
+            Ok(s) => {
+                crate::util::restrict_permissions(&p, false)
+                    .with_context(|| format!("restrict state permissions {path}"))?;
+                serde_json::from_str(&s).with_context(|| format!("parse state {path}"))?
+            }
             Err(e) if e.kind() == ErrorKind::NotFound => State::default(),
             Err(e) => return Err(anyhow!("read state {path}: {e}")),
         };
@@ -194,11 +199,29 @@ impl Store {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir).context("create state dir")?;
         }
-        let tmp = self.path.with_extension("tmp");
+        let tmp = self
+            .path
+            .with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
         let data = serde_json::to_string_pretty(&self.state)?;
-        std::fs::write(&tmp, data).context("write state")?;
-        std::fs::rename(&tmp, &self.path).context("rename state")?;
-        Ok(())
+        let result = (|| -> Result<()> {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&tmp).context("create temporary state")?;
+            crate::util::restrict_permissions(&tmp, false)
+                .context("restrict temporary state permissions")?;
+            file.write_all(data.as_bytes()).context("write state")?;
+            std::fs::rename(&tmp, &self.path).context("rename state")?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result
     }
 
     #[cfg(test)]
@@ -414,6 +437,30 @@ mod tests {
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("imessage:dm:+15551234567"));
         assert!(!raw.contains("\"dm:+15551234567\""));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn state_file_is_private_and_existing_permissions_are_repaired() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = temp_state_path();
+        let mut store = Store::open(&path).unwrap();
+        store.set_cursor("imessage", 1).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        drop(store);
+        Store::open(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
         let _ = std::fs::remove_file(path);
     }
 }
