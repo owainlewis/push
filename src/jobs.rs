@@ -2280,18 +2280,19 @@ mod tests {
     #[test]
     fn daily_inbox_example_is_a_valid_scheduled_job() {
         let jobs_dir = temp_dir("inbox-example-jobs");
-        let workdir = temp_dir("inbox-example-work");
         let database = temp_path("inbox-example-db");
         let run_dir = temp_dir("inbox-example-run");
-        let contents = include_str!("../examples/assistant/jobs/daily-inbox-triage.md").replace(
-            "~/.push/workspaces/daily-inbox-triage",
-            &workdir.to_string_lossy(),
-        );
-        write_job(&jobs_dir, "daily-inbox-triage", &contents);
+        let contents = include_str!("../examples/assistant/jobs/daily-inbox-triage.md");
+        write_job(&jobs_dir, "daily-inbox-triage", contents);
         let cfg = cfg(&jobs_dir, &database, &run_dir);
 
         let job = Catalog::load_named(&cfg, "daily-inbox-triage").unwrap();
 
+        assert!(!contents.contains("/Users/"));
+        assert_eq!(
+            job.workdir,
+            std::fs::canonicalize(&cfg.assistant_root).unwrap()
+        );
         assert_eq!(job.triggers.len(), 1);
         assert!(!job.triggers[0].enabled);
     }
