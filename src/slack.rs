@@ -20,7 +20,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use crate::channel::RawMessage;
 
 const API_BASE: &str = "https://slack.com/api";
-const MAX_TEXT_CHARS: usize = 4_000;
+pub(crate) const MAX_TEXT_CHARS: usize = 4_000;
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -571,13 +571,206 @@ fn parse_event(payload: &Value, identity: &Identity) -> Option<Event> {
 }
 
 pub fn split_text(text: &str) -> Vec<String> {
+    use std::borrow::Cow;
+    use std::collections::VecDeque;
+
+    #[derive(Clone, Default)]
+    struct Formatting {
+        fenced_code: bool,
+        inline_code: bool,
+        styles: Vec<char>,
+        quote_prefix: String,
+    }
+
+    impl Formatting {
+        fn apply(&mut self, token: &str) {
+            if token == "```" && !self.inline_code {
+                self.fenced_code = !self.fenced_code;
+            } else if token == "`" && !self.fenced_code {
+                self.inline_code = !self.inline_code;
+            } else if token.len() == 1 && !self.fenced_code && !self.inline_code {
+                let style = token.chars().next().unwrap();
+                if self.styles.last() == Some(&style) {
+                    self.styles.pop();
+                } else {
+                    self.styles.push(style);
+                }
+            }
+        }
+
+        fn closing(&self) -> String {
+            if self.fenced_code {
+                "```".to_string()
+            } else if self.inline_code {
+                "`".to_string()
+            } else {
+                self.styles.iter().rev().collect()
+            }
+        }
+
+        fn opening(&self) -> String {
+            let mut opening = self.quote_prefix.clone();
+            if self.fenced_code {
+                opening.push_str("```");
+            } else if self.inline_code {
+                opening.push('`');
+            } else {
+                opening.extend(&self.styles);
+            }
+            opening
+        }
+    }
+
+    fn readable_link(token: &str) -> String {
+        let inner = token
+            .strip_prefix('<')
+            .and_then(|value| value.strip_suffix('>'))
+            .unwrap_or(token);
+        inner
+            .split_once('|')
+            .map(|(url, label)| format!("{label} ({url})"))
+            .unwrap_or_else(|| inner.to_string())
+    }
+
+    fn strip_semantic_markers(text: &str) -> String {
+        let marker = crate::markdown::SLACK_FORMAT_MARKER.to_string();
+        ["```", "`", "*", "_", "~"]
+            .into_iter()
+            .fold(text.to_string(), |value, delimiter| {
+                value.replace(&format!("{marker}{delimiter}"), delimiter)
+            })
+    }
+
+    let mut tokens = VecDeque::new();
+    let mut offset = 0;
+    let mut line_start = true;
+    while offset < text.len() {
+        let rest = &text[offset..];
+        if line_start && rest.starts_with("> ") {
+            let mut prefix_len = 0;
+            while rest[prefix_len..].starts_with("> ") {
+                prefix_len += 2;
+            }
+            let prefix = if prefix_len >= MAX_TEXT_CHARS {
+                "> "
+            } else {
+                &rest[..prefix_len]
+            };
+            tokens.push_back(prefix.to_string());
+            offset += prefix_len;
+            line_start = false;
+            continue;
+        }
+        if rest.starts_with(crate::markdown::SLACK_FORMAT_MARKER) {
+            let marker_len = crate::markdown::SLACK_FORMAT_MARKER.len_utf8();
+            let marked = &rest[marker_len..];
+            let delimiter = if marked.starts_with("```") {
+                Some("```")
+            } else {
+                marked
+                    .get(..1)
+                    .filter(|value| matches!(*value, "`" | "*" | "_" | "~"))
+            };
+            if let Some(delimiter) = delimiter {
+                tokens.push_back(format!(
+                    "{}{delimiter}",
+                    crate::markdown::SLACK_FORMAT_MARKER
+                ));
+                offset += marker_len + delimiter.len();
+            } else {
+                tokens.push_back(crate::markdown::SLACK_FORMAT_MARKER.to_string());
+                offset += marker_len;
+            };
+            line_start = false;
+            continue;
+        }
+        if rest.starts_with('<') {
+            if let Some(end) = rest.find('>') {
+                tokens.push_back(rest[..=end].to_string());
+                offset += end + 1;
+                line_start = false;
+                continue;
+            }
+        }
+        if let Some(entity) = ["&amp;", "&lt;", "&gt;"]
+            .into_iter()
+            .find(|entity| rest.starts_with(entity))
+        {
+            tokens.push_back(entity.to_string());
+            offset += entity.len();
+            line_start = false;
+            continue;
+        }
+        let character = rest.chars().next().unwrap();
+        let character_len = character.len_utf8();
+        tokens.push_back(character.to_string());
+        offset += character_len;
+        line_start = character == '\n';
+    }
+
     let mut chunks = Vec::new();
     let mut current = String::new();
-    for character in text.chars() {
-        if current.chars().count() == MAX_TEXT_CHARS {
-            chunks.push(std::mem::take(&mut current));
+    let mut current_chars = 0;
+    let mut current_has_content = false;
+    let mut formatting = Formatting::default();
+    while let Some(token) = tokens.pop_front() {
+        let delimiter = token
+            .strip_prefix(crate::markdown::SLACK_FORMAT_MARKER)
+            .filter(|value| matches!(*value, "```" | "`" | "*" | "_" | "~"));
+        let rendered = if let Some(delimiter) = delimiter {
+            Cow::Borrowed(delimiter)
+        } else if token.starts_with('<') && token.contains(crate::markdown::SLACK_FORMAT_MARKER) {
+            Cow::Owned(strip_semantic_markers(&token))
+        } else {
+            Cow::Borrowed(token.as_str())
+        };
+        let is_delimiter = delimiter.is_some();
+        let is_quote_prefix = rendered.starts_with("> ")
+            && rendered
+                .as_bytes()
+                .chunks_exact(2)
+                .all(|pair| pair == b"> ");
+        let mut after = formatting.clone();
+        if is_quote_prefix {
+            after.quote_prefix = rendered.to_string();
+        } else if rendered == "\n" {
+            after.quote_prefix.clear();
+        } else if is_delimiter {
+            after.apply(&rendered);
         }
-        current.push(character);
+        let closing = after.closing();
+        let token_chars = rendered.chars().count();
+        if current_chars + token_chars + closing.chars().count() > MAX_TEXT_CHARS {
+            if !current_has_content && rendered.starts_with('<') && rendered.ends_with('>') {
+                for character in readable_link(&rendered).chars().rev() {
+                    tokens.push_front(character.to_string());
+                }
+                continue;
+            }
+            if !current_has_content {
+                if formatting.quote_prefix.chars().count() > 2 {
+                    formatting.quote_prefix = "> ".to_string();
+                } else {
+                    formatting = Formatting::default();
+                }
+                current = formatting.opening();
+                current_chars = current.chars().count();
+                tokens.push_front(token);
+                continue;
+            }
+            current.push_str(&formatting.closing());
+            chunks.push(std::mem::take(&mut current));
+            let opening = formatting.opening();
+            current_chars = opening.chars().count();
+            current.push_str(&opening);
+            current_has_content = false;
+            tokens.push_front(token);
+            continue;
+        }
+        current.push_str(&rendered);
+        current_chars += token_chars;
+        current_has_content |= !is_delimiter && !is_quote_prefix;
+        formatting = after;
     }
     if !current.is_empty() {
         chunks.push(current);
@@ -712,6 +905,159 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].chars().count(), MAX_TEXT_CHARS);
         assert_eq!(chunks[1], "🦀");
+    }
+
+    #[test]
+    fn chunks_slack_escape_entities_atomically() {
+        for entity in ["&amp;", "&lt;", "&gt;"] {
+            let text = format!("{}{entity}", "x".repeat(MAX_TEXT_CHARS - 1));
+            let chunks = split_text(&text);
+
+            assert_eq!(
+                chunks,
+                vec!["x".repeat(MAX_TEXT_CHARS - 1), entity.to_string()]
+            );
+            assert!(chunks
+                .iter()
+                .all(|chunk| chunk.chars().count() <= MAX_TEXT_CHARS));
+        }
+    }
+
+    #[test]
+    fn chunks_long_blockquotes_with_a_prefix_in_every_message() {
+        let markdown = format!("> {}", "x".repeat(MAX_TEXT_CHARS));
+        let text = crate::markdown::to_slack_mrkdwn_for_chunking(&markdown);
+        let chunks = split_text(&text);
+
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks.iter().all(|chunk| chunk.starts_with("> ")));
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.chars().count() <= MAX_TEXT_CHARS));
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.matches('x').count())
+                .sum::<usize>(),
+            MAX_TEXT_CHARS
+        );
+
+        let nested = format!("> > {}", "x".repeat(MAX_TEXT_CHARS));
+        let chunks = split_text(&nested);
+        assert!(chunks.iter().all(|chunk| chunk.starts_with("> > ")));
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.chars().count() <= MAX_TEXT_CHARS));
+    }
+
+    #[test]
+    fn oversized_quote_prefixes_degrade_without_stalling() {
+        for depth in [MAX_TEXT_CHARS / 2, MAX_TEXT_CHARS / 2 + 1] {
+            let text = format!("{}content", "> ".repeat(depth));
+            let chunks = split_text(&text);
+
+            assert_eq!(chunks, vec!["> content"]);
+            assert!(chunks.iter().all(|chunk| !chunk.is_empty()));
+            assert!(chunks
+                .iter()
+                .all(|chunk| chunk.chars().count() <= MAX_TEXT_CHARS));
+        }
+    }
+
+    #[test]
+    fn chunks_are_independently_valid_mrkdwn() {
+        let markdown = format!("**{}**", "x".repeat(MAX_TEXT_CHARS));
+        let text = crate::markdown::to_slack_mrkdwn_for_chunking(&markdown);
+        let chunks = split_text(&text);
+
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.chars().count() <= MAX_TEXT_CHARS));
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.starts_with('*') && chunk.ends_with('*')));
+
+        let markdown = format!("```\n{}\n```", "x".repeat(MAX_TEXT_CHARS));
+        let code = crate::markdown::to_slack_mrkdwn_for_chunking(&markdown);
+        let chunks = split_text(&code);
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.chars().count() <= MAX_TEXT_CHARS));
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.starts_with("```") && chunk.ends_with("```")));
+    }
+
+    #[test]
+    fn oversized_links_degrade_to_safe_bounded_text() {
+        let link = format!("<https://example.com/{}|label>", "x".repeat(MAX_TEXT_CHARS));
+        let chunks = split_text(&link);
+
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.chars().count() <= MAX_TEXT_CHARS));
+        assert!(!chunks.iter().any(|chunk| chunk.contains("<https://")));
+        assert!(chunks.concat().starts_with("label (https://example.com/"));
+
+        let markdown = format!("**[label](https://example.com/{})**", "x".repeat(3_980));
+        let bold_link = crate::markdown::to_slack_mrkdwn_for_chunking(&markdown);
+        let chunks = split_text(&bold_link);
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.chars().count() <= MAX_TEXT_CHARS));
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.starts_with('*') && chunk.ends_with('*')));
+    }
+
+    #[test]
+    fn literal_markers_do_not_change_chunk_formatting_state() {
+        let markdown = format!(r"\*literal {}", "x".repeat(MAX_TEXT_CHARS));
+        let formatted = crate::markdown::to_slack_mrkdwn_for_chunking(&markdown);
+        let clean = crate::markdown::to_slack_mrkdwn(&markdown);
+        let chunks = split_text(&formatted);
+
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.chars().count() <= MAX_TEXT_CHARS));
+        assert_eq!(chunks.concat(), clean);
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.matches('*').count())
+                .sum::<usize>(),
+            1
+        );
+        assert!(chunks.concat().contains("*\u{200B}literal"));
+
+        let markdown = format!(
+            "A{}*B {}",
+            crate::markdown::SLACK_FORMAT_MARKER,
+            "x".repeat(MAX_TEXT_CHARS)
+        );
+        let formatted = crate::markdown::to_slack_mrkdwn_for_chunking(&markdown);
+        let clean = crate::markdown::to_slack_mrkdwn(&markdown);
+        let chunks = split_text(&formatted);
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.chars().count() <= MAX_TEXT_CHARS));
+        assert_eq!(chunks.concat(), clean);
+        assert!(clean.contains(crate::markdown::SLACK_FORMAT_MARKER));
+
+        let markdown = format!(
+            "[A{}*B](https://example.com) {}",
+            crate::markdown::SLACK_FORMAT_MARKER,
+            "x".repeat(MAX_TEXT_CHARS)
+        );
+        let formatted = crate::markdown::to_slack_mrkdwn_for_chunking(&markdown);
+        let clean = crate::markdown::to_slack_mrkdwn(&markdown);
+        let chunks = split_text(&formatted);
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.chars().count() <= MAX_TEXT_CHARS));
+        assert_eq!(chunks.concat(), clean);
+        assert!(clean.contains(crate::markdown::SLACK_FORMAT_MARKER));
     }
 
     #[tokio::test]

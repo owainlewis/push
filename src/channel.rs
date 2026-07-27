@@ -642,7 +642,7 @@ impl ChannelContract for Slack {
     }
 
     fn outbound_chunks(&self, text: &str, _marker: &str) -> Vec<OutboundChunk> {
-        crate::slack::split_text(text)
+        crate::slack::split_text(&crate::markdown::to_slack_mrkdwn_for_chunking(text))
             .into_iter()
             .map(|text| OutboundChunk {
                 text,
@@ -1003,6 +1003,36 @@ mod tests {
             rich.into_iter().map(|chunk| chunk.text).collect::<String>(),
             structured
         );
+    }
+
+    #[test]
+    fn slack_formats_markdown_before_chunking() {
+        let text = format!("**Title:** {}", "x".repeat(crate::slack::MAX_TEXT_CHARS));
+
+        let chunks = slack().outbound_chunks(&text, "ignored");
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].text, format!("*Title:* {}", "x".repeat(3_991)));
+        assert!(chunks.iter().all(|chunk| chunk.rich_markdown));
+        assert_eq!(
+            chunks
+                .into_iter()
+                .map(|chunk| chunk.text)
+                .collect::<String>(),
+            format!("*Title:* {}", "x".repeat(crate::slack::MAX_TEXT_CHARS))
+        );
+
+        let chunks = slack().outbound_chunks(
+            "Read [the *guide*](https://example.com) and `code`.",
+            "ignored",
+        );
+        assert_eq!(
+            chunks[0].text,
+            "Read <https://example.com|the _guide_> and `code`."
+        );
+        assert!(!chunks[0]
+            .text
+            .contains(crate::markdown::SLACK_FORMAT_MARKER));
     }
 
     #[test]
