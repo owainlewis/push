@@ -19,6 +19,14 @@ allow_user_ids = [123456789]
 # bot_token = "xoxb-..." # Prefer SLACK_BOT_TOKEN.
 # allow_user_ids = ["U012ABCDEF"]
 
+# Missive alternative. See docs/missive.md.
+# channel = "missive"
+# poll_interval = "3s" # At least one second per configured conversation.
+# [missive]
+# api_token = "..." # Prefer MISSIVE_API_TOKEN.
+# conversation_ids = ["00000000-0000-0000-0000-000000000000"]
+# allow_user_ids = ["00000000-0000-0000-0000-000000000000"]
+
 # Required when a job contains an enabled cron trigger.
 # [primary_delivery]
 # channel = "telegram"

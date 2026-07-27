@@ -12,6 +12,7 @@ use crate::util::expand_home;
 pub const TELEGRAM_BOT_TOKEN_ENV: &str = "TELEGRAM_BOT_TOKEN";
 pub const SLACK_APP_TOKEN_ENV: &str = "SLACK_APP_TOKEN";
 pub const SLACK_BOT_TOKEN_ENV: &str = "SLACK_BOT_TOKEN";
+pub const MISSIVE_API_TOKEN_ENV: &str = "MISSIVE_API_TOKEN";
 pub const DEFAULT_VOICE_NAME: &str = "cedar";
 const SUPPORTED_VOICE_NAMES: &[&str] = &[
     "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse",
@@ -67,6 +68,12 @@ pub struct Config {
     pub slack_bot_token: Option<String>,
     #[serde(default)]
     pub slack_allow_user_ids: Vec<String>,
+    #[serde(default)]
+    pub missive_api_token: Option<String>,
+    #[serde(default)]
+    pub missive_conversation_ids: Vec<String>,
+    #[serde(default)]
+    pub missive_allow_user_ids: Vec<String>,
     #[serde(default)]
     pub voice_openai_api_key: Option<String>,
     #[serde(default = "default_voice_name")]
@@ -228,6 +235,15 @@ impl Config {
         )?;
         flatten_provider_section(
             root,
+            "missive",
+            &[
+                ("api_token", "missive_api_token"),
+                ("conversation_ids", "missive_conversation_ids"),
+                ("allow_user_ids", "missive_allow_user_ids"),
+            ],
+        )?;
+        flatten_provider_section(
+            root,
             "voice",
             &[
                 ("openai_api_key", "voice_openai_api_key"),
@@ -267,6 +283,11 @@ impl Config {
                 &assistant_root,
                 c.slack_app_token.as_deref(),
                 c.slack_bot_token.as_deref(),
+            )?;
+            validate_inline_missive_token_location(
+                &config_path,
+                &assistant_root,
+                c.missive_api_token.as_deref(),
             )?;
             validate_inline_voice_key_location(
                 &config_path,
@@ -373,6 +394,10 @@ impl Config {
 
     pub fn slack_bot_token(&self) -> Option<String> {
         configured_secret(self.slack_bot_token.as_deref(), SLACK_BOT_TOKEN_ENV)
+    }
+
+    pub fn missive_token(&self) -> Option<String> {
+        configured_secret(self.missive_api_token.as_deref(), MISSIVE_API_TOKEN_ENV)
     }
 
     pub fn route_for_message(
@@ -550,6 +575,38 @@ impl Config {
                         bail!("slack.bot_token cannot be empty");
                     }
                 }
+                ChannelKind::Missive => {
+                    if self.missive_conversation_ids.is_empty()
+                        || self
+                            .missive_conversation_ids
+                            .iter()
+                            .any(|id| id.trim().is_empty())
+                    {
+                        bail!("set missive.conversation_ids to explicit Missive conversation IDs");
+                    }
+                    if self.missive_allow_user_ids.is_empty()
+                        || self
+                            .missive_allow_user_ids
+                            .iter()
+                            .any(|id| id.trim().is_empty())
+                    {
+                        bail!("set missive.allow_user_ids to explicit Missive user IDs");
+                    }
+                    if self
+                        .missive_api_token
+                        .as_deref()
+                        .is_some_and(|v| v.trim().is_empty())
+                    {
+                        bail!("missive.api_token cannot be empty");
+                    }
+                    if self.poll_interval_dur()?.as_secs_f64()
+                        < self.missive_conversation_ids.len() as f64
+                    {
+                        bail!(
+                            "poll_interval must be at least one second per Missive conversation to respect the API's continuous polling limit"
+                        );
+                    }
+                }
             }
         }
         self.agent_backend()?;
@@ -645,6 +702,22 @@ pub(crate) fn validate_inline_slack_token_location(
     {
         bail!(
             "config {} contains inline Slack tokens inside the Git-versioned assistant repository. Move the config outside the assistant or use SLACK_APP_TOKEN and SLACK_BOT_TOKEN.",
+            config_path.display()
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_inline_missive_token_location(
+    config_path: &Path,
+    assistant_root: &Path,
+    token: Option<&str>,
+) -> Result<()> {
+    if token.is_some_and(|token| !token.trim().is_empty())
+        && config_path.starts_with(assistant_root)
+    {
+        bail!(
+            "config {} contains an inline Missive token inside the Git-versioned assistant repository. Move the config outside the assistant or use MISSIVE_API_TOKEN.",
             config_path.display()
         );
     }
@@ -781,6 +854,7 @@ pub enum ChannelKind {
     IMessage,
     Telegram,
     Slack,
+    Missive,
 }
 
 impl ChannelKind {
@@ -789,8 +863,9 @@ impl ChannelKind {
             "imessage" => Ok(Self::IMessage),
             "telegram" => Ok(Self::Telegram),
             "slack" => Ok(Self::Slack),
+            "missive" => Ok(Self::Missive),
             other => bail!(
-                "invalid channel {other:?}; expected \"imessage\", \"telegram\", or \"slack\""
+                "invalid channel {other:?}; expected \"imessage\", \"telegram\", \"slack\", or \"missive\""
             ),
         }
     }
@@ -800,6 +875,7 @@ impl ChannelKind {
             Self::IMessage => "imessage",
             Self::Telegram => "telegram",
             Self::Slack => "slack",
+            Self::Missive => "missive",
         }
     }
 }
@@ -908,6 +984,9 @@ mod tests {
             slack_app_token: None,
             slack_bot_token: None,
             slack_allow_user_ids: Vec::new(),
+            missive_api_token: None,
+            missive_conversation_ids: Vec::new(),
+            missive_allow_user_ids: Vec::new(),
             voice_openai_api_key: None,
             voice_name: DEFAULT_VOICE_NAME.to_string(),
             agent: "codex".to_string(),

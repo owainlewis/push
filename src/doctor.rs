@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 
 use crate::{channel::Channel, config, history, jobs};
-use config::{SLACK_APP_TOKEN_ENV, SLACK_BOT_TOKEN_ENV, TELEGRAM_BOT_TOKEN_ENV};
+use config::{
+    MISSIVE_API_TOKEN_ENV, SLACK_APP_TOKEN_ENV, SLACK_BOT_TOKEN_ENV, TELEGRAM_BOT_TOKEN_ENV,
+};
 
 /// Fails fast with actionable messages when the environment is not ready.
 pub fn preflight(cfg: &config::Config) -> Result<()> {
@@ -73,6 +75,7 @@ fn run_checks(cfg: &config::Config) -> CheckReport {
                     config::ChannelKind::IMessage => check_imessage_db(cfg, &mut checks),
                     config::ChannelKind::Telegram => check_telegram_config(cfg, &mut checks),
                     config::ChannelKind::Slack => check_slack_config(cfg, &mut checks),
+                    config::ChannelKind::Missive => check_missive_config(cfg, &mut checks),
                 }
             }
         }
@@ -173,6 +176,7 @@ fn check_secret_config_permissions(cfg: &config::Config, checks: &mut Vec<Check>
         cfg.telegram_bot_token.as_deref(),
         cfg.slack_app_token.as_deref(),
         cfg.slack_bot_token.as_deref(),
+        cfg.missive_api_token.as_deref(),
     ]
     .into_iter()
     .flatten()
@@ -212,7 +216,7 @@ fn check_config(cfg: &config::Config, checks: &mut Vec<Check>) {
     checks.push(Check::pass(
         "config",
         format!(
-            "channels={}, agent={}, assistant_root={}, imessage.self_handles={}, imessage.allow_from={}, telegram.allow_user_ids={}, telegram.allow_chat_ids={}, slack.allow_user_ids={}",
+            "channels={}, agent={}, assistant_root={}, imessage.self_handles={}, imessage.allow_from={}, telegram.allow_user_ids={}, telegram.allow_chat_ids={}, slack.allow_user_ids={}, missive.conversation_ids={}, missive.allow_user_ids={}",
             cfg.enabled_channel_kinds()
                 .map(|channels| channels.into_iter().map(|kind| kind.as_str()).collect::<Vec<_>>().join(","))
                 .unwrap_or_else(|_| cfg.channel.clone()),
@@ -222,7 +226,9 @@ fn check_config(cfg: &config::Config, checks: &mut Vec<Check>) {
             cfg.allow_from.len(),
             cfg.telegram_allow_user_ids.len(),
             cfg.telegram_allow_chat_ids.len(),
-            cfg.slack_allow_user_ids.len()
+            cfg.slack_allow_user_ids.len(),
+            cfg.missive_conversation_ids.len(),
+            cfg.missive_allow_user_ids.len()
         ),
     ));
 }
@@ -342,6 +348,22 @@ fn check_slack_config(cfg: &config::Config, checks: &mut Vec<Check>) {
                 format!("not configured. Set {environment} or the matching slack token without printing it."),
             ));
         }
+    }
+}
+
+fn check_missive_config(cfg: &config::Config, checks: &mut Vec<Check>) {
+    if cfg.missive_token().is_some() {
+        checks.push(Check::pass(
+            "Missive API token",
+            format!("loaded from config or {MISSIVE_API_TOKEN_ENV}"),
+        ));
+    } else {
+        checks.push(Check::fail(
+            "Missive API token",
+            format!(
+                "not configured. Set {MISSIVE_API_TOKEN_ENV} or missive.api_token without printing it."
+            ),
+        ));
     }
 }
 

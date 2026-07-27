@@ -29,7 +29,7 @@ cargo test --locked
 | CLI and startup | `src/main.rs` |
 | TOML loading and validation | `src/config.rs` |
 | Channel-neutral boundary | `src/channel.rs` |
-| iMessage, Telegram, and Slack adapters | `src/imessage/`, `src/telegram.rs`, `src/slack.rs` |
+| iMessage, Telegram, Slack, and Missive adapters | `src/imessage/`, `src/telegram.rs`, `src/slack.rs`, `src/missive.rs` |
 | Gateway, queues, workers, delivery | `src/gateway/` |
 | Claude Code, Codex, and Pi adapters | `src/claude.rs`, `src/codex.rs`, `src/pi.rs` |
 | Canonical SQLite history | `src/history.rs` |

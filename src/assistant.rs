@@ -8,8 +8,8 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 use crate::config::{
-    validate_inline_slack_token_location, validate_inline_token_location,
-    validate_inline_voice_key_location,
+    validate_inline_missive_token_location, validate_inline_slack_token_location,
+    validate_inline_token_location, validate_inline_voice_key_location,
 };
 use crate::util::expand_home;
 
@@ -180,6 +180,17 @@ fn validate_config_secrets(config_path: &Path, target: &Path, config: &toml::Tab
         (nested_app_token, nested_bot_token),
     ] {
         validate_inline_slack_token_location(&config_path, &assistant, app_token, bot_token)?;
+    }
+    let flat_missive_token = config
+        .get("missive_api_token")
+        .and_then(toml::Value::as_str);
+    let nested_missive_token = config
+        .get("missive")
+        .and_then(toml::Value::as_table)
+        .and_then(|missive| missive.get("api_token"))
+        .and_then(toml::Value::as_str);
+    for token in [flat_missive_token, nested_missive_token] {
+        validate_inline_missive_token_location(&config_path, &assistant, token)?;
     }
     let flat_voice_key = config
         .get("voice_openai_api_key")
@@ -861,6 +872,24 @@ mod tests {
         let error = init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap_err();
 
         assert!(error.to_string().contains("inline Slack tokens"));
+        assert!(!target.join("SOUL.md").exists());
+        let _ = fs::remove_dir_all(target);
+    }
+
+    #[test]
+    fn refuses_inline_missive_token_in_a_config_inside_the_assistant() {
+        let target = temp_path("assistant-missive-secret-config");
+        fs::create_dir_all(&target).unwrap();
+        let config = target.join("config.toml");
+        fs::write(
+            &config,
+            "channel = 'missive'\n[missive]\napi_token = 'missive-secret'\nconversation_ids = ['c1']\nallow_user_ids = ['u1']\n",
+        )
+        .unwrap();
+
+        let error = init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("inline Missive token"));
         assert!(!target.join("SOUL.md").exists());
         let _ = fs::remove_dir_all(target);
     }

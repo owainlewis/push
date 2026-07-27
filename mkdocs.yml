@@ -52,6 +52,7 @@ nav:
       - iMessage: channels/imessage.md
       - Telegram: telegram.md
       - Slack: slack.md
+      - Missive: missive.md
   - Use Push:
       - Jobs and schedules: jobs.md
       - Permissions and security: security.md
