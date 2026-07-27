@@ -579,6 +579,7 @@ pub fn split_text(text: &str) -> Vec<String> {
         fenced_code: bool,
         inline_code: bool,
         styles: Vec<char>,
+        quote_prefix: String,
     }
 
     impl Formatting {
@@ -608,13 +609,15 @@ pub fn split_text(text: &str) -> Vec<String> {
         }
 
         fn opening(&self) -> String {
+            let mut opening = self.quote_prefix.clone();
             if self.fenced_code {
-                "```".to_string()
+                opening.push_str("```");
             } else if self.inline_code {
-                "`".to_string()
+                opening.push('`');
             } else {
-                self.styles.iter().collect()
+                opening.extend(&self.styles);
             }
+            opening
         }
     }
 
@@ -640,8 +643,24 @@ pub fn split_text(text: &str) -> Vec<String> {
 
     let mut tokens = VecDeque::new();
     let mut offset = 0;
+    let mut line_start = true;
     while offset < text.len() {
         let rest = &text[offset..];
+        if line_start && rest.starts_with("> ") {
+            let mut prefix_len = 0;
+            while rest[prefix_len..].starts_with("> ") {
+                prefix_len += 2;
+            }
+            let prefix = if prefix_len >= MAX_TEXT_CHARS {
+                "> "
+            } else {
+                &rest[..prefix_len]
+            };
+            tokens.push_back(prefix.to_string());
+            offset += prefix_len;
+            line_start = false;
+            continue;
+        }
         if rest.starts_with(crate::markdown::SLACK_FORMAT_MARKER) {
             let marker_len = crate::markdown::SLACK_FORMAT_MARKER.len_utf8();
             let marked = &rest[marker_len..];
@@ -662,12 +681,14 @@ pub fn split_text(text: &str) -> Vec<String> {
                 tokens.push_back(crate::markdown::SLACK_FORMAT_MARKER.to_string());
                 offset += marker_len;
             };
+            line_start = false;
             continue;
         }
         if rest.starts_with('<') {
             if let Some(end) = rest.find('>') {
                 tokens.push_back(rest[..=end].to_string());
                 offset += end + 1;
+                line_start = false;
                 continue;
             }
         }
@@ -677,12 +698,14 @@ pub fn split_text(text: &str) -> Vec<String> {
         {
             tokens.push_back(entity.to_string());
             offset += entity.len();
+            line_start = false;
             continue;
         }
         let character = rest.chars().next().unwrap();
         let character_len = character.len_utf8();
         tokens.push_back(character.to_string());
         offset += character_len;
+        line_start = character == '\n';
     }
 
     let mut chunks = Vec::new();
@@ -702,8 +725,17 @@ pub fn split_text(text: &str) -> Vec<String> {
             Cow::Borrowed(token.as_str())
         };
         let is_delimiter = delimiter.is_some();
+        let is_quote_prefix = rendered.starts_with("> ")
+            && rendered
+                .as_bytes()
+                .chunks_exact(2)
+                .all(|pair| pair == b"> ");
         let mut after = formatting.clone();
-        if is_delimiter {
+        if is_quote_prefix {
+            after.quote_prefix = rendered.to_string();
+        } else if rendered == "\n" {
+            after.quote_prefix.clear();
+        } else if is_delimiter {
             after.apply(&rendered);
         }
         let closing = after.closing();
@@ -713,6 +745,17 @@ pub fn split_text(text: &str) -> Vec<String> {
                 for character in readable_link(&rendered).chars().rev() {
                     tokens.push_front(character.to_string());
                 }
+                continue;
+            }
+            if !current_has_content {
+                if formatting.quote_prefix.chars().count() > 2 {
+                    formatting.quote_prefix = "> ".to_string();
+                } else {
+                    formatting = Formatting::default();
+                }
+                current = formatting.opening();
+                current_chars = current.chars().count();
+                tokens.push_front(token);
                 continue;
             }
             current.push_str(&formatting.closing());
@@ -726,7 +769,7 @@ pub fn split_text(text: &str) -> Vec<String> {
         }
         current.push_str(&rendered);
         current_chars += token_chars;
-        current_has_content |= !is_delimiter;
+        current_has_content |= !is_delimiter && !is_quote_prefix;
         formatting = after;
     }
     if !current.is_empty() {
@@ -874,6 +917,47 @@ mod tests {
                 chunks,
                 vec!["x".repeat(MAX_TEXT_CHARS - 1), entity.to_string()]
             );
+            assert!(chunks
+                .iter()
+                .all(|chunk| chunk.chars().count() <= MAX_TEXT_CHARS));
+        }
+    }
+
+    #[test]
+    fn chunks_long_blockquotes_with_a_prefix_in_every_message() {
+        let markdown = format!("> {}", "x".repeat(MAX_TEXT_CHARS));
+        let text = crate::markdown::to_slack_mrkdwn_for_chunking(&markdown);
+        let chunks = split_text(&text);
+
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks.iter().all(|chunk| chunk.starts_with("> ")));
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.chars().count() <= MAX_TEXT_CHARS));
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.matches('x').count())
+                .sum::<usize>(),
+            MAX_TEXT_CHARS
+        );
+
+        let nested = format!("> > {}", "x".repeat(MAX_TEXT_CHARS));
+        let chunks = split_text(&nested);
+        assert!(chunks.iter().all(|chunk| chunk.starts_with("> > ")));
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.chars().count() <= MAX_TEXT_CHARS));
+    }
+
+    #[test]
+    fn oversized_quote_prefixes_degrade_without_stalling() {
+        for depth in [MAX_TEXT_CHARS / 2, MAX_TEXT_CHARS / 2 + 1] {
+            let text = format!("{}content", "> ".repeat(depth));
+            let chunks = split_text(&text);
+
+            assert_eq!(chunks, vec!["> content"]);
+            assert!(chunks.iter().all(|chunk| !chunk.is_empty()));
             assert!(chunks
                 .iter()
                 .all(|chunk| chunk.chars().count() <= MAX_TEXT_CHARS));
