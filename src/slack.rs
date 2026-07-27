@@ -671,6 +671,14 @@ pub fn split_text(text: &str) -> Vec<String> {
                 continue;
             }
         }
+        if let Some(entity) = ["&amp;", "&lt;", "&gt;"]
+            .into_iter()
+            .find(|entity| rest.starts_with(entity))
+        {
+            tokens.push_back(entity.to_string());
+            offset += entity.len();
+            continue;
+        }
         let character = rest.chars().next().unwrap();
         let character_len = character.len_utf8();
         tokens.push_back(character.to_string());
@@ -854,6 +862,22 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].chars().count(), MAX_TEXT_CHARS);
         assert_eq!(chunks[1], "🦀");
+    }
+
+    #[test]
+    fn chunks_slack_escape_entities_atomically() {
+        for entity in ["&amp;", "&lt;", "&gt;"] {
+            let text = format!("{}{entity}", "x".repeat(MAX_TEXT_CHARS - 1));
+            let chunks = split_text(&text);
+
+            assert_eq!(
+                chunks,
+                vec!["x".repeat(MAX_TEXT_CHARS - 1), entity.to_string()]
+            );
+            assert!(chunks
+                .iter()
+                .all(|chunk| chunk.chars().count() <= MAX_TEXT_CHARS));
+        }
     }
 
     #[test]
