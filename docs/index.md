@@ -103,7 +103,7 @@ tools, skills, and authentication. Chats preserve configured agent permissions;
 Codex and Claude jobs bypass interactive permissions so scheduled work can
 finish without an operator.
 
-[See the full architecture](architecture.md){ .push-inline-link }
+[See the full architecture](https://github.com/owainlewis/push/blob/main/ARCHITECTURE.md){ .push-inline-link }
 
 </section>
 
@@ -179,7 +179,7 @@ finish without an operator.
 | choose backend permissions safely | [Permissions and security](security.md) |
 | keep Push online after logout or reboot | [Run as a service](services.md) |
 | inspect commands and outputs | [CLI reference](reference/cli.md) |
-| understand or extend the code | [Architecture](architecture.md) and [contributing](contributing.md) |
+| understand or extend the code | [Architecture](https://github.com/owainlewis/push/blob/main/ARCHITECTURE.md) and [contributing](contributing.md) |
 
 !!! note "Canonical source"
 

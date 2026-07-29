@@ -141,6 +141,7 @@ Push is early software. Please read the [security policy](SECURITY.md) before
 reporting a vulnerability. Bug reports, ideas, and pull requests are welcome.
 
 - [Contributing](CONTRIBUTING.md)
+- [Architecture](ARCHITECTURE.md)
 - [Code of conduct](CODE_OF_CONDUCT.md)
 - [Security policy](SECURITY.md)
 - [MIT license](LICENSE)

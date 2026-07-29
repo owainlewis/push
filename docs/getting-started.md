@@ -181,4 +181,4 @@ a Telegram- or Slack-only Linux host.
 - [Configure both channels and per-thread routes](configuration.md)
 - [Create a manual or scheduled job](jobs.md)
 - [Inspect every CLI command](reference/cli.md)
-- [Understand durable state and recovery](architecture.md)
+- [Understand durable state and recovery](https://github.com/owainlewis/push/blob/main/ARCHITECTURE.md)

@@ -37,7 +37,9 @@ cargo test --locked
 | Durable user questions | `src/approval.rs`, `src/history.rs` |
 | Production diagnostics | `src/doctor.rs`, `src/audit.rs` |
 
-Read [architecture](architecture.md) before changing state, crash recovery,
+Read the
+[architecture](https://github.com/owainlewis/push/blob/main/ARCHITECTURE.md)
+before changing state, crash recovery,
 channel cursors, session ownership, scheduling, or delivery semantics.
 
 ## Documentation workflow
