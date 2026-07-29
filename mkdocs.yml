@@ -58,7 +58,7 @@ nav:
       - Run as a service: services.md
   - Reference:
       - CLI commands: reference/cli.md
-      - Architecture: architecture.md
+      - Architecture: https://github.com/owainlewis/push/blob/main/ARCHITECTURE.md
   - Develop:
       - Contributing: contributing.md
       - Product strategy: strategy.md

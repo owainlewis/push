@@ -6,7 +6,7 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 #[test]
 fn local_documentation_links_resolve() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut markdown = vec![root.join("README.md")];
+    let mut markdown = vec![root.join("README.md"), root.join("ARCHITECTURE.md")];
     collect_markdown(&root.join("docs"), &mut markdown);
 
     let mut broken = Vec::new();

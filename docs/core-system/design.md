@@ -5,7 +5,9 @@
 !!! warning "Historical record"
 
     This file preserves the approved design and rollout sequence. It is not a
-    current roadmap. See [Architecture](../architecture.md) for shipped behavior.
+    current roadmap. See the
+    [architecture](https://github.com/owainlewis/push/blob/main/ARCHITECTURE.md)
+    for shipped behavior.
 
 **Author:** Owain Lewis  **Date:** 2026-07-11
 
