@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 
 use crate::config::{
     validate_inline_slack_token_location, validate_inline_token_location,
@@ -44,8 +45,11 @@ This Git repository contains the durable, user-owned parts of one Push assistant
 - `context/` contains durable context the assistant may read and update.
 - `evals/` contains reusable agent evaluation criteria.
 - `jobs/` contains installed Push job runbooks.
+- `skills/` contains reusable capabilities.
 
-Push owns channels, scheduling, history, security, and delivery outside this repository. Project skills may live here, while the configured agent runtime owns discovery, execution, global skills, MCP servers, and authentication. Chats preserve configured agent permissions. Codex and Claude jobs bypass interactive permissions so unattended work can finish.
+You own `SOUL.md`, `AGENTS.md`, context, evals, jobs, and any skills you add. Push manages only `skills/push/` and its `push` discovery links under `.agents/skills/` and `.claude/skills/`; Codex and Pi share the `.agents/skills/` path. Rerun `push init` after an upgrade to refresh an unmodified managed skill. Push never silently replaces a modified managed copy.
+
+Push owns channels, scheduling, history, security, and delivery outside this repository. The configured agent runtime owns skill discovery and execution, global skills, MCP servers, permissions, and authentication. Chats preserve configured agent permissions. Codex and Claude jobs bypass interactive permissions so unattended work can finish.
 "#;
 
 const CONTEXT_README: &str = r#"# Context
@@ -54,6 +58,12 @@ Store durable facts and working context here when they should be available acros
 
 Good examples include preferences, active projects, people, recurring processes, and reference notes. Keep secrets out of this repository. Start with small, focused Markdown files and update or remove stale information.
 "#;
+
+const PUSH_SKILL: &str = include_str!("../assistant/skills/push/SKILL.md");
+const PUSH_SKILL_VERSION: u32 = 1;
+const PUSH_SKILL_LINK: &str = "../../skills/push";
+const PUSH_SKILL_MANIFEST: &str = ".push-managed.json";
+const PUSH_SKILL_PROVIDERS: [&str; 2] = [".agents", ".claude"];
 
 const DEFAULT_CONFIG: &str = r#"# Telegram quick start.
 channel = "telegram"
@@ -347,7 +357,203 @@ fn scaffold(root: &Path) -> Result<()> {
     create_file(&root.join("CLAUDE.md"), CLAUDE)?;
     create_file(&root.join("README.md"), README)?;
     create_file(&root.join("context/README.md"), CONTEXT_README)?;
+    install_push_skill(root)?;
     Ok(())
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct ManagedSkillManifest {
+    version: u32,
+    sha256: String,
+}
+
+fn install_push_skill(root: &Path) -> Result<()> {
+    let skills = root.join("skills");
+    let skill_dir = skills.join("push");
+    let skill_path = skill_dir.join("SKILL.md");
+    let manifest_path = skill_dir.join(PUSH_SKILL_MANIFEST);
+    create_directory(&skills)?;
+    create_directory(&skill_dir)?;
+
+    let actual = read_optional_regular_file(&skill_path)?;
+    let manifest = read_skill_manifest(&manifest_path)?;
+    match manifest {
+        Some(manifest) => {
+            if manifest.version > PUSH_SKILL_VERSION {
+                bail!(
+                    "{} is managed by Push skill version {}, which is newer than this Push binary supports (version {}). Upgrade Push instead of downgrading the skill.",
+                    skill_path.display(),
+                    manifest.version,
+                    PUSH_SKILL_VERSION
+                );
+            }
+            match actual.as_deref() {
+                Some(actual) if actual == PUSH_SKILL.as_bytes() => {
+                    if manifest.version != PUSH_SKILL_VERSION
+                        || manifest.sha256 != sha256(PUSH_SKILL.as_bytes())
+                    {
+                        write_skill_manifest(&manifest_path)?;
+                    }
+                }
+                Some(actual) if sha256(actual) != manifest.sha256 => {
+                    return Err(user_modified_skill_error(&skill_path));
+                }
+                Some(_) => {
+                    if manifest.version == PUSH_SKILL_VERSION {
+                        return Err(user_modified_skill_error(&skill_path));
+                    }
+                    write_atomic_file(&skill_path, PUSH_SKILL.as_bytes())?;
+                    write_skill_manifest(&manifest_path)?;
+                }
+                None => {
+                    write_atomic_file(&skill_path, PUSH_SKILL.as_bytes())?;
+                    write_skill_manifest(&manifest_path)?;
+                }
+            }
+        }
+        None => match actual.as_deref() {
+            None => {
+                write_atomic_file(&skill_path, PUSH_SKILL.as_bytes())?;
+                write_skill_manifest(&manifest_path)?;
+            }
+            Some(actual) if actual == PUSH_SKILL.as_bytes() => {
+                write_skill_manifest(&manifest_path)?;
+            }
+            Some(_) => {
+                bail!(
+                    "Push found an existing unmanaged skill at {} and left it unchanged. Rename that skill, or move it to a different skill directory, then rerun `push init`.",
+                    skill_path.display()
+                );
+            }
+        },
+    }
+
+    for provider in PUSH_SKILL_PROVIDERS {
+        let provider_skills = root.join(provider).join("skills");
+        create_directory(&root.join(provider))?;
+        create_directory(&provider_skills)?;
+        create_skill_link(&provider_skills.join("push"))?;
+    }
+    Ok(())
+}
+
+fn read_optional_regular_file(path: &Path) -> Result<Option<Vec<u8>>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => fs::read(path)
+            .map(Some)
+            .with_context(|| format!("read {}", path.display())),
+        Ok(_) => bail!(
+            "{} must be a regular file inside the assistant repository; Push left it unchanged",
+            path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
+    }
+}
+
+fn read_skill_manifest(path: &Path) -> Result<Option<ManagedSkillManifest>> {
+    let Some(raw) = read_optional_regular_file(path)? else {
+        return Ok(None);
+    };
+    serde_json::from_slice(&raw)
+        .with_context(|| {
+            format!(
+                "parse managed skill metadata {}. Push left the skill unchanged; restore this file or move the skill before rerunning `push init`",
+                path.display()
+            )
+        })
+        .map(Some)
+}
+
+fn write_skill_manifest(path: &Path) -> Result<()> {
+    let manifest = ManagedSkillManifest {
+        version: PUSH_SKILL_VERSION,
+        sha256: sha256(PUSH_SKILL.as_bytes()),
+    };
+    let mut raw = serde_json::to_vec_pretty(&manifest).context("serialize Push skill metadata")?;
+    raw.push(b'\n');
+    write_atomic_file(path, &raw)
+}
+
+fn sha256(contents: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(contents))
+}
+
+fn user_modified_skill_error(path: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "Push found a user-modified managed skill at {} and left it unchanged. Move your changes to a differently named skill or restore the managed copy, then rerun `push init`.",
+        path.display()
+    )
+}
+
+fn write_atomic_file(path: &Path, contents: &[u8]) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file() {
+                bail!(
+                    "{} must be a regular file inside the assistant repository; Push left it unchanged",
+                    path.display()
+                );
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspect managed file {}", path.display()))
+        }
+    }
+    let parent = path.parent().context("managed file path has no parent")?;
+    let name = path
+        .file_name()
+        .context("managed file path has no file name")?
+        .to_string_lossy();
+    let temporary = parent.join(format!(".{name}.push-init-{}", uuid::Uuid::new_v4()));
+    let result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .with_context(|| format!("create temporary managed file {}", temporary.display()))?;
+        file.write_all(contents)
+            .with_context(|| format!("write temporary managed file {}", temporary.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync temporary managed file {}", temporary.display()))?;
+        fs::rename(&temporary, path)
+            .with_context(|| format!("replace managed file {}", path.display()))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn create_skill_link(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            let target = fs::read_link(path)
+                .with_context(|| format!("read skill link {}", path.display()))?;
+            if target == Path::new(PUSH_SKILL_LINK) {
+                return Ok(());
+            }
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(PUSH_SKILL_LINK, path)
+                    .with_context(|| format!("create skill link {}", path.display()))?;
+                return Ok(());
+            }
+            #[cfg(not(unix))]
+            bail!("Push project skills require symbolic link support");
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspect skill link {}", path.display()))
+        }
+    }
+    bail!(
+        "Push found a conflicting provider skill at {} and left it unchanged. Move or remove that path, then rerun `push init`.",
+        path.display()
+    )
 }
 
 fn create_directory(path: &Path) -> Result<()> {
@@ -570,6 +776,17 @@ mod tests {
         assert!(target.join("evals").is_dir());
         assert!(target.join("jobs").is_dir());
         assert_eq!(fs::read_dir(target.join("jobs")).unwrap().count(), 0);
+        assert_eq!(
+            fs::read_to_string(target.join("skills/push/SKILL.md")).unwrap(),
+            PUSH_SKILL
+        );
+        let manifest: ManagedSkillManifest = serde_json::from_str(
+            &fs::read_to_string(target.join("skills/push/.push-managed.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest.version, PUSH_SKILL_VERSION);
+        assert_eq!(manifest.sha256, sha256(PUSH_SKILL.as_bytes()));
+        assert_push_skill_links(&target);
         assert!(target.join(".git").exists());
         let raw = fs::read_to_string(config).unwrap();
         assert!(raw.contains(&format!(
@@ -586,6 +803,7 @@ mod tests {
         let config = parent.join("push.toml");
         init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap();
         fs::write(target.join("SOUL.md"), "My identity\n").unwrap();
+        fs::write(target.join("AGENTS.md"), "My repository rules\n").unwrap();
         fs::write(target.join("context/private.md"), "Keep me\n").unwrap();
         fs::remove_file(target.join("CLAUDE.md")).unwrap();
         let config_before = fs::read_to_string(&config).unwrap();
@@ -598,6 +816,10 @@ mod tests {
             "My identity\n"
         );
         assert_eq!(
+            fs::read_to_string(target.join("AGENTS.md")).unwrap(),
+            "My repository rules\n"
+        );
+        assert_eq!(
             fs::read_to_string(target.join("context/private.md")).unwrap(),
             "Keep me\n"
         );
@@ -605,7 +827,137 @@ mod tests {
             fs::read_to_string(target.join("CLAUDE.md")).unwrap(),
             CLAUDE
         );
+        assert_eq!(
+            fs::read_to_string(target.join("skills/push/SKILL.md")).unwrap(),
+            PUSH_SKILL
+        );
+        assert_push_skill_links(&target);
         assert_eq!(fs::read_to_string(config).unwrap(), config_before);
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn refreshes_an_unmodified_older_managed_skill() {
+        let parent = temp_dir("assistant-skill-upgrade");
+        let target = parent.join("assistant");
+        let config = parent.join("push.toml");
+        init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap();
+        let skill_path = target.join("skills/push/SKILL.md");
+        let manifest_path = target.join("skills/push/.push-managed.json");
+        let old_skill = b"---\nname: push\ndescription: Old managed Push skill.\n---\n";
+        fs::write(&skill_path, old_skill).unwrap();
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&ManagedSkillManifest {
+                version: 0,
+                sha256: sha256(old_skill),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap();
+
+        assert_eq!(fs::read_to_string(skill_path).unwrap(), PUSH_SKILL);
+        let manifest: ManagedSkillManifest =
+            serde_json::from_str(&fs::read_to_string(manifest_path).unwrap()).unwrap();
+        assert_eq!(manifest.version, PUSH_SKILL_VERSION);
+        assert_eq!(manifest.sha256, sha256(PUSH_SKILL.as_bytes()));
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn refuses_to_overwrite_a_user_modified_managed_skill() {
+        let parent = temp_dir("assistant-skill-modified");
+        let target = parent.join("assistant");
+        let config = parent.join("push.toml");
+        init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap();
+        let skill_path = target.join("skills/push/SKILL.md");
+        let modified = format!("{PUSH_SKILL}\nUser addition.\n");
+        fs::write(&skill_path, &modified).unwrap();
+        fs::write(target.join("SOUL.md"), "User identity.\n").unwrap();
+
+        let error = init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("user-modified managed skill"));
+        assert!(error.to_string().contains("left it unchanged"));
+        assert!(error.to_string().contains("differently named skill"));
+        assert_eq!(fs::read_to_string(skill_path).unwrap(), modified);
+        assert_eq!(
+            fs::read_to_string(target.join("SOUL.md")).unwrap(),
+            "User identity.\n"
+        );
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn recreates_missing_provider_directories_and_links() {
+        let parent = temp_dir("assistant-skill-provider-directories");
+        let target = parent.join("assistant");
+        let config = parent.join("push.toml");
+        init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap();
+        for provider in PUSH_SKILL_PROVIDERS {
+            fs::remove_dir_all(target.join(provider)).unwrap();
+        }
+
+        init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap();
+
+        assert_push_skill_links(&target);
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_skill_paths_stay_inside_the_assistant() {
+        use std::os::unix::fs::symlink;
+
+        let parent = temp_dir("assistant-skill-path-safety");
+        let target = parent.join("assistant");
+        let config = parent.join("push.toml");
+        init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap();
+        assert_push_skill_links(&target);
+        for provider in PUSH_SKILL_PROVIDERS {
+            let link = target.join(provider).join("skills/push");
+            assert_eq!(fs::read_link(&link).unwrap(), Path::new(PUSH_SKILL_LINK));
+            assert_eq!(
+                fs::canonicalize(link).unwrap(),
+                fs::canonicalize(target.join("skills/push")).unwrap()
+            );
+        }
+
+        let outside = parent.join("outside-skill.md");
+        fs::write(&outside, "outside\n").unwrap();
+        let skill_path = target.join("skills/push/SKILL.md");
+        fs::remove_file(&skill_path).unwrap();
+        symlink(&outside, &skill_path).unwrap();
+
+        let error = init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("must be a regular file"));
+        assert_eq!(fs::read_to_string(outside).unwrap(), "outside\n");
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_to_replace_a_conflicting_provider_skill() {
+        use std::os::unix::fs::symlink;
+
+        let parent = temp_dir("assistant-skill-provider-conflict");
+        let target = parent.join("assistant");
+        let config = parent.join("push.toml");
+        init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap();
+        let link = target.join(".claude/skills/push");
+        fs::remove_file(&link).unwrap();
+        symlink("../../skills/user-push", &link).unwrap();
+
+        let error = init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("conflicting provider skill"));
+        assert_eq!(
+            fs::read_link(&link).unwrap(),
+            Path::new("../../skills/user-push")
+        );
         let _ = fs::remove_dir_all(parent);
     }
 
@@ -863,5 +1215,17 @@ mod tests {
         assert!(error.to_string().contains("inline Slack tokens"));
         assert!(!target.join("SOUL.md").exists());
         let _ = fs::remove_dir_all(target);
+    }
+
+    fn assert_push_skill_links(root: &Path) {
+        let canonical = fs::canonicalize(root.join("skills/push")).unwrap();
+        for provider in PUSH_SKILL_PROVIDERS {
+            let link = root.join(provider).join("skills/push");
+            assert!(fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(fs::canonicalize(link).unwrap(), canonical);
+        }
     }
 }
