@@ -4,6 +4,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
+use serde::Serialize;
 
 use crate::{channel::Channel, config, jobs};
 use config::{SLACK_APP_TOKEN_ENV, SLACK_BOT_TOKEN_ENV, TELEGRAM_BOT_TOKEN_ENV};
@@ -47,6 +48,10 @@ pub fn doctor(config_path: &str) -> Result<()> {
     } else {
         bail!("doctor found {} failed check(s)", report.failed_count())
     }
+}
+
+pub(crate) fn report(cfg: &config::Config) -> CheckReport {
+    run_checks(cfg)
 }
 
 fn run_checks(cfg: &config::Config) -> CheckReport {
@@ -400,19 +405,19 @@ fn check_bins_with(
     }
 }
 
-#[derive(Debug)]
-struct CheckReport {
-    checks: Vec<Check>,
+#[derive(Debug, Serialize)]
+pub(crate) struct CheckReport {
+    pub(crate) checks: Vec<Check>,
 }
 
 impl CheckReport {
-    fn is_ok(&self) -> bool {
+    pub(crate) fn is_ok(&self) -> bool {
         self.checks
             .iter()
             .all(|check| matches!(check.status, CheckStatus::Pass))
     }
 
-    fn failed_count(&self) -> usize {
+    pub(crate) fn failed_count(&self) -> usize {
         self.checks
             .iter()
             .filter(|check| matches!(check.status, CheckStatus::Fail))
@@ -422,6 +427,13 @@ impl CheckReport {
     fn preflight_is_ok(&self) -> bool {
         self.checks.iter().all(|check| {
             !matches!(check.status, CheckStatus::Fail) || check.name == "scheduled delivery"
+        })
+    }
+
+    pub(crate) fn has_unavailable_dependency(&self) -> bool {
+        self.checks.iter().any(|check| {
+            matches!(check.status, CheckStatus::Fail)
+                && (check.name == "agent binaries" || check.name.starts_with("binary "))
         })
     }
 }
@@ -444,8 +456,8 @@ impl fmt::Display for CheckReport {
     }
 }
 
-#[derive(Debug)]
-struct Check {
+#[derive(Debug, Serialize)]
+pub(crate) struct Check {
     name: String,
     status: CheckStatus,
     message: String,
@@ -469,7 +481,8 @@ impl Check {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
 enum CheckStatus {
     Pass,
     Fail,

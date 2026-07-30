@@ -168,6 +168,24 @@ instructions, and Pi through its system-prompt flag. All three receive
 `prompt` through their ordinary prompt input. Restricted evaluator runs keep
 their separate evaluator-specific instruction contract.
 
+### CLI Automation Contract
+
+Human-readable CLI output remains the default. Read-only automation commands
+can select a versioned JSON envelope with `--json`. Success writes one document
+to stdout. Failure writes one structured error to stderr with a stable category
+and exit code. JSON mode does not initialize tracing, print progress, or mix
+tables into stdout.
+
+Diagnostic JSON reports credential presence without values. Job run history
+reports state and content-presence flags without stored result, evaluation, or
+error text. Commands that mutate runtime state reject JSON mode because Push
+cannot always know whether an interrupted external mutation is safe to retry.
+Resolved-path output reads every Push-owned runtime location from the loaded
+`PushPaths` owner. It adds the selected config and user-owned assistant paths
+without reconstructing runtime defaults. Although job runs now share `push.db`
+with channel cursors and backend sessions, their JSON projection queries only
+job-run rows and never exposes co-located session IDs or conversation content.
+
 ### Durable State Contract
 
 Push uses separate stores because they have different update and query needs:
@@ -823,6 +841,7 @@ result before proactive delivery.
 | Module | Responsibility |
 | --- | --- |
 | [`src/main.rs`](src/main.rs) | CLI parsing and process entry |
+| [`src/cli_json.rs`](src/cli_json.rs) | versioned JSON envelopes, exit categories, and secret-safe command projections |
 | [`src/config.rs`](src/config.rs) | configuration parsing, migration, validation, and routing |
 | [`src/gateway/`](src/gateway/) | channel coordination, polling, queues, workers, acknowledgement, delivery |
 | [`src/channel.rs`](src/channel.rs) | provider-neutral channel contract and static dispatch |
