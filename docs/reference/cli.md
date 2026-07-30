@@ -61,9 +61,11 @@ ignores `--config`. Run `push doctor` separately when you want to validate those
 settings from the current shell.
 
 `push init` accepts an empty target, the selected config by itself, or a
-complete existing assistant layout. It refuses unrelated and partial non-empty
-directories, preserves user-owned `SOUL.md` and `AGENTS.md`, persists one
-canonical `assistant_root`, and initializes Git when needed.
+complete existing assistant layout. It can also safely complete a partial
+layout when the selected config already names that exact `assistant_root`.
+It refuses unrelated partial non-empty directories, preserves user-owned
+`SOUL.md` and `AGENTS.md`, persists one canonical `assistant_root`, and
+initializes Git when needed.
 
 Initialization also installs the versioned Push capability skill at
 `skills/push/` and exposes that one directory through relative links under
@@ -83,10 +85,13 @@ available for:
 - `doctor`, `status`, and `paths`
 - `job validate`, `job list`, `job show`, `job runs`, and `job reviews`
 
-Commands that start or mutate runtime state reject `--json`. This includes the
-gateway, `init`, `reload`, `restart`, and `job run`. In particular, Push does
-not claim that an interrupted mutation is safe to retry when its outcome is
-unknown.
+Commands that start the gateway, change service state, scaffold files, or run a
+job reject `--json`. This includes the gateway, `init`, `reload`, `restart`, and
+`job run`. Config-loading inspection commands can still migrate the database
+schema and capture the one-time upgraded schedule baseline. They do not start a
+job or decide a schedule review, but they are not filesystem-state-free. Push
+does not claim that an interrupted mutation is safe to retry when its outcome
+is unknown.
 
 A successful command writes exactly one JSON document and a trailing newline to
 stdout. It writes nothing to stderr:

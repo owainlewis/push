@@ -61,7 +61,7 @@ Good examples include preferences, active projects, people, recurring processes,
 "#;
 
 const PUSH_SKILL: &str = include_str!("../assistant/skills/push/SKILL.md");
-const PUSH_SKILL_VERSION: u32 = 2;
+const PUSH_SKILL_VERSION: u32 = 3;
 const PUSH_SKILL_LINK: &str = "../../skills/push";
 const PUSH_SKILL_MANIFEST: &str = ".push-managed.json";
 const PUSH_SKILL_PROVIDERS: [&str; 2] = [".agents", ".claude"];
@@ -98,7 +98,7 @@ pub fn init(requested_path: &str, config_path: &str) -> Result<InitResult> {
     let config_path = absolute_path(Path::new(&expanded_config)).context("resolve config path")?;
     let existing_config = inspect_config(&config_path, &target, &paths)?;
 
-    prepare_target(&target, &config_path)?;
+    prepare_target(&target, &config_path, existing_config)?;
     let root = fs::canonicalize(&target)
         .with_context(|| format!("resolve assistant root {}", target.display()))?;
     scaffold(&root)?;
@@ -334,7 +334,7 @@ fn resolve_existing_or_lexical(path: &Path) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-fn prepare_target(target: &Path, config_path: &Path) -> Result<()> {
+fn prepare_target(target: &Path, config_path: &Path, config_state: ConfigState) -> Result<()> {
     if target.exists() {
         if !target.is_dir() {
             bail!("assistant target {} is not a directory", target.display());
@@ -343,6 +343,19 @@ fn prepare_target(target: &Path, config_path: &Path) -> Result<()> {
             .with_context(|| format!("inspect assistant target {}", target.display()))?
             .collect::<std::io::Result<Vec<_>>>()?;
         let resolved_config = resolve_existing_or_lexical(config_path)?;
+        match fs::symlink_metadata(target.join(".git")) {
+            Ok(_) => {
+                let resolved_target = fs::canonicalize(target)
+                    .with_context(|| format!("resolve assistant target {}", target.display()))?;
+                verify_git_root(&resolved_target)
+                    .context("validate existing Git metadata before init")?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("inspect Git metadata under {}", target.display()))
+            }
+        }
         if entries.is_empty()
             || entries.iter().all(|entry| {
                 entry.file_name() == ".git"
@@ -350,12 +363,9 @@ fn prepare_target(target: &Path, config_path: &Path) -> Result<()> {
                         .is_ok_and(|path| path == resolved_config)
             })
         {
-            if target.join(".git").exists() {
-                verify_git_root(target).context("validate existing Git metadata before init")?;
-            }
             return Ok(());
         }
-        if !valid_assistant_structure(target) {
+        if !valid_assistant_structure(target) && config_state != ConfigState::MatchingRoot {
             bail!(
                 "assistant target {} is non-empty but is not a complete assistant repository. Choose an empty directory or a valid assistant containing SOUL.md, AGENTS.md, README.md, context/README.md, and jobs/.",
                 target.display()
@@ -815,6 +825,43 @@ mod tests {
         let _ = fs::remove_dir_all(parent);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn configured_partial_assistant_with_broken_git_link_is_not_scaffolded() {
+        use std::os::unix::fs::symlink;
+
+        let parent = temp_dir("assistant-configured-partial-broken-git-link");
+        let target = parent.join("assistant");
+        let missing_git = parent.join("missing-git");
+        let config = parent.join("push.toml");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("SOUL.md"), "Existing identity\n").unwrap();
+        symlink(&missing_git, target.join(".git")).unwrap();
+        fs::write(
+            &config,
+            format!(
+                "assistant_root = {}\n",
+                toml::Value::String(target.to_string_lossy().to_string())
+            ),
+        )
+        .unwrap();
+
+        let error = init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("validate existing Git metadata"));
+        assert_eq!(
+            fs::read_to_string(target.join("SOUL.md")).unwrap(),
+            "Existing identity\n"
+        );
+        assert!(!target.join("AGENTS.md").exists());
+        assert!(!target.join("README.md").exists());
+        assert!(!target.join("context").exists());
+        assert!(!target.join("jobs").exists());
+        assert!(!target.join("skills").exists());
+        assert!(!missing_git.exists());
+        let _ = fs::remove_dir_all(parent);
+    }
+
     #[test]
     fn repeat_initialization_preserves_user_files_and_configuration() {
         let parent = temp_dir("assistant-reinit");
@@ -1027,6 +1074,75 @@ mod tests {
             assert!(!target.join("jobs").exists());
             assert!(!config.exists());
         }
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn completes_a_partial_configured_assistant_without_overwriting_user_files() {
+        let parent = temp_dir("assistant-configured-partial");
+        let target = parent.join("assistant");
+        let config = parent.join("push.toml");
+        fs::create_dir_all(target.join("context")).unwrap();
+        fs::create_dir(target.join("jobs")).unwrap();
+        fs::write(target.join("SOUL.md"), "Existing identity\n").unwrap();
+        fs::write(target.join("context/private.md"), "Existing context\n").unwrap();
+        fs::write(
+            &config,
+            format!(
+                "assistant_root = {}\n",
+                toml::Value::String(target.to_string_lossy().to_string())
+            ),
+        )
+        .unwrap();
+
+        let result = init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap();
+
+        assert_eq!(result.root, fs::canonicalize(&target).unwrap());
+        assert_eq!(
+            fs::read_to_string(target.join("SOUL.md")).unwrap(),
+            "Existing identity\n"
+        );
+        assert_eq!(
+            fs::read_to_string(target.join("context/private.md")).unwrap(),
+            "Existing context\n"
+        );
+        assert!(target.join("AGENTS.md").is_file());
+        assert!(target.join("README.md").is_file());
+        assert!(target.join("context/README.md").is_file());
+        assert!(target.join("evals").is_dir());
+        assert!(target.join("skills/push/SKILL.md").is_file());
+        assert_push_skill_links(&target);
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn configured_partial_assistant_with_invalid_git_is_not_scaffolded() {
+        let parent = temp_dir("assistant-configured-partial-invalid-git");
+        let target = parent.join("assistant");
+        let config = parent.join("push.toml");
+        fs::create_dir_all(target.join(".git")).unwrap();
+        fs::write(target.join("SOUL.md"), "Existing identity\n").unwrap();
+        fs::write(
+            &config,
+            format!(
+                "assistant_root = {}\n",
+                toml::Value::String(target.to_string_lossy().to_string())
+            ),
+        )
+        .unwrap();
+
+        let error = init(target.to_str().unwrap(), config.to_str().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("validate existing Git metadata"));
+        assert_eq!(
+            fs::read_to_string(target.join("SOUL.md")).unwrap(),
+            "Existing identity\n"
+        );
+        assert!(!target.join("AGENTS.md").exists());
+        assert!(!target.join("README.md").exists());
+        assert!(!target.join("context").exists());
+        assert!(!target.join("jobs").exists());
+        assert!(!target.join("skills").exists());
         let _ = fs::remove_dir_all(parent);
     }
 

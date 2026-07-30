@@ -4,7 +4,7 @@ description: Operate a Push personal assistant, inspect its health and jobs, and
 license: MIT
 compatibility: Requires the Push CLI and an initialized assistant repository.
 metadata:
-  push-managed-version: "2"
+  push-managed-version: "3"
 ---
 
 # Push
@@ -37,6 +37,8 @@ are:
 - `push init [path]`
 - `push`
 - `push doctor`
+- `push status`
+- `push paths`
 - `push reload` or `push restart`
 - `push job validate`
 - `push job list`
@@ -45,9 +47,16 @@ are:
 - `push job runs [<name>]`
 - `push job reviews [<name>]`
 
-All commands accept `--config <path>`. Do not assume machine-readable output
-unless `push help` documents it in the installed version. Never expose tokens,
-message content, or sensitive runtime state in diagnostics or replies.
+All commands accept `--config <path>`, although service status and restart use
+the installed service definition. Inspection commands support `--json` where
+documented by `push help`: help, version, doctor, status, paths, job validation,
+job inspection, runs, and reviews. Commands that start the gateway, change
+service state, scaffold files, or run a job reject JSON mode. The first upgraded
+inspection that loads configuration and job state records the one-time schedule
+migration baseline; follow the release upgrade notes before running it. Prefer
+JSON for automation, but still treat paths, handles, and operational metadata
+as sensitive. Never expose tokens, message content, or sensitive runtime state
+in diagnostics or replies.
 
 ## Author jobs safely
 

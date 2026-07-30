@@ -110,5 +110,5 @@ jobs:
             gh release create "${TAG}" dist/* \
               --title "${TAG}" \
               --verify-tag \
-              --generate-notes
+              --notes-file RELEASE_NOTES.md
           fi
