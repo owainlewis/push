@@ -12,7 +12,7 @@ use crate::approval::{parse_answer, AnswerOrigin, AnswerOutcome, NormalizedAnswe
 #[cfg(test)]
 use crate::approval::{DeliveryStatus as ApprovalDeliveryStatus, Question};
 
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 const RETIRED_JOB_APPROVAL_ERROR: &str = "job approval was removed; request direct job creation";
 const MAX_HISTORY_READ_BYTES: usize = 8 * 1024;
 const READ_TRUNCATED: &str = "\n[truncated by push while reading history]";
@@ -825,6 +825,34 @@ fn migrate(conn: &Connection) -> Result<()> {
         )?;
         conn.execute_batch("PRAGMA user_version = 10;")?;
     }
+    if version <= 10 {
+        conn.execute_batch(
+            "CREATE TABLE channel_cursors (
+                 channel TEXT PRIMARY KEY,
+                 cursor INTEGER NOT NULL,
+                 updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                 CHECK(length(trim(channel)) > 0)
+             );
+             CREATE TABLE backend_sessions (
+                 channel TEXT NOT NULL,
+                 thread_key TEXT NOT NULL,
+                 backend TEXT NOT NULL,
+                 session_id TEXT NOT NULL,
+                 started INTEGER NOT NULL CHECK(started IN (0, 1)),
+                 updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                 PRIMARY KEY(channel, thread_key),
+                 CHECK(length(trim(channel)) > 0),
+                 CHECK(length(trim(thread_key)) > 0),
+                 CHECK(length(trim(backend)) > 0)
+             );
+             CREATE TABLE legacy_state_migrations (
+                 source_path TEXT PRIMARY KEY,
+                 source_sha256 TEXT NOT NULL,
+                 migrated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             );
+             PRAGMA user_version = 11;",
+        )?;
+    }
     conn.execute_batch("COMMIT;")?;
     Ok(())
 }
@@ -927,7 +955,11 @@ mod tests {
         let path = temp_path("message-delivery-v8-migration");
         let history = History::open(path.to_str().unwrap()).unwrap();
         history.execute_batch_for_test(
-            "ALTER TABLE messages DROP COLUMN delivery_chunk_index; PRAGMA user_version = 8;",
+            "ALTER TABLE messages DROP COLUMN delivery_chunk_index;
+             DROP TABLE legacy_state_migrations;
+             DROP TABLE backend_sessions;
+             DROP TABLE channel_cursors;
+             PRAGMA user_version = 8;",
         );
         drop(history);
 
@@ -964,7 +996,12 @@ mod tests {
                 [&question.id],
             )
             .unwrap();
-        history.execute_batch_for_test("PRAGMA user_version = 9;");
+        history.execute_batch_for_test(
+            "DROP TABLE legacy_state_migrations;
+             DROP TABLE backend_sessions;
+             DROP TABLE channel_cursors;
+             PRAGMA user_version = 9;",
+        );
         drop(history);
 
         let mut reopened = History::open(path.to_str().unwrap()).unwrap();
@@ -1024,6 +1061,9 @@ mod tests {
              DROP TABLE job_runs;
              DROP TABLE approval_questions;
              ALTER TABLE messages DROP COLUMN delivery_chunk_index;
+             DROP TABLE legacy_state_migrations;
+             DROP TABLE backend_sessions;
+             DROP TABLE channel_cursors;
              PRAGMA user_version = 1;",
         );
         drop(history);
@@ -1053,6 +1093,9 @@ mod tests {
              DROP TABLE job_draft_proposals;
              DROP TABLE job_runs;
              ALTER TABLE messages DROP COLUMN delivery_chunk_index;
+             DROP TABLE legacy_state_migrations;
+             DROP TABLE backend_sessions;
+             DROP TABLE channel_cursors;
              PRAGMA user_version = 2;",
         );
         drop(history);
@@ -1112,6 +1155,9 @@ mod tests {
              ALTER TABLE job_runs DROP COLUMN evaluation_state;
              DROP TABLE gateway_control_actions;
              ALTER TABLE messages DROP COLUMN delivery_chunk_index;
+             DROP TABLE legacy_state_migrations;
+             DROP TABLE backend_sessions;
+             DROP TABLE channel_cursors;
              PRAGMA user_version = 6;",
         );
         drop(history);

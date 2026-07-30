@@ -22,6 +22,11 @@ Set one absolute `PUSH_HOME` in the service definition. It defaults to
 `~/.push` for interactive commands. The service user needs:
 
 - read and write access to `PUSH_HOME`
+- access to the configured `config.toml`
+- read access and owner control of an existing legacy `state_path` for migration
+- write access to `audit_log_path`
+- write access to `database_path`
+- write access to `jobs_run_dir`
 - filesystem access to `assistant_root` as allowed by the selected agent
 - agent write access to `assistant_root/jobs/` when jobs should be created from chat
 - access to the selected `claude`, `codex`, or `pi` executable on `PATH`
@@ -35,12 +40,14 @@ Set one absolute `PUSH_HOME` in the service definition. It defaults to
   `OPENAI_API_KEY` in the service environment, plus network access to
   `api.openai.com`
 
-`$PUSH_HOME/state.json` stores independent cursors for each channel and backend
-session IDs. `$PUSH_HOME/push.db` stores the canonical conversation and job
-journal. The audit log, Slack recovery inbox, job locks, and cache are derived
-from the same root. Chat agents run from `assistant_root`. Keep `PUSH_HOME` on
-durable storage. Restarting the service resumes after the last completed row
-and reuses existing backend sessions when the backend for that thread has not
+`database_path` stores the canonical conversation journal, channel cursors, and
+backend session mappings. `state_path` is only a legacy JSON migration source
+and retained recovery copy; Push does not write live state to it. The audit
+log, Slack recovery inbox, job locks, and cache remain separate paths derived
+from `PUSH_HOME`, unless their documented compatibility settings override
+them. Chat agents run from `assistant_root`. Keep these paths on durable
+storage. Restarting the service resumes after the last completed row and
+reuses existing backend sessions when the backend for that thread has not
 changed.
 
 Keep `assistant_root` in its own Git repository. Keep config secrets, state,
@@ -208,6 +215,24 @@ persistent local storage. Restarting the service resumes queued runs and
 pending result delivery; it does not catch up missed cron times or rerun
 interrupted agent execution. Use `push job runs` to distinguish execution state
 from delivery attempts.
+
+## Backup and state migration recovery
+
+Stop the managed service before taking a filesystem copy of `push.db`, or use
+SQLite's online backup tooling. The database contains conversation history,
+job and delivery state, channel cursors, and backend session mappings. Back up
+the audit log and assistant repository separately. Slack's durable inbox stays
+in `<state_path>.slack-inbox.db`; include it when preserving unprocessed Slack
+events.
+
+After an upgrade, Push imports an existing configured `state_path` in one
+transaction and leaves that JSON file unchanged. Keep it as a private recovery
+copy until a verified database backup exists. If migration fails, fix or
+restore the JSON and restart; Push will not poll while the import is
+incomplete. If the post-migration database is lost, restore `push.db` from
+backup. As a last resort, move the unusable database aside and restart with the
+retained JSON to recover its older cursors and sessions, understanding that
+conversation, job, and delivery records not present in JSON will be absent.
 
 ## Agent-created jobs
 

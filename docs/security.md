@@ -62,8 +62,8 @@ service environment using the narrowest policy that works.
 | --- | --- |
 | `$PUSH_HOME/config.toml` | allowlists, routes, paths, and possibly credentials |
 | `<assistant_root>/` | Git-versioned identity, context, evals, jobs, and optional project skills |
-| `$PUSH_HOME/state.json` | channel cursors and backend session IDs |
-| `$PUSH_HOME/push.db` | conversation history, approvals, and job runs |
+| `$PUSH_HOME/state.json` | retained legacy cursor and session recovery copy after migration |
+| `$PUSH_HOME/push.db` | conversation history, approvals, jobs, delivery, channel cursors, and backend sessions |
 | `$PUSH_HOME/state.json.slack-inbox.db` | Slack envelopes accepted before gateway processing |
 | `$PUSH_HOME/audit.jsonl` | metadata, errors, handles, and optional content |
 | `$PUSH_HOME/run/` | local job lock files |
@@ -109,6 +109,12 @@ error, and character counts. Message and reply content are omitted unless
 
 The redacted log is still sensitive because it can contain handles, thread
 IDs, file paths, and backend errors. Protect and rotate it like a service log.
+
+The legacy state migration repairs the JSON file to owner-only permissions and
+does not delete or rewrite it. Keep that recovery copy private until your
+normal encrypted backup process has captured the migrated `push.db`. The
+database is the live source of truth after migration, so backing up only
+`state.json` is not sufficient.
 
 ## Deployment checklist
 

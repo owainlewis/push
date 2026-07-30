@@ -256,8 +256,8 @@ requests. Review [permissions and security](security.md) before enabling jobs.
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `assistant_root` | required for new setups | Canonical root of the one assistant repository; `SOUL.md`, `context/`, `evals/`, and `jobs/` are derived |
-| `state_path` | `$PUSH_HOME/state.json` | Channel cursors and backend session IDs |
-| `database_path` | `$PUSH_HOME/push.db` | Canonical conversation, approval, and job history |
+| `state_path` | `$PUSH_HOME/state.json` | Legacy JSON source retained for one-time cursor and session migration |
+| `database_path` | `$PUSH_HOME/push.db` | Canonical history, jobs, delivery, channel cursors, and backend sessions |
 | `audit_log_path` | `$PUSH_HOME/audit.jsonl` | Structured local audit log |
 | `audit_log_content` | `false` | Include message and reply content in audit events |
 
@@ -325,6 +325,13 @@ jobs path is exactly `<assistant_dir>/jobs`. For separate legacy paths, move
 
 Explicit `state_path`, `database_path`, `audit_log_path`, and `jobs_run_dir`
 settings remain supported for the rest of the 0.x release line. Push does not
-move or rewrite data at those paths. A future removal would require an
-announced major release and migration instructions. New installations should
-omit them and let `PUSH_HOME` own the whole runtime layout.
+move or rewrite data at the database, audit, or run-lock paths. On startup,
+Push imports an existing JSON file at `state_path` into `database_path` once,
+records the import in the same SQLite transaction, and leaves the JSON
+untouched as a recovery copy. After that commit, Push reads and writes cursor
+and backend-session state only in SQLite. Do not edit the retained JSON
+expecting live state to change.
+
+A future removal of these settings would require an announced major release
+and migration instructions. New installations should omit them and let
+`PUSH_HOME` own the whole runtime layout.

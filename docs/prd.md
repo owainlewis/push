@@ -161,10 +161,10 @@ user prompt.
 | `telegram.bot_token` | Telegram bot token stored in the private config. |
 | `telegram.allow_user_ids` | Allowed private-chat sender IDs. |
 | `telegram.allow_chat_ids` | Allowed private chat IDs. |
-| `state_path` | JSON state path. |
+| `state_path` | Legacy JSON cursor/session source retained for one-time migration compatibility. |
 | `audit_log_path` | Local JSONL audit log path. |
 | `audit_log_content` | Whether audit events include message and reply text. |
-| `database_path` | Canonical SQLite history path; defaults to `$PUSH_HOME/push.db`. |
+| `database_path` | Canonical SQLite history, job, delivery, cursor, and backend-session path; defaults to `$PUSH_HOME/push.db`. |
 
 ## Control Commands
 
