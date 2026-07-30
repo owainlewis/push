@@ -9,7 +9,7 @@ server port. Telegram documents the polling contract in the official
 
 1. Open a private chat with Telegram's official `@BotFather` account.
 2. Send `/newbot` and follow the prompts.
-3. Store the bot token in `~/.push/config.toml`. Keep that file private and do
+3. Store the bot token in `$PUSH_HOME/config.toml`. Keep that file private and do
    not commit it, paste it into issue comments, or print it in logs.
 4. Send one private message to the new bot.
 5. Find your stable numeric user and chat ids from a trusted Bot API
@@ -52,7 +52,7 @@ Telegram-only preflight does not open `chat.db` and does not require macOS or
 
 ## Voice Messages
 
-Add the optional OpenAI API key to `~/.push/config.toml` to enable both incoming
+Add the optional OpenAI API key to `$PUSH_HOME/config.toml` to enable both incoming
 voice transcription and spoken replies:
 
 ```toml

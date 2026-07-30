@@ -104,7 +104,7 @@ Scheduled example:
 +++
 version = 1
 timeout = "5m"
-workdir = "~/.push/workspaces/morning-agenda"
+workdir = "~/Code/morning-agenda"
 
 [[triggers]]
 id = "weekday-morning"
@@ -183,7 +183,7 @@ built-in utility tools. The first version evaluates the returned response
 without inspecting work-directory artifacts.
 
 Before backend execution, both manual and scheduled starts attempt a
-non-blocking OS advisory lock for the job under `~/.push/run/locks/`. The
+non-blocking OS advisory lock for the job under `$PUSH_HOME/run/locks/`. The
 winning process holds that lock until its run finishes. It then uses one SQLite
 transaction to check queued and running state, record the run, and claim the
 job. A start that loses the file lock or database claim is recorded as

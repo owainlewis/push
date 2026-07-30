@@ -12,6 +12,7 @@ use crate::config::{
     validate_inline_slack_token_location, validate_inline_token_location,
     validate_inline_voice_key_location,
 };
+use crate::paths::PushPaths;
 use crate::util::expand_home;
 
 const SOUL: &str = r#"# SOUL
@@ -84,6 +85,7 @@ pub struct InitResult {
 }
 
 pub fn init(requested_path: &str, config_path: &str) -> Result<InitResult> {
+    let paths = PushPaths::discover()?;
     let requested = expand_home(requested_path);
     if requested.starts_with('~') {
         bail!("cannot expand assistant path {requested_path:?}; set HOME or use an absolute path");
@@ -94,7 +96,7 @@ pub fn init(requested_path: &str, config_path: &str) -> Result<InitResult> {
         bail!("cannot expand config path {config_path:?}; set HOME or use an absolute path");
     }
     let config_path = absolute_path(Path::new(&expanded_config)).context("resolve config path")?;
-    let existing_config = inspect_config(&config_path, &target)?;
+    let existing_config = inspect_config(&config_path, &target, &paths)?;
 
     prepare_target(&target, &config_path)?;
     let root = fs::canonicalize(&target)
@@ -102,7 +104,7 @@ pub fn init(requested_path: &str, config_path: &str) -> Result<InitResult> {
     scaffold(&root)?;
     let git_initialized = initialize_git(&root)?;
     persist_root(&config_path, &root, existing_config)?;
-    if inspect_config(&config_path, &root)? != ConfigState::MatchingRoot {
+    if inspect_config(&config_path, &root, &paths)? != ConfigState::MatchingRoot {
         bail!(
             "assistant validation failed: {} did not persist assistant_root",
             config_path.display()
@@ -124,11 +126,11 @@ enum ConfigState {
     MatchingRoot,
 }
 
-fn inspect_config(config_path: &Path, target: &Path) -> Result<ConfigState> {
+fn inspect_config(config_path: &Path, target: &Path, paths: &PushPaths) -> Result<ConfigState> {
     let raw = match fs::read_to_string(config_path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            validate_runtime_boundary(None, target)?;
+            validate_runtime_boundary(None, target, paths)?;
             return Ok(ConfigState::MissingFile);
         }
         Err(error) => {
@@ -139,7 +141,7 @@ fn inspect_config(config_path: &Path, target: &Path) -> Result<ConfigState> {
         toml::from_str(&raw).with_context(|| format!("parse config {}", config_path.display()))?;
     let table = value.as_table().context("config must be a TOML table")?;
     validate_config_secrets(config_path, target, table)?;
-    validate_runtime_boundary(Some(table), target)?;
+    validate_runtime_boundary(Some(table), target, paths)?;
     if table.contains_key("assistant_dir") || table.contains_key("jobs_dir") {
         bail!(
             "{} uses legacy assistant_dir or jobs_dir settings. Move SOUL.md, context, and jobs under one assistant directory, replace those settings with assistant_root, then rerun push init.",
@@ -205,18 +207,38 @@ fn validate_config_secrets(config_path: &Path, target: &Path, config: &toml::Tab
     Ok(())
 }
 
-fn validate_runtime_boundary(config: Option<&toml::Table>, target: &Path) -> Result<()> {
+fn validate_runtime_boundary(
+    config: Option<&toml::Table>,
+    target: &Path,
+    defaults: &PushPaths,
+) -> Result<()> {
     let assistant = resolve_existing_or_lexical(target)?;
-    let jobs_run = configured_runtime_path(config, "jobs_run_dir", "~/.push/run")?;
+    let runtime = defaults.clone().with_overrides(
+        configured_override(config, "state_path")?,
+        configured_override(config, "database_path")?,
+        configured_override(config, "audit_log_path")?,
+        configured_override(config, "jobs_run_dir")?,
+    )?;
+    let push_home = resolve_existing_or_lexical(&runtime.root)?;
+    if assistant.starts_with(&push_home) || push_home.starts_with(&assistant) {
+        bail!(
+            "assistant_root {} must stay outside Push home {}; choose a separate assistant repository or set PUSH_HOME to a separate runtime directory",
+            assistant.display(),
+            push_home.display()
+        );
+    }
+    let jobs_run = resolve_existing_or_lexical(&runtime.jobs_run)?;
     if assistant.starts_with(&jobs_run) || jobs_run.starts_with(&assistant) {
         bail!("jobs_run_dir must stay outside assistant_root; choose a separate assistant path or update jobs_run_dir");
     }
-    for (key, default) in [
-        ("state_path", "~/.push/state.json"),
-        ("database_path", "~/.push/push.db"),
-        ("audit_log_path", "~/.push/audit.jsonl"),
+    for (key, path) in [
+        ("state_path", runtime.state.as_path()),
+        ("database_path", runtime.database.as_path()),
+        ("audit_log_path", runtime.audit.as_path()),
+        ("Slack inbox", runtime.inbox.as_path()),
+        ("cache directory", runtime.cache.as_path()),
     ] {
-        let runtime = configured_runtime_path(config, key, default)?;
+        let runtime = resolve_existing_or_lexical(path)?;
         if runtime.starts_with(&assistant) {
             bail!("{key} must stay outside assistant_root; choose a separate assistant path or update {key}");
         }
@@ -224,26 +246,23 @@ fn validate_runtime_boundary(config: Option<&toml::Table>, target: &Path) -> Res
     Ok(())
 }
 
-fn configured_runtime_path(
-    config: Option<&toml::Table>,
-    key: &str,
-    default: &str,
-) -> Result<PathBuf> {
-    let value = match config.and_then(|table| table.get(key)) {
-        Some(value) => value
-            .as_str()
-            .with_context(|| format!("{key} must be a string"))?,
-        None => default,
-    };
-    let expanded = expand_home(value);
-    if expanded.starts_with('~') {
-        bail!("cannot expand configured {key} {value:?}");
-    }
-    let path = Path::new(&expanded);
-    if !path.is_absolute() {
-        bail!("{key} must be an absolute path or start with ~");
-    }
-    resolve_existing_or_lexical(path)
+fn configured_override<'a>(config: Option<&'a toml::Table>, key: &str) -> Result<Option<&'a str>> {
+    config
+        .and_then(|table| table.get(key))
+        .map(|value| {
+            let value = value
+                .as_str()
+                .with_context(|| format!("{key} must be a string"))?;
+            let expanded = expand_home(value);
+            if expanded.starts_with('~') {
+                bail!("cannot expand configured {key} {value:?}");
+            }
+            if !Path::new(&expanded).is_absolute() {
+                bail!("{key} must be an absolute path or start with ~");
+            }
+            Ok(value)
+        })
+        .transpose()
 }
 
 fn configured_root(config_path: &Path, configured: &str) -> Result<PathBuf> {

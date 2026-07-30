@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
+use crate::paths::PushPaths;
 use crate::util::expand_home;
 
 pub const TELEGRAM_BOT_TOKEN_ENV: &str = "TELEGRAM_BOT_TOKEN";
@@ -85,16 +86,16 @@ pub struct Config {
     pub jobs_agent: Option<String>,
     #[serde(default = "default_jobs_max_timeout")]
     pub jobs_max_timeout: String,
-    #[serde(default = "default_jobs_run_dir")]
-    pub jobs_run_dir: String,
+    #[serde(default, rename = "jobs_run_dir")]
+    pub(crate) jobs_run_dir_override: Option<String>,
     #[serde(default = "default_jobs_max_workers")]
     pub jobs_max_workers: usize,
-    #[serde(default = "default_state_path")]
-    pub state_path: String,
-    #[serde(default = "default_audit_log_path")]
-    pub audit_log_path: String,
-    #[serde(default = "default_database_path")]
-    pub database_path: String,
+    #[serde(default, rename = "state_path")]
+    pub(crate) state_path_override: Option<String>,
+    #[serde(default, rename = "audit_log_path")]
+    pub(crate) audit_log_path_override: Option<String>,
+    #[serde(default, rename = "database_path")]
+    pub(crate) database_path_override: Option<String>,
     #[serde(default)]
     pub audit_log_content: bool,
     /// Derived from `assistant_root`. Parsed only for legacy migration.
@@ -103,6 +104,9 @@ pub struct Config {
     /// Canonical path of the loaded config file. Set by `load`, never parsed.
     #[serde(skip)]
     pub config_path: String,
+    /// Authoritative resolved locations for all Push-owned runtime data.
+    #[serde(skip)]
+    pub paths: PushPaths,
     /// Test-only command injection point. Never parsed from user configuration.
     #[cfg(test)]
     #[serde(skip)]
@@ -112,6 +116,10 @@ pub struct Config {
 impl Config {
     /// Load, expand `~` in path fields, and validate the config at `path`.
     pub fn load(path: &str) -> Result<Config> {
+        Self::load_with_paths(path, PushPaths::discover()?)
+    }
+
+    pub(crate) fn load_with_paths(path: &str, default_paths: PushPaths) -> Result<Config> {
         let expanded_path = expand_home(path);
         let raw = std::fs::read_to_string(&expanded_path)
             .with_context(|| format!("read config {expanded_path}"))?;
@@ -238,9 +246,12 @@ impl Config {
         let config_path = std::fs::canonicalize(&expanded_path)
             .with_context(|| format!("resolve config {expanded_path}"))?;
         c.db_path = expand_home(&c.db_path);
-        c.state_path = expand_home(&c.state_path);
-        c.audit_log_path = expand_home(&c.audit_log_path);
-        c.database_path = expand_home(&c.database_path);
+        c.paths = default_paths.with_overrides(
+            c.state_path_override.as_deref(),
+            c.database_path_override.as_deref(),
+            c.audit_log_path_override.as_deref(),
+            c.jobs_run_dir_override.as_deref(),
+        )?;
         let assistant_root = if has_assistant_root {
             resolve_assistant_root(&c.assistant_root, &config_path)?
         } else {
@@ -277,10 +288,7 @@ impl Config {
         c.assistant_root = assistant_root.to_string_lossy().to_string();
         c.assistant_dir = c.assistant_root.clone();
         c.jobs_dir = assistant_root.join("jobs").to_string_lossy().to_string();
-        c.jobs_run_dir = expand_home(&c.jobs_run_dir);
-        if has_assistant_root {
-            validate_runtime_outside_assistant(&c)?;
-        }
+        validate_runtime_outside_assistant(&c)?;
         c.validate()?;
         c.config_path = config_path.to_string_lossy().to_string();
         Ok(c)
@@ -413,16 +421,19 @@ impl Config {
     pub fn validate_job_workdir(&self, workdir: &Path) -> Result<()> {
         let workdir = resolved_absolute("job workdir", workdir)?;
         let protected_paths = [
-            ("jobs_run_dir", self.jobs_run_dir.as_str()),
-            ("state_path", self.state_path.as_str()),
-            ("database_path", self.database_path.as_str()),
-            ("audit_log_path", self.audit_log_path.as_str()),
+            ("Push home", self.paths.root.as_path()),
+            ("jobs_run_dir", self.paths.jobs_run.as_path()),
+            ("state_path", self.paths.state.as_path()),
+            ("database_path", self.paths.database.as_path()),
+            ("audit_log_path", self.paths.audit.as_path()),
+            ("Slack inbox", self.paths.inbox.as_path()),
+            ("cache directory", self.paths.cache.as_path()),
         ];
         for (label, protected) in protected_paths
             .into_iter()
-            .filter(|(_, protected)| !protected.is_empty())
+            .filter(|(_, protected)| !protected.as_os_str().is_empty())
         {
-            let protected = resolved_absolute(label, Path::new(protected))?;
+            let protected = resolved_absolute(label, protected)?;
             if paths_overlap(&workdir, &protected) {
                 bail!(
                     "job workdir {} overlaps Push-owned {label} {}",
@@ -557,7 +568,7 @@ impl Config {
         if self.jobs_max_timeout_dur()?.is_zero() {
             bail!("jobs_max_timeout must be positive");
         }
-        if self.jobs_dir.trim().is_empty() || self.jobs_run_dir.trim().is_empty() {
+        if self.jobs_dir.trim().is_empty() || self.paths.jobs_run.as_os_str().is_empty() {
             bail!("jobs_dir and jobs_run_dir cannot be empty");
         }
         if self.jobs_max_workers == 0 {
@@ -584,16 +595,26 @@ impl Config {
 
 fn validate_runtime_outside_assistant(cfg: &Config) -> Result<()> {
     let assistant = resolved_absolute("assistant_root", Path::new(&cfg.assistant_root))?;
-    let jobs_run = resolved_absolute("jobs_run_dir", Path::new(&cfg.jobs_run_dir))?;
+    let push_home = resolved_absolute("PUSH_HOME", &cfg.paths.root)?;
+    if paths_overlap(&assistant, &push_home) {
+        bail!(
+            "assistant_root {} must stay outside Push home {}; choose a separate assistant repository or set PUSH_HOME to a separate runtime directory",
+            assistant.display(),
+            push_home.display()
+        );
+    }
+    let jobs_run = resolved_absolute("jobs_run_dir", &cfg.paths.jobs_run)?;
     if paths_overlap(&assistant, &jobs_run) {
         bail!("jobs_run_dir must stay outside assistant_root");
     }
     for (label, value) in [
-        ("state_path", cfg.state_path.as_str()),
-        ("database_path", cfg.database_path.as_str()),
-        ("audit_log_path", cfg.audit_log_path.as_str()),
+        ("state_path", cfg.paths.state.as_path()),
+        ("database_path", cfg.paths.database.as_path()),
+        ("audit_log_path", cfg.paths.audit.as_path()),
+        ("Slack inbox", cfg.paths.inbox.as_path()),
+        ("cache directory", cfg.paths.cache.as_path()),
     ] {
-        let path = resolved_absolute(label, Path::new(value))?;
+        let path = resolved_absolute(label, value)?;
         if path.starts_with(&assistant) {
             bail!("{label} must stay outside assistant_root");
         }
@@ -868,20 +889,8 @@ fn default_jobs_dir() -> String {
 fn default_jobs_max_timeout() -> String {
     "30m".to_string()
 }
-fn default_jobs_run_dir() -> String {
-    "~/.push/run".to_string()
-}
 fn default_jobs_max_workers() -> usize {
     2
-}
-fn default_state_path() -> String {
-    "~/.push/state.json".to_string()
-}
-fn default_audit_log_path() -> String {
-    "~/.push/audit.jsonl".to_string()
-}
-fn default_database_path() -> String {
-    "~/.push/push.db".to_string()
 }
 fn default_assistant_dir() -> String {
     "~/.push".to_string()
@@ -916,13 +925,14 @@ mod tests {
             jobs_dir: root.join("jobs").to_string_lossy().to_string(),
             jobs_agent: None,
             jobs_max_timeout: "30m".to_string(),
-            jobs_run_dir: root.join("run").to_string_lossy().to_string(),
+            jobs_run_dir_override: None,
             jobs_max_workers: 2,
-            state_path: root.join("state.json").to_string_lossy().to_string(),
-            audit_log_path: root.join("audit.jsonl").to_string_lossy().to_string(),
-            database_path: root.join("push.db").to_string_lossy().to_string(),
+            state_path_override: None,
+            audit_log_path_override: None,
+            database_path_override: None,
             audit_log_content: false,
             config_path: String::new(),
+            paths: PushPaths::from_root(root.join("runtime")).unwrap(),
             agent_commands: AgentCommands::default(),
             assistant_dir: root.to_string_lossy().to_string(),
         }

@@ -9,8 +9,6 @@
   <key>ProgramArguments</key>
   <array>
     <string>/Users/YOU/.local/bin/push</string>
-    <string>--config</string>
-    <string>/Users/YOU/.push/config.toml</string>
   </array>
 
   <key>WorkingDirectory</key>
@@ -18,6 +16,8 @@
 
   <key>EnvironmentVariables</key>
   <dict>
+    <key>PUSH_HOME</key>
+    <string>/Users/YOU/.push</string>
     <key>PATH</key>
     <string>/Users/YOU/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>

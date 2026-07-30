@@ -56,6 +56,14 @@ your shell does not already include it. The installer recognizes Intel macOS
 and ARM Linux, but it exits unless the latest GitHub release contains a matching
 archive.
 
+Push stores its private runtime data under `PUSH_HOME`, which defaults to
+`~/.push`. Set an absolute `PUSH_HOME` before `push init` when you want another
+location or an isolated second installation:
+
+```sh
+export PUSH_HOME="$HOME/.push-work"
+```
+
 ## Build from source
 
 Use this path on other Rust-supported architectures or when testing `main`:
@@ -91,7 +99,7 @@ practical structure for identity, context, shared skills, jobs, and evals.
 === "Telegram"
 
     Create a bot with Telegram's `@BotFather`, send it one message, and find
-    your stable numeric user ID. Then edit `~/.push/config.toml`:
+    your stable numeric user ID. Then edit `$PUSH_HOME/config.toml`:
 
     ```toml
     channel = "telegram"
@@ -109,7 +117,7 @@ practical structure for identity, context, shared skills, jobs, and evals.
 === "iMessage"
 
     Give the terminal or service host Full Disk Access in macOS System
-    Settings, then edit `~/.push/config.toml`:
+    Settings, then edit `$PUSH_HOME/config.toml`:
 
     ```toml
     channel = "imessage"
@@ -129,7 +137,7 @@ practical structure for identity, context, shared skills, jobs, and evals.
 
     Create a Slack app with Socket Mode, `connections:write`, `im:history`,
     `chat:write`, and the `message.im` bot event. Set the two tokens in the
-    service environment, then edit `~/.push/config.toml`:
+    service environment, then edit `$PUSH_HOME/config.toml`:
 
     ```toml
     channel = "slack"

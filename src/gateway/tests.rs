@@ -1202,7 +1202,7 @@ async fn pending_outbound_is_delivered_after_restart_without_backend_rerun() {
         sessions_dir.to_str().unwrap(),
         assistant_dir.to_str().unwrap(),
     );
-    let mut history = History::open(&config.database_path).unwrap();
+    let mut history = History::open(&config.paths.database).unwrap();
     let inbound_id = history
         .record_inbound(
             "imessage",
@@ -2546,7 +2546,7 @@ async fn missing_primary_disables_new_schedules_without_stopping_gateway() {
         .await
         .unwrap();
 
-    let rows = crate::jobs::Ledger::open(&cfg.database_path)
+    let rows = crate::jobs::Ledger::open(&cfg.paths.database)
         .unwrap()
         .runs(Some("disabled"))
         .unwrap();
@@ -2786,13 +2786,23 @@ fn test_config(state_path: &str, _sessions_dir: &str, assistant_dir: &str) -> Co
         jobs_dir: format!("{state_path}.jobs"),
         jobs_agent: None,
         jobs_max_timeout: "30m".to_string(),
-        jobs_run_dir: format!("{state_path}.run"),
+        jobs_run_dir_override: None,
         jobs_max_workers: 2,
-        state_path: state_path.to_string(),
-        audit_log_path: format!("{state_path}.audit.jsonl"),
-        database_path: format!("{state_path}.db"),
+        state_path_override: None,
+        audit_log_path_override: None,
+        database_path_override: None,
         audit_log_content: false,
         config_path: String::new(),
+        paths: crate::paths::PushPaths {
+            root: PathBuf::from(format!("{state_path}.home")),
+            config: PathBuf::from(format!("{state_path}.config.toml")),
+            database: PathBuf::from(format!("{state_path}.db")),
+            state: PathBuf::from(state_path),
+            audit: PathBuf::from(format!("{state_path}.audit.jsonl")),
+            jobs_run: PathBuf::from(format!("{state_path}.run")),
+            inbox: PathBuf::from(format!("{state_path}.slack-inbox.db")),
+            cache: PathBuf::from(format!("{state_path}.cache")),
+        },
         agent_commands: crate::config::AgentCommands::default(),
         assistant_dir: assistant_dir.to_string(),
     }

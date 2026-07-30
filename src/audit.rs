@@ -1,6 +1,6 @@
 //! Local JSONL audit log for production debugging.
 
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -12,7 +12,7 @@ use crate::config::AgentBackend;
 
 #[derive(Clone)]
 pub struct AuditLog {
-    path: String,
+    path: PathBuf,
     include_content: bool,
     channel: String,
     lock: Arc<Mutex<()>>,
@@ -63,18 +63,18 @@ pub struct AuditContent {
 
 impl AuditLog {
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn new(path: String, include_content: bool, channel: &str) -> Self {
+    pub fn new(path: impl Into<PathBuf>, include_content: bool, channel: &str) -> Self {
         Self::with_lock(path, include_content, channel, Arc::new(Mutex::new(())))
     }
 
     pub(crate) fn with_lock(
-        path: String,
+        path: impl Into<PathBuf>,
         include_content: bool,
         channel: &str,
         lock: Arc<Mutex<()>>,
     ) -> Self {
         Self {
-            path,
+            path: path.into(),
             include_content,
             channel: channel.to_string(),
             lock,
@@ -83,7 +83,7 @@ impl AuditLog {
 
     pub fn record(&self, event: AuditEvent) -> Result<()> {
         let _guard = self.lock.lock().unwrap();
-        let path = Path::new(&self.path);
+        let path = self.path.as_path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create audit log directory {}", parent.display()))?;
@@ -97,9 +97,9 @@ impl AuditLog {
         }
         let mut file = options
             .open(path)
-            .with_context(|| format!("open audit log {}", self.path))?;
+            .with_context(|| format!("open audit log {}", self.path.display()))?;
         crate::util::restrict_permissions(path, false)
-            .with_context(|| format!("restrict audit log permissions {}", self.path))?;
+            .with_context(|| format!("restrict audit log permissions {}", self.path.display()))?;
         serde_json::to_writer(&mut file, &event).context("write audit event")?;
         use std::io::Write;
         writeln!(file).context("finish audit event")?;

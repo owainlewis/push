@@ -116,10 +116,15 @@ struct WorkerState {
 impl GatewayGroup {
     pub fn new(cfg: Config) -> Result<Self> {
         let enabled = cfg.enabled_channel_kinds()?;
-        let store = Arc::new(Mutex::new(Store::open(&cfg.state_path)?));
-        let history = Arc::new(Mutex::new(History::open(&cfg.database_path).with_context(
-            || format!("open canonical history database {}", cfg.database_path),
-        )?));
+        let store = Arc::new(Mutex::new(Store::open(&cfg.paths.state)?));
+        let history = Arc::new(Mutex::new(
+            History::open(&cfg.paths.database).with_context(|| {
+                format!(
+                    "open canonical history database {}",
+                    cfg.paths.database.display()
+                )
+            })?,
+        ));
         let runners = Arc::new(runners(&cfg));
         let audit_lock = Arc::new(Mutex::new(()));
         let mut gateways = Vec::with_capacity(enabled.len());
@@ -328,10 +333,15 @@ where
 impl Gateway {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(cfg: Config) -> Result<Self> {
-        let store = Arc::new(Mutex::new(Store::open(&cfg.state_path)?));
-        let history = Arc::new(Mutex::new(History::open(&cfg.database_path).with_context(
-            || format!("open canonical history database {}", cfg.database_path),
-        )?));
+        let store = Arc::new(Mutex::new(Store::open(&cfg.paths.state)?));
+        let history = Arc::new(Mutex::new(
+            History::open(&cfg.paths.database).with_context(|| {
+                format!(
+                    "open canonical history database {}",
+                    cfg.paths.database.display()
+                )
+            })?,
+        ));
         let runners = Arc::new(runners(&cfg));
         let kind = cfg
             .enabled_channel_kinds()?
@@ -352,7 +362,7 @@ impl Gateway {
         let ack = Arc::new(Mutex::new(AckState::default()));
         let channel = Channel::new_for(&cfg, kind)?;
         let audit = Arc::new(AuditLog::with_lock(
-            cfg.audit_log_path.clone(),
+            cfg.paths.audit.clone(),
             cfg.audit_log_content,
             channel.id(),
             audit_lock,

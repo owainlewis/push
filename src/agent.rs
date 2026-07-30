@@ -80,6 +80,7 @@ impl Runner {
             }),
             AgentBackend::Codex => Runner::Codex(codex::Runner {
                 bin: cfg.agent_bin(backend).to_string(),
+                cache_dir: cfg.paths.cache.clone(),
             }),
             AgentBackend::Pi => Runner::Pi(pi::Runner {
                 bin: cfg.agent_bin(backend).to_string(),

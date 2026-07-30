@@ -1,7 +1,8 @@
 # Configuration
 
-Push reads TOML from `~/.push/config.toml` by default. Pass `--config <path>`
-to use a different file for a gateway, doctor, init, or job command.
+Push owns one runtime root. `PUSH_HOME` selects it and defaults to `~/.push`.
+The default config is `$PUSH_HOME/config.toml`. Pass `--config <path>` to use a
+different file for a gateway, doctor, init, or job command.
 
 ```sh
 push doctor
@@ -11,6 +12,20 @@ push
 Paths beginning with `~` are expanded. Invalid values, unknown fields inside
 provider sections, unsafe path overlap, and removed gateway permission settings
 fail configuration load with an actionable error.
+
+The path precedence is:
+
+1. `--config` selects the config file when present.
+2. `PUSH_HOME` selects the runtime root, even when `--config` selects a file elsewhere.
+3. Explicit `state_path`, `database_path`, `audit_log_path`, and
+   `jobs_run_dir` settings override their matching derived locations.
+4. Without `PUSH_HOME`, Push derives the root from `HOME` as `~/.push`.
+
+If neither `PUSH_HOME` nor `HOME` is available, commands that need
+configuration fail with an instruction to set `PUSH_HOME`. Help and version
+commands still work. Use distinct `PUSH_HOME` values to run isolated Push
+installations. `assistant_root` is never derived from `PUSH_HOME`; keep the
+assistant repository outside the runtime root.
 
 Create the one assistant repository and persist its root before editing the
 rest of the config:
@@ -241,9 +256,9 @@ requests. Review [permissions and security](security.md) before enabling jobs.
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `assistant_root` | required for new setups | Canonical root of the one assistant repository; `SOUL.md`, `context/`, `evals/`, and `jobs/` are derived |
-| `state_path` | `~/.push/state.json` | Channel cursors and backend session IDs |
-| `database_path` | `~/.push/push.db` | Canonical conversation, approval, and job history |
-| `audit_log_path` | `~/.push/audit.jsonl` | Structured local audit log |
+| `state_path` | `$PUSH_HOME/state.json` | Channel cursors and backend session IDs |
+| `database_path` | `$PUSH_HOME/push.db` | Canonical conversation, approval, and job history |
+| `audit_log_path` | `$PUSH_HOME/audit.jsonl` | Structured local audit log |
 | `audit_log_content` | `false` | Include message and reply content in audit events |
 
 ### Jobs
@@ -252,13 +267,19 @@ requests. Review [permissions and security](security.md) before enabling jobs.
 | --- | --- | --- |
 | `jobs_agent` | root `agent` | Default jobs backend |
 | `jobs_max_timeout` | `"30m"` | Maximum accepted job timeout |
-| `jobs_run_dir` | `~/.push/run` | Local advisory locks |
+| `jobs_run_dir` | `$PUSH_HOME/run` | Local advisory locks |
 | `jobs_max_workers` | `2` | Concurrent scheduled job workers |
 
 Push validates that runtime state, locks, external config files, and job work
 directories do not overlap in unsafe ways.
 Runtime state and secrets must stay outside the Git-versioned assistant
 repository.
+
+Push also derives the Slack recovery inbox as
+`$PUSH_HOME/state.json.slack-inbox.db` and uses `$PUSH_HOME/cache` for
+disposable agent handoff files. When `state_path` is explicitly set, the Slack
+inbox stays beside it as `<state_path>.slack-inbox.db` to preserve existing
+installations.
 
 ## Complete example
 
@@ -299,3 +320,11 @@ Legacy `assistant_dir` and `jobs_dir` settings remain compatible only when the
 jobs path is exactly `<assistant_dir>/jobs`. For separate legacy paths, move
 `SOUL.md`, context, and jobs under one directory and replace both settings with
 `assistant_root`.
+
+### Runtime path compatibility
+
+Explicit `state_path`, `database_path`, `audit_log_path`, and `jobs_run_dir`
+settings remain supported for the rest of the 0.x release line. Push does not
+move or rewrite data at those paths. A future removal would require an
+announced major release and migration instructions. New installations should
+omit them and let `PUSH_HOME` own the whole runtime layout.

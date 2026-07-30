@@ -172,7 +172,7 @@ impl Channel {
                 cfg.slack_bot_token()
                     .ok_or_else(|| anyhow::anyhow!("Slack bot token is not configured"))?,
                 cfg.slack_allow_user_ids.clone(),
-                &cfg.state_path,
+                &cfg.paths.inbox,
             )?)),
         }
     }

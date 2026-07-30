@@ -117,7 +117,7 @@ actionable migration error rather than silently losing identity or jobs.
 
 ### Canonical conversation history
 
-`~/.push/push.db` stores every accepted inbound message and every user-visible
+`$PUSH_HOME/push.db` stores every accepted inbound message and every user-visible
 outbound message, whether produced by a backend or by the gateway. The minimum
 logical model is:
 

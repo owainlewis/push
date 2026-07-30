@@ -60,11 +60,14 @@ service environment using the narrowest policy that works.
 
 | Path | Contains |
 | --- | --- |
-| `config.toml` | allowlists, routes, paths, and possibly credentials |
+| `$PUSH_HOME/config.toml` | allowlists, routes, paths, and possibly credentials |
 | `<assistant_root>/` | Git-versioned identity, context, evals, jobs, and optional project skills |
-| `~/.push/state.json` | channel cursors and backend session IDs |
-| `~/.push/push.db` | conversation history, approvals, and job runs |
-| `~/.push/audit.jsonl` | metadata, errors, handles, and optional content |
+| `$PUSH_HOME/state.json` | channel cursors and backend session IDs |
+| `$PUSH_HOME/push.db` | conversation history, approvals, and job runs |
+| `$PUSH_HOME/state.json.slack-inbox.db` | Slack envelopes accepted before gateway processing |
+| `$PUSH_HOME/audit.jsonl` | metadata, errors, handles, and optional content |
+| `$PUSH_HOME/run/` | local job lock files |
+| `$PUSH_HOME/cache/` | disposable agent handoff files |
 
 Keep them on local durable storage with permissions restricted to the service
 user. Keep the assistant directory in its own private Git repository. Never
@@ -75,8 +78,12 @@ variable or move the config outside. When `voice.openai_api_key` is configured,
 `push doctor` requires the config file to be private on Unix:
 
 ```sh
-chmod 600 ~/.push/config.toml
+chmod 600 "${PUSH_HOME:-$HOME/.push}/config.toml"
 ```
+
+Push rejects any overlap between `assistant_root` and `PUSH_HOME`, including
+overlap through symlinks or existing ancestors. Keep the runtime root private
+to Push and keep the assistant as a separate user-owned Git repository.
 
 ## Network exposure
 
@@ -110,7 +117,7 @@ IDs, file paths, and backend errors. Protect and rotate it like a service log.
 - run `push doctor` as the service user
 - keep agent credentials out of TOML and all credentials out of logs
 - protect config credentials with mode `0600` on Unix
-- use absolute config paths in service files
+- set one absolute `PUSH_HOME` in service files
 - keep Push state and job work directories separate
 - review agent-authored job changes in the assistant repository
 - review the audit log after routing or agent permission changes

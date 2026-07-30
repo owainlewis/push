@@ -43,7 +43,7 @@ You can instead set `slack.app_token` and `slack.bot_token` in the private Push
 config. Never put tokens in the Git-versioned assistant repository. Run:
 
 ```sh
-chmod 600 ~/.push/config.toml
+chmod 600 "${PUSH_HOME:-$HOME/.push}/config.toml"
 push doctor
 push
 ```
