@@ -8,6 +8,7 @@ mod assistant;
 mod audit;
 mod channel;
 mod claude;
+mod cli_json;
 mod codex;
 mod config;
 mod doctor;
@@ -39,6 +40,8 @@ Commands:
   version           Print the installed Push version
   init [path]       Create an assistant repository (default: ./assistant)
   doctor            Validate the configuration and dependencies
+  status            Show the installed gateway service status
+  paths             Show resolved configuration and storage paths
   reload            Reload the installed gateway service
   restart           Alias for reload
   job validate      Validate all installed jobs
@@ -49,6 +52,7 @@ Commands:
 
 Options:
   --config <path>   Use a configuration file (default: $PUSH_HOME/config.toml)
+  --json            Emit stable machine-readable output where supported
   -h, --help        Print help
   -V, --version     Print version
 
@@ -57,17 +61,47 @@ Environment:
 ";
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_target(false).init();
+async fn main() {
+    let raw_args = std::env::args().skip(1).collect::<Vec<_>>();
+    let wants_json = raw_args.iter().any(|arg| arg == "--json");
+    if !wants_json {
+        tracing_subscriber::fmt().with_target(false).init();
+    }
 
-    let args = Args::parse(std::env::args().skip(1).collect())?;
-    let config_path = if matches!(
-        &args.command,
-        Command::Help | Command::Version | Command::Restart
-    ) {
-        None
+    let result = match Args::parse(raw_args) {
+        Ok(args) if args.json => run_json(args).await,
+        Ok(args) => run_human(args)
+            .await
+            .map_err(cli_json::CliError::unexpected),
+        Err(error) => Err(cli_json::CliError::invalid_input(error)),
+    };
+    if let Err(error) = result {
+        if wants_json {
+            cli_json::write_error(&error);
+        } else {
+            eprintln!("Error: {:#}", error.source());
+        }
+        std::process::exit(if wants_json { error.exit_code() } else { 1 });
+    }
+}
+
+async fn run_json(args: Args) -> Result<(), cli_json::CliError> {
+    let config_path = if args.command.json_needs_config() {
+        Some(args.resolved_config_path().map_err(|error| {
+            cli_json::CliError::configuration("Push runtime paths could not be resolved", error)
+        })?)
     } else {
+        None
+    };
+    cli_json::run(config_path.as_deref().unwrap_or(""), args.command).await
+}
+
+async fn run_human(args: Args) -> Result<()> {
+    let explicit_config = args.config_path.is_some();
+    let config_path = if args.command.needs_config() {
         Some(args.resolved_config_path()?)
+    } else {
+        None
     };
     match args.command {
         Command::Help => {
@@ -96,7 +130,7 @@ async fn main() -> Result<()> {
             println!("    $EDITOR {}/SOUL.md", result.root.display());
             println!("    $EDITOR {}/context/README.md", result.root.display());
             println!("  Validate and run:");
-            if args.config_path.is_none() {
+            if !explicit_config {
                 println!("    push doctor");
                 println!("    push");
             } else {
@@ -106,6 +140,12 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Doctor => doctor::doctor(config_path.as_deref().expect("doctor has config")),
+        Command::Status => restart::print_gateway_status(),
+        Command::Paths => {
+            let cfg = load_run_config(config_path.as_deref().expect("paths has config"))?;
+            print!("{}", cli_json::format_paths(&cfg));
+            Ok(())
+        }
         Command::Restart => restart::gateway(),
         Command::Job(command) => {
             run_job_command(
@@ -167,26 +207,52 @@ fn shell_quote(value: &str) -> String {
 struct Args {
     command: Command,
     config_path: Option<String>,
+    json: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum Command {
+pub(crate) enum Command {
     Help,
     Version,
     Run,
     Init(String),
     Doctor,
+    Status,
+    Paths,
     Restart,
     Job(JobCommand),
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum JobCommand {
+pub(crate) enum JobCommand {
     Validate,
     List,
     Show(String),
     Run(String),
     Runs(Option<String>),
+}
+
+impl Command {
+    fn needs_config(&self) -> bool {
+        !matches!(
+            self,
+            Self::Help | Self::Version | Self::Status | Self::Restart
+        )
+    }
+
+    fn json_needs_config(&self) -> bool {
+        matches!(
+            self,
+            Self::Doctor
+                | Self::Paths
+                | Self::Job(
+                    JobCommand::Validate
+                        | JobCommand::List
+                        | JobCommand::Show(_)
+                        | JobCommand::Runs(_)
+                )
+        )
+    }
 }
 
 impl Args {
@@ -207,6 +273,7 @@ impl Args {
     }
 
     fn parse(args: Vec<String>) -> Result<Self> {
+        let json = args.iter().any(|arg| arg == "--json");
         if args
             .iter()
             .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
@@ -214,6 +281,7 @@ impl Args {
             return Ok(Self {
                 command: Command::Help,
                 config_path: None,
+                json,
             });
         }
         if args
@@ -223,6 +291,7 @@ impl Args {
             return Ok(Self {
                 command: Command::Version,
                 config_path: None,
+                json,
             });
         }
 
@@ -238,6 +307,9 @@ impl Args {
                     config_path = Some(path.clone());
                     i += 2;
                 }
+                "--json" => {
+                    i += 1;
+                }
                 value => {
                     positional.push(value.to_string());
                     i += 1;
@@ -251,6 +323,8 @@ impl Args {
             ["init"] => Command::Init("./assistant".to_string()),
             ["init", path] => Command::Init((*path).to_string()),
             ["doctor"] => Command::Doctor,
+            ["status"] => Command::Status,
+            ["paths"] => Command::Paths,
             ["reload" | "restart"] => Command::Restart,
             ["job", "validate"] => Command::Job(JobCommand::Validate),
             ["job", "list"] => Command::Job(JobCommand::List),
@@ -259,12 +333,13 @@ impl Args {
             ["job", "runs"] => Command::Job(JobCommand::Runs(None)),
             ["job", "runs", name] => Command::Job(JobCommand::Runs(Some((*name).to_string()))),
             _ => bail!(
-                "unknown command; expected help, version, init [path], doctor, reload, restart, job validate, job list, job show <name>, job run <name>, job runs [<name>], or --config <path>"
+                "unknown command; expected help, version, init [path], doctor, status, paths, reload, restart, job validate, job list, job show <name>, job run <name>, job runs [<name>], --config <path>, or --json"
             ),
         };
         Ok(Self {
             command,
             config_path,
+            json,
         })
     }
 }
@@ -408,6 +483,7 @@ mod tests {
             Args {
                 command: Command::Doctor,
                 config_path: Some("custom.toml".to_string()),
+                json: false,
             }
         );
     }
@@ -426,6 +502,7 @@ mod tests {
             Args {
                 command: Command::Restart,
                 config_path: Some("custom.toml".to_string()),
+                json: false,
             }
         );
     }
@@ -456,6 +533,7 @@ mod tests {
             Args {
                 command: Command::Help,
                 config_path: None,
+                json: false,
             }
         );
         assert_eq!(
@@ -463,6 +541,7 @@ mod tests {
             Args {
                 command: Command::Help,
                 config_path: None,
+                json: false,
             }
         );
         assert_eq!(
@@ -517,6 +596,7 @@ mod tests {
             Args {
                 command: Command::Job(JobCommand::List),
                 config_path: Some("x.toml".to_string()),
+                json: false,
             }
         );
         assert_eq!(
@@ -562,6 +642,7 @@ mod tests {
             Args {
                 command: Command::Init("~/Code/assistant".to_string()),
                 config_path: Some("custom.toml".to_string()),
+                json: false,
             }
         );
     }
@@ -591,6 +672,19 @@ mod tests {
             Args {
                 command: Command::Run,
                 config_path: None,
+                json: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_json_as_a_global_option() {
+        assert_eq!(
+            Args::parse(vec!["job".into(), "--json".into(), "list".into()]).unwrap(),
+            Args {
+                command: Command::Job(JobCommand::List),
+                config_path: None,
+                json: true,
             }
         );
     }
