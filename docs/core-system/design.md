@@ -90,7 +90,7 @@ Jobs: /resolved/path/to/assistant/jobs
 
 Begin with context/README.md when user context is relevant.
 Do not modify SOUL.md or evals unless the user asks.
-When the user asks to create or change a job, write the complete runbook directly under Jobs and run `push job validate` before saying it succeeded.
+When the user asks to create or change a job, write the complete runbook directly under Jobs and run `push job validate` before saying it was saved. A new or changed enabled schedule remains inactive until Push presents its exact revision for owner review.
 ```
 
 Claude Code and Pi receive the composed text as appended system instructions.

@@ -14,7 +14,7 @@ use crate::history::{DeliveryStatus, OutboundMessage, OutboundOrigin};
 use crate::prompt::{ComposedPrompt, Composer};
 use crate::voice::MAX_AUDIO_BYTES;
 
-use super::{audit, complete_row, Ctx, Job, WorkerState};
+use super::{audit, audit_schedule_events, complete_row, Ctx, Job, WorkerState};
 
 pub(super) const SESSION_SETUP_FAILURE: &str =
     "Push could not prepare this conversation. Check the local logs, then resend.";
@@ -71,6 +71,7 @@ where
             "recovered_outbound",
             "recover outbound",
         );
+        review_changed_schedules(ctx, &job).await;
         return;
     }
 
@@ -487,6 +488,71 @@ where
                 },
             )
             .await;
+        }
+    }
+    review_changed_schedules(ctx, &job).await;
+}
+
+async fn review_changed_schedules(ctx: &Ctx, job: &Job) {
+    let Some(destination) = &ctx.schedule_destination else {
+        return;
+    };
+    let result = (|| {
+        let catalog = crate::jobs::Catalog::load(&ctx.cfg)?;
+        let mut ledger = crate::jobs::Ledger::open(&ctx.cfg.paths.database)?;
+        let (_, events) = ledger.reconcile_schedule_reviews(
+            &catalog,
+            &destination.channel,
+            &destination.target,
+            crate::util::now_ms(),
+        )?;
+        let questions = ledger.schedule_review_questions(
+            &job.approval_origin,
+            &job.target,
+            crate::util::now_ms(),
+        )?;
+        Ok::<_, anyhow::Error>((ledger, events, questions))
+    })();
+    let (mut ledger, _events, questions) = match result {
+        Ok(result) => result,
+        Err(error) => {
+            error!(
+                "[{}] reconcile schedule activation reviews: {error:#}",
+                job.thread
+            );
+            audit(
+                ctx,
+                ctx.audit.failed(
+                    "schedule_review_failed",
+                    job.row_id,
+                    &job.thread,
+                    None,
+                    error.to_string(),
+                ),
+            );
+            return;
+        }
+    };
+    audit_schedule_events(ctx, &mut ledger);
+    for question in questions {
+        let delivered =
+            super::reply_to(ctx, &question.target, &question.render_correlated_text()).await;
+        if let Err(error) = ledger.mark_schedule_question_delivery(
+            &question.id,
+            if delivered {
+                crate::approval::DeliveryStatus::Delivered
+            } else {
+                crate::approval::DeliveryStatus::Failed
+            },
+            crate::util::now_ms(),
+        ) {
+            error!(
+                "[{}] persist schedule review delivery: {error:#}",
+                job.thread
+            );
+        }
+        if !delivered {
+            warn!("[{}] schedule review delivery failed", job.thread);
         }
     }
 }

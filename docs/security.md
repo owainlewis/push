@@ -46,12 +46,14 @@ runs Claude jobs in `bypassPermissions` mode. Pi already has no native
 filesystem sandbox or interactive permission prompt. Evaluators remain
 read-only with tools disabled.
 
-This makes job bodies equivalent to unattended code execution as the Push
-service user. The assistant repository is the default work directory. An
-explicit work directory must exist. Push rejects overlap with runtime state and
-a loaded config stored outside the assistant repository. Keep allowed senders
-and job definitions trusted, and run the service with only the OS permissions
-its jobs require.
+This makes activated job bodies equivalent to unattended code execution as the
+Push service user. New and changed enabled schedules stay inactive until an
+allowlisted owner approves the exact revision and effective execution settings.
+The assistant repository is the default work directory. An explicit work
+directory must exist. Push rejects overlap with runtime state and a loaded
+config stored outside the assistant repository. Keep allowed senders and job
+definitions trusted, and run the service with only the OS permissions its jobs
+require.
 
 Do not place secrets in a job body. Make them available through the backend or
 service environment using the narrowest policy that works.
@@ -96,9 +98,13 @@ This reduces exposure, but it does not make an allowed message harmless.
 
 Bounded `ask_user` questions are stored before delivery, survive restart,
 expire, and can be consumed once. Mismatched, duplicate, ambiguous, cancelled,
-and expired answers do not reach an agent. Job creation does not use this
-mechanism. The selected agent's filesystem permissions control access to jobs
-in the assistant repository.
+and expired answers do not reach an agent. Direct job-file creation does not
+use this mechanism. Enabled schedule activation does: the review binds the
+exact allowlisted channel identity to the content hash, file identity,
+validated schedules, effective backend, timeout, work directory, and delivery
+target. Revalidation and scheduler claims fail closed when those values no
+longer match. Schedule reviews require the question UUID with the answer
+number; uncorrelated numbers cannot approve a replacement question.
 
 ## Audit log
 
@@ -106,6 +112,11 @@ Push writes structured JSONL events to `audit_log_path`. By default events
 include metadata such as row ID, channel, thread, backend, decision, target,
 error, and character counts. Message and reply content are omitted unless
 `audit_log_content = true`.
+
+Schedule lifecycle events use a durable SQLite outbox. Push syncs each JSONL
+event before marking it delivered and retries pending events after a write
+failure or restart. A crash after append but before acknowledgement can produce
+a duplicate with the same `event_id`; consumers should deduplicate that ID.
 
 The redacted log is still sensitive because it can contain handles, thread
 IDs, file paths, and backend errors. Protect and rotate it like a service log.

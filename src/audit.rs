@@ -1,5 +1,6 @@
 //! Local JSONL audit log for production debugging.
 
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -22,6 +23,8 @@ pub struct AuditLog {
 pub struct AuditEvent {
     pub ts_ms: u64,
     pub event: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub row_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -52,6 +55,12 @@ pub struct AuditEvent {
     pub reply: Option<AuditContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -88,8 +97,10 @@ impl AuditLog {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create audit log directory {}", parent.display()))?;
         }
+        let mut encoded = serde_json::to_vec(&event).context("encode audit event")?;
+        encoded.push(b'\n');
         let mut options = std::fs::OpenOptions::new();
-        options.create(true).append(true);
+        options.create(true).read(true).write(true).append(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -100,16 +111,32 @@ impl AuditLog {
             .with_context(|| format!("open audit log {}", self.path.display()))?;
         crate::util::restrict_permissions(path, false)
             .with_context(|| format!("restrict audit log permissions {}", self.path.display()))?;
-        serde_json::to_writer(&mut file, &event).context("write audit event")?;
-        use std::io::Write;
-        writeln!(file).context("finish audit event")?;
+        repair_incomplete_tail(&mut file).context("repair incomplete audit event")?;
+        file.write_all(&encoded).context("write audit event")?;
+        file.sync_data().context("sync audit event")?;
         Ok(())
+    }
+
+    pub(crate) fn flush_schedule_reviews(&self, ledger: &mut crate::jobs::Ledger) -> Result<usize> {
+        let mut written = 0usize;
+        loop {
+            let events = ledger.pending_schedule_audit_events(100)?;
+            if events.is_empty() {
+                return Ok(written);
+            }
+            for event in events {
+                self.record(self.schedule_review(&event))?;
+                ledger.mark_schedule_audit_logged(event.id, crate::util::now_ms())?;
+                written += 1;
+            }
+        }
     }
 
     pub fn inbound(&self, msg: &RawMessage) -> AuditEvent {
         AuditEvent {
             ts_ms: now_ms(),
             event: "message_inbound".to_string(),
+            event_id: None,
             row_id: Some(msg.row_id),
             channel: Some(msg.channel.to_string()),
             thread: None,
@@ -125,6 +152,9 @@ impl AuditLog {
             message: Some(content(&msg.text, self.include_content)),
             reply: None,
             error: None,
+            job_name: None,
+            revision: None,
+            actor: None,
         }
     }
 
@@ -236,6 +266,29 @@ impl AuditLog {
         event.reason = Some(reason.into());
         event
     }
+
+    pub fn schedule_review(&self, event: &crate::jobs::ScheduleReviewEvent) -> AuditEvent {
+        let mut audit = self.base(
+            match event.event.as_str() {
+                "proposed" => "schedule_review_proposed",
+                "approved" => "schedule_review_approved",
+                "rejected" => "schedule_review_rejected",
+                "invalidated" => "schedule_review_invalidated",
+                "activated" => "schedule_review_activated",
+                _ => "schedule_review_unknown",
+            },
+            None,
+            None,
+            None,
+        );
+        audit.ts_ms = u64::try_from(event.created_at_ms).unwrap_or_default();
+        audit.event_id = Some(format!("job_schedule_event:{}", event.audit_event_id));
+        audit.job_name = Some(event.job_name.clone());
+        audit.revision = Some(event.content_hash.clone());
+        audit.reason = event.reason.clone();
+        audit.actor = event.actor.clone();
+        audit
+    }
     fn base(
         &self,
         event: &'static str,
@@ -246,6 +299,7 @@ impl AuditLog {
         AuditEvent {
             ts_ms: now_ms(),
             event: event.to_string(),
+            event_id: None,
             row_id,
             channel: Some(self.channel.clone()),
             thread: thread.map(str::to_string),
@@ -261,6 +315,9 @@ impl AuditLog {
             message: None,
             reply: None,
             error: None,
+            job_name: None,
+            revision: None,
+            actor: None,
         }
     }
 }
@@ -275,6 +332,35 @@ impl AuditEvent {
         self.rehydrated_messages = Some(count);
         self
     }
+}
+
+fn repair_incomplete_tail(file: &mut std::fs::File) -> std::io::Result<()> {
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(());
+    }
+    file.seek(SeekFrom::End(-1))?;
+    let mut last = [0u8; 1];
+    file.read_exact(&mut last)?;
+    if last[0] == b'\n' {
+        return Ok(());
+    }
+
+    let mut end = len;
+    let mut buffer = [0u8; 8 * 1024];
+    while end > 0 {
+        let start = end.saturating_sub(buffer.len() as u64);
+        let count = usize::try_from(end - start).unwrap_or(buffer.len());
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut buffer[..count])?;
+        if let Some(index) = buffer[..count].iter().rposition(|byte| *byte == b'\n') {
+            file.set_len(start + index as u64 + 1)?;
+            return Ok(());
+        }
+        end = start;
+    }
+    file.set_len(0)?;
+    Ok(())
 }
 
 fn content(text: &str, include: bool) -> AuditContent {
@@ -373,6 +459,33 @@ mod tests {
         assert_eq!(failed.backend.as_deref(), Some("codex"));
         assert_eq!(failed.target.as_deref(), Some("+15551234567"));
         assert_eq!(failed.error.as_deref(), Some("send failed"));
+    }
+
+    #[test]
+    fn schedule_review_events_keep_job_and_revision_context() {
+        let audit = AuditLog::new("audit.jsonl".to_string(), false, "scheduler");
+        let event = audit.schedule_review(&crate::jobs::ScheduleReviewEvent {
+            id: 17,
+            audit_event_id: "9ec38fe9-a6c8-4e74-b2cf-d6b8a943188a".to_string(),
+            event: "invalidated".to_string(),
+            job_name: "daily-review".to_string(),
+            content_hash: "abc123".to_string(),
+            review_id: "review-id".to_string(),
+            actor: Some("scheduler".to_string()),
+            reason: Some("job revision changed".to_string()),
+            created_at_ms: 1234,
+        });
+
+        assert_eq!(event.event, "schedule_review_invalidated");
+        assert_eq!(
+            event.event_id.as_deref(),
+            Some("job_schedule_event:9ec38fe9-a6c8-4e74-b2cf-d6b8a943188a")
+        );
+        assert_eq!(event.ts_ms, 1234);
+        assert_eq!(event.job_name.as_deref(), Some("daily-review"));
+        assert_eq!(event.revision.as_deref(), Some("abc123"));
+        assert_eq!(event.actor.as_deref(), Some("scheduler"));
+        assert_eq!(event.reason.as_deref(), Some("job revision changed"));
     }
 
     #[test]

@@ -234,11 +234,23 @@ backup. As a last resort, move the unusable database aside and restart with the
 retained JSON to recover its older cursors and sessions, understanding that
 conversation, job, and delivery records not present in JSON will be absent.
 
+New and changed enabled schedules are detected on each scheduler tick but stay
+inactive until their exact validated revision is approved from the bound
+allowlisted conversation. Review questions and accepted activations are stored
+in `database_path`, so restart does not lose them. Use
+`push job reviews` to inspect
+proposed, rejected, invalidated, approved, and activated revisions. Editing or
+replacing an activated job invalidates its schedule before the changed revision
+can run. Schedule audit events also remain pending in the database until their
+JSONL append is synced, then replay after an audit write failure or restart.
+
 ## Agent-created jobs
 
 When asked, the agent writes jobs directly under `<assistant_root>/jobs` and
-runs `push job validate`. There is no approval step. The agent's configuration
-decides whether it may write to the assistant repository.
+runs `push job validate`. There is no draft installation step. The agent's
+configuration decides whether it may write to the assistant repository. Saving
+an enabled schedule and activating unattended recurrence are separate actions;
+the latter requires durable owner review.
 
 ## Restart Behavior
 

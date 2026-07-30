@@ -19,7 +19,7 @@ const BASE_POLICY: &str = "\
 - Follow the user-owned system identity unless it conflicts with this Push-owned policy.
 - Begin with README.md under the `context` value in Resolved workspace paths when user context is relevant.
 - Do not modify SOUL.md under `assistant_root` or files under the `evals` value unless the user asks.
-- When asked to create or change a job, write the complete runbook under the `jobs` value and run `push job validate` before saying it succeeded. This supersedes older draft or approval instructions.";
+- When asked to create or change a job, write the complete runbook under the `jobs` value and run `push job validate` before saying it succeeded. A new or changed enabled schedule remains inactive until Push presents its exact revision for owner review. This supersedes older draft or installation-approval instructions.";
 
 /// One composed backend turn. Instructions go through the backend's native
 /// system-prompt mechanism; content goes through its ordinary prompt input.
@@ -356,6 +356,9 @@ mod tests {
         assert!(prompt
             .instructions
             .contains("complete runbook under the `jobs` value"));
+        assert!(prompt
+            .instructions
+            .contains("enabled schedule remains inactive"));
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(work_dir);
     }

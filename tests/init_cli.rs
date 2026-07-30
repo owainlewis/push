@@ -93,7 +93,9 @@ fn init_without_path_creates_assistant_in_current_directory() {
     let canonical_skill = assistant.join("skills/push/SKILL.md");
     let skill = std::fs::read_to_string(&canonical_skill).unwrap();
     assert!(skill.contains("name: push"));
-    assert!(skill.contains("push-managed-version: \"1\""));
+    assert!(skill.contains("push-managed-version: \"2\""));
+    assert!(skill.contains("push job reviews [<name>]"));
+    assert!(skill.contains("separate owner review"));
     assert!(!skill.contains(&root.to_string_lossy().to_string()));
     for provider in [".agents", ".claude"] {
         let exposure = assistant.join(provider).join("skills/push");

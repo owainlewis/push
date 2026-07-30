@@ -21,6 +21,7 @@ root.
 | `push job show <name>` | Print the parsed installed job |
 | `push job run <name>` | Claim and run one job in the CLI process |
 | `push job runs [<name>]` | Print run and delivery history, optionally for one job |
+| `push job reviews [<name>]` | Print schedule activation review state and exact revision metadata |
 
 Examples:
 
@@ -36,12 +37,20 @@ push reload
 push job validate
 push job run repo-review
 push job runs repo-review
+push job reviews repo-review
 ```
 
 Unknown commands and missing values fail with the accepted command forms. The
 CLI does not currently provide shell completion or separate help pages for
 subcommands. A `--help` flag anywhere in the argument list prints the global
 help shown by `push --help`.
+
+`push job validate`, `list`, and `show` never activate a schedule. Use
+`push job reviews [<name>]` to inspect proposed, approved, rejected,
+invalidated, and activated revisions, including their schedules, effective
+backend, timeout, work directory, and delivery target. Activation decisions
+are made by replying to the durable review question from the exact persisted
+allowlisted channel identity that received it.
 
 `push reload` and its `push restart` alias target the service definitions documented by Push:
 `com.owainlewis.push` under launchd on macOS and the `push.service` user unit
@@ -72,7 +81,7 @@ available for:
 
 - `help` and `version`
 - `doctor`, `status`, and `paths`
-- `job validate`, `job list`, `job show`, and `job runs`
+- `job validate`, `job list`, `job show`, `job runs`, and `job reviews`
 
 Commands that start or mutate runtime state reject `--json`. This includes the
 gateway, `init`, `reload`, `restart`, and `job run`. In particular, Push does
@@ -255,6 +264,30 @@ successfully so callers can inspect valid and invalid entries together.
 The run projection queries only `job_runs` from the shared SQLite database. It
 does not include co-located channel cursors, backend session IDs, conversation
 messages, stored job output, evaluation text, or error text.
+
+`job reviews` data:
+
+| Field | Type | Values |
+| --- | --- | --- |
+| `job_name` | string or null | Requested job filter, or null for all jobs |
+| `reviews` | array of review objects | Up to 100 newest stored schedule review revisions |
+| `reviews[].review_id` | string | Exact activation fingerprint |
+| `reviews[].job_name` | string | Job slug |
+| `reviews[].status` | string enum | `proposed`, `approved`, `rejected`, `invalidated`, or `activated` |
+| `reviews[].content_hash` | string | Authored Markdown SHA-256 |
+| `reviews[].schedules` | array of trigger objects | Enabled triggers bound to the review |
+| `reviews[].schedules[].id` | string | Trigger slug |
+| `reviews[].schedules[].kind` | string constant | `cron` |
+| `reviews[].schedules[].schedule` | string | Five-field cron expression |
+| `reviews[].schedules[].timezone` | string | IANA timezone name |
+| `reviews[].schedules[].enabled` | boolean | Always `true` for a reviewed trigger |
+| `reviews[].backend` | string enum | Effective `claude`, `codex`, or `pi` backend |
+| `reviews[].timeout_ms` | integer | Effective timeout in milliseconds |
+| `reviews[].workdir` | string | Resolved backend working directory |
+| `reviews[].delivery.channel` | string | Bound delivery channel |
+| `reviews[].delivery.target` | string | Bound delivery target |
+| `reviews[].reviewed_by` | string or null | Bound actor for a decided revision |
+| `reviews[].reason` | string or null | Invalidation or migration reason |
 
 Fields may be added compatibly within version 1. Existing fields, meanings,
 category names, and types will not change without a schema-version change.
