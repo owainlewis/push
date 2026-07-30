@@ -15,7 +15,14 @@ assistant/
 ├── README.md
 ├── context/
 ├── evals/
-└── jobs/
+├── jobs/
+├── skills/
+│   └── push/
+│       └── SKILL.md
+├── .agents/skills/
+│   └── push -> ../../skills/push
+└── .claude/skills/
+    └── push -> ../../skills/push
 ```
 
 `AGENTS.md` is the shared instruction source. `CLAUDE.md` contains only
@@ -135,15 +142,18 @@ description: Plan and prepare a technical YouTube video from a topic, transcript
 ```
 
 Save that file as `skills/youtube/SKILL.md`. Keep the description specific
-because both Codex and Claude use it to decide when the skill is relevant.
+because each supported runtime uses it to decide when the skill is relevant.
 
-### Share one skill between Codex and Claude
+### Share one skill between supported runtimes
 
 Codex discovers repository skills under `.agents/skills/`. Claude Code uses
-`.claude/skills/`. Both support skill directories that are symbolic links, so
-one canonical skill can serve both backends. See the official [Codex skills
-guide](https://learn.chatgpt.com/docs/build-skills.md) and [Claude Code skills
-guide](https://code.claude.com/docs/en/skills) for their discovery rules.
+`.claude/skills/`. Pi uses `.pi/skills/` and also recognizes
+`.agents/skills/`. These project locations support skill directories, and
+Codex and Claude Code explicitly follow directory links, so one canonical skill
+can serve every supported backend. See the official [Codex skills
+guide](https://developers.openai.com/codex/skills), [Claude Code skills
+guide](https://code.claude.com/docs/en/skills), and [Pi skills
+guide](https://pi.dev/docs/latest/skills) for their discovery rules.
 
 ```text
 assistant/
@@ -157,8 +167,8 @@ assistant/
         └── youtube -> ../../skills/youtube
 ```
 
-After creating the canonical skill, expose it to both agents from the assistant
-root:
+After creating a canonical user-owned skill, expose it to all three agents with
+two links from the assistant root. Pi and Codex share `.agents/skills/`:
 
 ```sh
 mkdir -p .agents/skills .claude/skills
@@ -167,9 +177,15 @@ ln -s ../../skills/youtube .claude/skills/youtube
 ```
 
 Use relative links so the repository remains portable when cloned elsewhere.
-Commit the canonical skill and the links. `push init` does not currently create
-or synchronize skill links, and Pi skill discovery remains controlled by Pi's
-own configuration.
+Commit the canonical skill and the links.
+
+Push itself manages only `skills/push/` and the two `push` exposure links.
+Its hidden manifest records the installed content version and checksum. A later
+`push init` refreshes an older copy only when its checksum still matches the
+managed content. If you modify the managed skill or replace a provider link,
+Push preserves it and asks you to move your changes to a differently named
+skill or restore the managed path. Push does not edit `SOUL.md`, `AGENTS.md`, or
+skills you create.
 
 ## Use jobs for scheduled outcomes
 
@@ -245,6 +261,7 @@ becoming a mixture of preferences, procedures, schedules, and secrets.
 - `SOUL.md` contains only durable identity and working style.
 - `AGENTS.md` is the shared repository guidance.
 - `CLAUDE.md` references `AGENTS.md` instead of copying it.
+- `skills/push/` and its provider links remain Push-managed.
 - `context/README.md` indexes focused, current context files.
 - each skill owns its instructions and supporting tooling.
 - each job requests one self-contained outcome.

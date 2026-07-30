@@ -110,7 +110,7 @@ Push divides ownership among three systems:
 | Owner | Responsibilities |
 | --- | --- |
 | Push runtime | channels, allowlists, routing, scheduling, canonical history, cursors, session mappings, audit, retries, and delivery |
-| Assistant repository | `SOUL.md`, shared instructions, context, evals, jobs, and optional project skills |
+| Assistant repository | user-owned `SOUL.md`, shared instructions, context, evals, jobs, optional project skills, and the Push-managed capability skill |
 | Agent runtime | reasoning, models, tools, global skills, MCP, authentication, sandbox, and interactive permissions |
 
 ### Channel Contract
@@ -477,6 +477,22 @@ File: [`src/pi.rs`](src/pi.rs)
 Pi owns its session ID and reports it in the JSON event stream. Prompts are
 written to stdin so large requests do not depend on command-line argument
 limits.
+
+### Project Skill Contract
+
+`push init` installs one canonical capability at `skills/push/`. Relative
+directory links expose it at `.agents/skills/push` for Codex and Pi and at
+`.claude/skills/push` for Claude Code. This matches each runtime's project
+discovery rules without copying instruction bodies or making Pi discover the
+same skill twice.
+
+The canonical directory contains a versioned checksum manifest. Initialization
+creates missing provider directories and links idempotently. It refreshes an
+older skill only when the installed content still matches its recorded
+checksum. A modified skill, unexpected provider path, symlinked canonical file,
+or newer managed version is preserved and returns actionable guidance instead
+of being overwritten. `SOUL.md`, `AGENTS.md`, and user-created skills remain
+user-owned.
 
 ### Adding a Backend
 

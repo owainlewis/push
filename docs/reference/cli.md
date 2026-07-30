@@ -46,8 +46,16 @@ settings from the current shell.
 
 `push init` accepts an empty target, the selected config by itself, or a
 complete existing assistant layout. It refuses unrelated and partial non-empty
-directories, never overwrites an existing assistant file, persists one
+directories, preserves user-owned `SOUL.md` and `AGENTS.md`, persists one
 canonical `assistant_root`, and initializes Git when needed.
+
+Initialization also installs the versioned Push capability skill at
+`skills/push/` and exposes that one directory through relative links under
+`.agents/skills/` for Codex and Pi and `.claude/skills/` for Claude Code.
+Repeating `push init` is safe. An unmodified managed copy is refreshed after a
+Push upgrade; if the skill or an exposure link has diverged, Push leaves it
+unchanged and reports how to move or restore the conflicting content.
+User-created skills and global agent skills are not copied or managed.
 
 ## Commands sent in chat
 

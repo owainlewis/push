@@ -90,6 +90,22 @@ fn init_without_path_creates_assistant_in_current_directory() {
     assert!(assistant.join("context/README.md").is_file());
     assert!(assistant.join("evals").is_dir());
     assert!(assistant.join("jobs").is_dir());
+    let canonical_skill = assistant.join("skills/push/SKILL.md");
+    let skill = std::fs::read_to_string(&canonical_skill).unwrap();
+    assert!(skill.contains("name: push"));
+    assert!(skill.contains("push-managed-version: \"1\""));
+    assert!(!skill.contains(&root.to_string_lossy().to_string()));
+    for provider in [".agents", ".claude"] {
+        let exposure = assistant.join(provider).join("skills/push");
+        assert!(std::fs::symlink_metadata(&exposure)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::canonicalize(exposure).unwrap(),
+            std::fs::canonicalize(assistant.join("skills/push")).unwrap()
+        );
+    }
     assert!(assistant.join(".git").exists());
     let config_path = home.join(".push/config.toml");
     let config = std::fs::read_to_string(&config_path).unwrap();
