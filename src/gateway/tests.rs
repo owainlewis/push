@@ -485,16 +485,22 @@ async fn cursor_save_failure_retries_without_rerunning_or_redelivering() {
 
     assert_eq!(calls.lock().unwrap().len(), 1);
     assert_eq!(gateway.ctx.sent_replies.lock().unwrap().len(), 1);
-    assert_eq!(gateway.store.lock().unwrap().cursor("imessage"), 0);
+    assert_eq!(gateway.store.lock().unwrap().cursor("imessage").unwrap(), 0);
     assert!(gateway.ack.lock().unwrap().completed.contains(&1));
 
     gateway.tick_fake(vec![inbound]).await;
 
     assert_eq!(calls.lock().unwrap().len(), 1);
     assert_eq!(gateway.ctx.sent_replies.lock().unwrap().len(), 1);
-    assert_eq!(gateway.store.lock().unwrap().cursor("imessage"), 1);
+    assert_eq!(gateway.store.lock().unwrap().cursor("imessage").unwrap(), 1);
     assert!(gateway.ack.lock().unwrap().completed.is_empty());
-    assert_eq!(Store::open(&state_path).unwrap().cursor("imessage"), 1);
+    assert_eq!(
+        Store::open_at(format!("{state_path}.db"), &state_path)
+            .unwrap()
+            .cursor("imessage")
+            .unwrap(),
+        1
+    );
 
     let _ = std::fs::remove_file(&state_path);
     let _ = std::fs::remove_file(format!("{state_path}.db"));
@@ -506,7 +512,9 @@ async fn cursor_save_failure_retries_without_rerunning_or_redelivering() {
 #[test]
 fn setup_failure_completion_unblocks_later_completed_rows() {
     let path = temp_state_path();
-    let store = Arc::new(Mutex::new(Store::open(&path).unwrap()));
+    let store = Arc::new(Mutex::new(
+        Store::open_at(format!("{path}.db"), &path).unwrap(),
+    ));
     let ack = Arc::new(Mutex::new(AckState::default()));
     {
         let mut ack = ack.lock().unwrap();
@@ -526,12 +534,12 @@ fn setup_failure_completion_unblocks_later_completed_rows() {
 
 #[tokio::test]
 async fn session_lookup_failure_completes_in_flight_row() {
-    let blocker = temp_path("state-blocker");
-    let state_path = blocker.join("state.json");
+    let state_path = temp_state_path();
     let store = Arc::new(Mutex::new(
-        Store::open(state_path.to_str().unwrap()).unwrap(),
+        Store::open_at(format!("{state_path}.db"), &state_path).unwrap(),
     ));
-    std::fs::write(&blocker, "not a directory").unwrap();
+    store.lock().unwrap().fail_next_session_save_for_test();
+    store.lock().unwrap().fail_next_cursor_save_for_test();
     let ack = Arc::new(Mutex::new(AckState::default()));
     {
         let mut ack = ack.lock().unwrap();
@@ -554,13 +562,15 @@ async fn session_lookup_failure_completes_in_flight_row() {
     assert!(ack.in_flight.is_empty());
     assert_eq!(ack.completed.iter().copied().collect::<Vec<_>>(), [10, 11]);
 
-    let _ = std::fs::remove_file(blocker);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
 }
 
 #[tokio::test]
 async fn soul_read_failure_stops_backend_dispatch_and_completes_row() {
     let state_path = temp_state_path();
-    let store = Arc::new(Mutex::new(Store::open(&state_path).unwrap()));
+    let store = Arc::new(Mutex::new(
+        Store::open_at(format!("{state_path}.db"), &state_path).unwrap(),
+    ));
     let sessions_dir = temp_path("soul-failure-sessions");
     let assistant_dir = temp_path("soul-failure-assistant");
     std::fs::create_dir_all(&assistant_dir).unwrap();
@@ -1181,7 +1191,7 @@ async fn canonical_history_failure_prevents_backend_dispatch_and_cursor_advance(
     assert!(gateway.handles.is_empty());
     assert!(calls.lock().unwrap().is_empty());
     assert!(gateway.ctx.sent_replies.lock().unwrap().is_empty());
-    assert_eq!(gateway.store.lock().unwrap().cursor("imessage"), 0);
+    assert_eq!(gateway.store.lock().unwrap().cursor("imessage").unwrap(), 0);
 
     let _ = std::fs::remove_file(&state_path);
     let _ = std::fs::remove_file(format!("{state_path}.db"));
@@ -1248,7 +1258,7 @@ async fn pending_outbound_is_delivered_after_restart_without_backend_rerun() {
             .status,
         DeliveryStatus::Delivered
     );
-    assert_eq!(gateway.store.lock().unwrap().cursor("imessage"), 1);
+    assert_eq!(gateway.store.lock().unwrap().cursor("imessage").unwrap(), 1);
 
     let _ = std::fs::remove_file(&state_path);
     let _ = std::fs::remove_file(format!("{state_path}.db"));
@@ -1262,9 +1272,7 @@ async fn session_state_save_failure_keeps_reply_for_restart_without_backend_reru
     let state_path = temp_state_path();
     let sessions_dir = temp_path("session-save-failure-sessions");
     let assistant_dir = temp_path("session-save-failure-assistant");
-    let state_blocker = temp_path("session-save-failure-blocker");
     std::fs::create_dir_all(&assistant_dir).unwrap();
-    std::fs::write(&state_blocker, "not a directory").unwrap();
     let first_calls = Arc::new(Mutex::new(Vec::new()));
     let mut gateway = Gateway::new(test_config(
         &state_path,
@@ -1273,14 +1281,10 @@ async fn session_state_save_failure_keeps_reply_for_restart_without_backend_reru
     ))
     .unwrap();
     let store = gateway.store.clone();
-    let broken_state_path = state_blocker.join("state.json");
     gateway.ctx.runners = Arc::new(fake_runners_with_hook(
         first_calls.clone(),
         Some(Arc::new(move || {
-            store
-                .lock()
-                .unwrap()
-                .set_path_for_test(broken_state_path.clone());
+            store.lock().unwrap().fail_next_session_save_for_test();
         })),
     ));
     gateway
@@ -1339,12 +1343,14 @@ async fn session_state_save_failure_keeps_reply_for_restart_without_backend_reru
             "fake reply: hello\n\n-- sent by push".to_string()
         )]
     );
-    assert_eq!(restarted.store.lock().unwrap().cursor("imessage"), 1);
+    assert_eq!(
+        restarted.store.lock().unwrap().cursor("imessage").unwrap(),
+        1
+    );
 
     let _ = std::fs::remove_file(&state_path);
     let _ = std::fs::remove_file(format!("{state_path}.db"));
     let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
-    let _ = std::fs::remove_file(state_blocker);
     let _ = std::fs::remove_dir_all(sessions_dir);
     let _ = std::fs::remove_dir_all(assistant_dir);
 }
@@ -1373,7 +1379,7 @@ async fn exhausted_delivery_batch_retries_without_blocking_cursor() {
 
     assert_eq!(calls.lock().unwrap().len(), 1);
     assert_eq!(gateway.ctx.sent_replies.lock().unwrap().len(), 1);
-    assert_eq!(gateway.store.lock().unwrap().cursor("imessage"), 1);
+    assert_eq!(gateway.store.lock().unwrap().cursor("imessage").unwrap(), 1);
     let inbound_id = gateway
         .ctx
         .history
@@ -1436,7 +1442,10 @@ async fn telegram_filters_before_agent_and_replies_to_originating_chat() {
     gateway.queues.clear();
     gateway.drain_workers().await;
 
-    assert_eq!(gateway.store.lock().unwrap().cursor("telegram"), 12);
+    assert_eq!(
+        gateway.store.lock().unwrap().cursor("telegram").unwrap(),
+        12
+    );
     assert_eq!(calls.lock().unwrap().len(), 1);
     assert_eq!(
         crate::prompt::current_message(&calls.lock().unwrap()[0].prompt).as_deref(),
@@ -1539,8 +1548,8 @@ async fn enabled_channels_process_concurrently_with_isolated_state_and_origin_re
     tokio::join!(imessage[0].drain_workers(), telegram[0].drain_workers());
 
     let store = imessage[0].store.lock().unwrap();
-    assert_eq!(store.cursor("imessage"), 5);
-    assert_eq!(store.cursor("telegram"), 5);
+    assert_eq!(store.cursor("imessage").unwrap(), 5);
+    assert_eq!(store.cursor("telegram").unwrap(), 5);
     drop(store);
     assert_eq!(
         imessage[0].ctx.sent_replies.lock().unwrap().as_slice(),
@@ -1561,9 +1570,19 @@ async fn enabled_channels_process_concurrently_with_isolated_state_and_origin_re
         .collect::<Vec<_>>();
     assert!(prompts.contains(&"from imessage".to_string()));
     assert!(prompts.contains(&"from telegram".to_string()));
-    let persisted = std::fs::read_to_string(&state_path).unwrap();
-    assert!(persisted.contains("imessage:dm:+15551234567"));
-    assert!(persisted.contains("telegram:dm:7"));
+    let mut store = Store::open_at(format!("{state_path}.db"), &state_path).unwrap();
+    assert_eq!(
+        store
+            .session_for("imessage:dm:+15551234567", "codex", "unused".to_string())
+            .unwrap(),
+        ("fake-session".to_string(), false)
+    );
+    assert_eq!(
+        store
+            .session_for("telegram:dm:7", "codex", "unused".to_string())
+            .unwrap(),
+        ("fake-session".to_string(), false)
+    );
 
     let _ = std::fs::remove_file(&state_path);
     let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
@@ -1604,7 +1623,7 @@ async fn telegram_voice_is_transcribed_and_gets_text_and_voice_replies() {
         gateway.ctx.sent_voice_replies.lock().unwrap().as_slice(),
         [("7".to_string(), vec![4, 5, 6])]
     );
-    assert_eq!(gateway.store.lock().unwrap().cursor("telegram"), 1);
+    assert_eq!(gateway.store.lock().unwrap().cursor("telegram").unwrap(), 1);
     let history = gateway
         .ctx
         .history
@@ -1652,7 +1671,7 @@ async fn telegram_voice_without_openai_key_falls_back_without_running_agent() {
     let reply = &replies[0].1;
     assert!(reply.contains("voice.openai_api_key"));
     assert!(reply.contains("OPENAI_API_KEY"));
-    assert_eq!(gateway.store.lock().unwrap().cursor("telegram"), 1);
+    assert_eq!(gateway.store.lock().unwrap().cursor("telegram").unwrap(), 1);
 
     let _ = std::fs::remove_file(&state_path);
     let _ = std::fs::remove_file(format!("{state_path}.db"));
@@ -2138,7 +2157,7 @@ async fn failed_stop_history_write_retries_before_later_rows() {
 
     assert!(calls.lock().unwrap().is_empty());
     assert!(gateway.queues.is_empty());
-    assert_eq!(gateway.store.lock().unwrap().cursor("imessage"), 0);
+    assert_eq!(gateway.store.lock().unwrap().cursor("imessage").unwrap(), 0);
 
     gateway
         .ctx

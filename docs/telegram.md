@@ -120,16 +120,17 @@ state.
 
 ## Cursor and Restart Behavior
 
-`state.json` stores independent `imessage` and `telegram` cursors. `push.db`
-stores channel-qualified canonical conversations, so Telegram and iMessage
-history cannot collide. On the first
+`push.db` stores independent `imessage` and `telegram` cursors plus
+channel-qualified canonical conversations and backend sessions, so Telegram
+and iMessage state cannot collide. On the first
 Telegram start, Push asks Telegram for the newest pending update and records its
 id without running it. This explicit backlog skip prevents old bot messages
 from unexpectedly starting agent work. Later accepted and ignored updates
 advance only the Telegram cursor. Restarts continue from the next update id.
 
 As with iMessage, a crash after delivery but before cursor persistence can
-repeat a reply. Keep `state.json` on durable storage.
+repeat a reply. Keep `push.db` on durable storage. Existing `state.json` data
+is imported once and retained unchanged as a recovery copy.
 
 ## Linux and Service Mode
 
@@ -142,8 +143,7 @@ directly in a world-readable unit file.
 Protect these files as credentials or private assistant data:
 
 - the bot token and configuration
-- `state.json` and the audit log
-- `push.db`
+- `push.db`, the retained legacy `state.json`, and the audit log
 - the private `assistant_root` repository, including identity, context, jobs,
   and optional project skills
 

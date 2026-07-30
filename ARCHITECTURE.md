@@ -49,11 +49,11 @@ that answer, and delivers it.
 │                    │ worker queues │                                    │
 │                    └───────┬───────┘                                    │
 │                            ▼                                            │
-│  ┌──────────────┐  ┌───────────────┐  ┌───────────────────────────────┐ │
-│  │ state.json   │  │ push.db       │  │ audit.jsonl                   │ │
-│  │ cursors and  │  │ conversations │  │ redacted operational events   │ │
-│  │ sessions     │  │ jobs/delivery │  │                               │ │
-│  └──────────────┘  └───────────────┘  └───────────────────────────────┘ │
+│  ┌───────────────────────────────────────┐  ┌──────────────────────────┐ │
+│  │ push.db                               │  │ audit.jsonl              │ │
+│  │ conversations, jobs, delivery,        │  │ redacted operational     │ │
+│  │ channel cursors, backend sessions     │  │ events                   │ │
+│  └───────────────────────────────────────┘  └──────────────────────────┘ │
 └────────────────────────────────────┬─────────────────────────────────────┘
                                      │ subprocess
                                      ▼
@@ -174,13 +174,18 @@ Push uses separate stores because they have different update and query needs:
 
 | Store | Purpose |
 | --- | --- |
-| `$PUSH_HOME/state.json` | small atomically replaced map of channel cursors and backend session IDs |
-| `$PUSH_HOME/push.db` | transactional conversation, delivery, approval compatibility, and job-run history |
+| `$PUSH_HOME/state.json` | retained legacy cursor and session source for one-time migration |
+| `$PUSH_HOME/push.db` | transactional conversation, delivery, approval compatibility, job-run history, channel cursors, and channel-qualified backend sessions |
 | `$PUSH_HOME/state.json.slack-inbox.db` | Slack Socket Mode inbox committed before envelope acknowledgement |
 | `$PUSH_HOME/audit.jsonl` | append-only operational audit events |
 | `$PUSH_HOME/run/` | advisory job locks |
 | `$PUSH_HOME/cache/` | disposable agent handoff files |
 | assistant Git repository | user-owned identity, context, evals, jobs, and project resources |
+
+`state_path` remains a compatibility input for one-time migration. Push never
+uses the legacy JSON file as a live source of truth after its migration marker
+commits. The Slack inbox remains separate because its rows are an
+acknowledgement queue, not gateway cursor or session state.
 
 Runtime databases, secrets, locks, sessions, and logs must stay outside the
 assistant repository.
@@ -226,9 +231,11 @@ The gateway runs the required preflight checks before starting.
 
 ### Step 3: Build Shared State
 
-`GatewayGroup::new` opens one shared `Store`, one shared `History`, one runner
-per required backend, and one serialized audit-log lock. It then creates one
-`Gateway` for each enabled channel.
+`GatewayGroup::new` opens one shared transactional `Store` and one shared
+`History` connection to `push.db`, one runner per required backend, and one
+serialized audit-log lock. Opening the store also performs any one-time legacy
+`state.json` migration before polling can begin. It then creates one `Gateway`
+for each enabled channel.
 
 Each gateway owns its own:
 
@@ -517,9 +524,16 @@ configured, unattended, and evaluator modes.
 
 ## 7. Durable Data Model
 
-### `state.json`
+### Runtime State in `push.db`
 
-[`src/store.rs`](src/store.rs) owns a small JSON document:
+[`src/store.rs`](src/store.rs) owns channel cursors and backend session
+mappings in the canonical SQLite database. Cursor advancement uses a
+monotonic upsert, so concurrent or repeated writes cannot move a channel
+backwards. Session reads, backend changes, backend-owned ID updates, and
+`/clear` rotation use transactions keyed by channel and thread.
+
+The first startup after upgrade imports the legacy document configured by
+`state_path`:
 
 ```json
 {
@@ -539,9 +553,18 @@ configured, unattended, and evaluator modes.
 }
 ```
 
-`last_row_id` and the field name `uuid` remain for backward compatibility.
-Writes use a new owner-only temporary file followed by atomic rename. In-memory
-state is rolled back if persistence fails.
+`last_row_id` remains an iMessage fallback only when the JSON has no explicit
+`cursors.imessage` value. Unqualified session keys are imported as iMessage
+keys; an explicit channel-qualified key wins when both forms exist. Empty
+session IDs are preserved so the next request starts fresh.
+
+The imported cursor/session rows and a source-path migration marker commit in
+one immediate transaction. A crash or error before commit leaves no partial
+import, and startup retries from the unchanged JSON file. After commit, later
+starts ignore that source even though Push deliberately leaves it in place as
+a private recovery copy. Restoring a pre-migration database, or removing the
+database after preserving other needed data, allows the retained file to be
+imported again. Corrupt JSON stops startup with recovery guidance.
 
 ### `push.db`
 
@@ -556,6 +579,9 @@ timeout.
 | `approval_questions` | retained durable question and answer state |
 | `job_runs` | immutable job claims, bounded results, evaluation, scheduling, and delivery |
 | `gateway_control_actions` | idempotent control actions such as `/stop` targets |
+| `channel_cursors` | monotonic per-channel polling checkpoints |
+| `backend_sessions` | current backend session for each channel and thread |
+| `legacy_state_migrations` | atomic record of each imported legacy JSON source |
 
 Important constraints:
 
@@ -807,7 +833,7 @@ result before proactive delivery.
 | [`src/claude.rs`](src/claude.rs) | Claude Code CLI adapter |
 | [`src/codex.rs`](src/codex.rs) | Codex CLI adapter |
 | [`src/pi.rs`](src/pi.rs) | Pi CLI adapter |
-| [`src/store.rs`](src/store.rs) | atomic cursor and session state |
+| [`src/store.rs`](src/store.rs) | transactional SQLite cursor/session state and legacy JSON migration |
 | [`src/history.rs`](src/history.rs) | SQLite schema, conversation history, delivery, and migrations |
 | [`src/jobs.rs`](src/jobs.rs) | runbook validation, execution, evaluation, scheduler, and ledger |
 | [`src/audit.rs`](src/audit.rs) | redacted JSONL audit log |

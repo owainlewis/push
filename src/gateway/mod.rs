@@ -116,7 +116,7 @@ struct WorkerState {
 impl GatewayGroup {
     pub fn new(cfg: Config) -> Result<Self> {
         let enabled = cfg.enabled_channel_kinds()?;
-        let store = Arc::new(Mutex::new(Store::open(&cfg.paths.state)?));
+        let store = Arc::new(Mutex::new(Store::open(&cfg.paths)?));
         let history = Arc::new(Mutex::new(
             History::open(&cfg.paths.database).with_context(|| {
                 format!(
@@ -333,7 +333,7 @@ where
 impl Gateway {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(cfg: Config) -> Result<Self> {
-        let store = Arc::new(Mutex::new(Store::open(&cfg.paths.state)?));
+        let store = Arc::new(Mutex::new(Store::open(&cfg.paths)?));
         let history = Arc::new(Mutex::new(
             History::open(&cfg.paths.database).with_context(|| {
                 format!(
@@ -493,7 +493,13 @@ impl Gateway {
 
     async fn skip_backlog(&self) -> Result<()> {
         let channel_id = self.channel.id();
-        if self.store.lock().unwrap().has_cursor(channel_id) {
+        if self
+            .store
+            .lock()
+            .unwrap()
+            .has_cursor(channel_id)
+            .with_context(|| format!("check initial {channel_id} cursor"))?
+        {
             return Ok(());
         }
         let max = self
@@ -511,7 +517,16 @@ impl Gateway {
     }
 
     async fn tick(&mut self) {
-        let since = self.store.lock().unwrap().cursor(self.channel.id());
+        let since = match self.store.lock().unwrap().cursor(self.channel.id()) {
+            Ok(cursor) => cursor,
+            Err(error) => {
+                error!(
+                    "{} cursor read error; polling paused: {error:#}",
+                    self.channel.id()
+                );
+                return;
+            }
+        };
         let msgs = match self.channel.poll(since).await {
             Ok(messages) => messages,
             Err(e) => {
@@ -531,7 +546,16 @@ impl Gateway {
     async fn process_messages(&mut self, msgs: Vec<RawMessage>) {
         self.recover_closed_workers();
         persist_cursor(&self.store, &self.ack, self.channel.id());
-        let since = self.store.lock().unwrap().cursor(self.channel.id());
+        let since = match self.store.lock().unwrap().cursor(self.channel.id()) {
+            Ok(cursor) => cursor,
+            Err(error) => {
+                error!(
+                    "{} cursor read error; message processing paused: {error:#}",
+                    self.channel.id()
+                );
+                return;
+            }
+        };
         for m in &msgs {
             if m.row_id <= since {
                 continue;

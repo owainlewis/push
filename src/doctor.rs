@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
-use crate::{channel::Channel, config, history, jobs};
+use crate::{channel::Channel, config, jobs};
 use config::{SLACK_APP_TOKEN_ENV, SLACK_BOT_TOKEN_ENV, TELEGRAM_BOT_TOKEN_ENV};
 
 /// Fails fast with actionable messages when the environment is not ready.
@@ -256,16 +256,20 @@ fn check_writable_dir(name: &str, field: &str, dir: &Path, checks: &mut Vec<Chec
 }
 
 fn check_history_database(cfg: &config::Config, checks: &mut Vec<Check>) {
-    match history::History::open(&cfg.paths.database) {
+    match crate::store::Store::open(&cfg.paths) {
         Ok(_) => checks.push(Check::pass(
             "conversation database",
-            format!("{} is ready", cfg.paths.database.display()),
+            format!(
+                "{} is ready for history and runtime state",
+                cfg.paths.database.display()
+            ),
         )),
         Err(error) => checks.push(Check::fail(
             "conversation database",
             format!(
-                "cannot open {}: {error}. Choose a writable database_path and repair or remove an invalid database.",
-                cfg.paths.database.display()
+                "cannot prepare {} or migrate legacy state from {}: {error:#}. Repair the database or legacy JSON before starting Push.",
+                cfg.paths.database.display(),
+                cfg.paths.state.display()
             ),
         )),
     }
