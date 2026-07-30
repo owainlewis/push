@@ -205,7 +205,10 @@ fn run_without_default_config_reports_first_run_guidance() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("configuration not found at ~/.push/config.toml"));
+    assert!(stderr.contains(&format!(
+        "configuration not found at {}",
+        home.join(".push/config.toml").display()
+    )));
     assert!(stderr.contains("Create it with:\n  push init"));
     assert!(!stderr.contains("push init --config"));
     assert!(stderr.contains("Then configure a channel"));
@@ -372,7 +375,10 @@ fn assert_missing_default_config_guidance(args: &[&str]) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(combined.contains("configuration not found at ~/.push/config.toml"));
+    assert!(combined.contains(&format!(
+        "configuration not found at {}",
+        home.join(".push/config.toml").display()
+    )));
     assert!(combined.contains("Create it with:\n  push init"));
     assert!(!combined.contains("config.toml.example"));
     let _ = std::fs::remove_dir_all(root);
@@ -394,6 +400,68 @@ fn run_with_missing_custom_config_reports_selected_path() {
     let expected = format!("push init --config {quoted_path}");
     assert!(stderr.contains(&expected));
     assert!(!stderr.contains("read config"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn push_home_controls_the_default_config_location() {
+    let root = temp_dir("push-home");
+    let home = root.join("home");
+    let push_home = root.join("instances/primary");
+    let workdir = root.join("workdir");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workdir).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_push"))
+        .arg("init")
+        .current_dir(&workdir)
+        .env("HOME", &home)
+        .env("PUSH_HOME", &push_home)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(push_home.join("config.toml").is_file());
+    assert!(!home.join(".push/config.toml").exists());
+    assert!(String::from_utf8_lossy(&output.stdout).contains(&format!(
+        "$EDITOR {}",
+        push_home.join("config.toml").display()
+    )));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn explicit_config_path_takes_precedence_over_push_home() {
+    let root = temp_dir("push-home-explicit-config");
+    let home = root.join("home");
+    let push_home = root.join("instances/primary");
+    let workdir = root.join("workdir");
+    let config = root.join("selected/config.toml");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workdir).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_push"))
+        .args(["init", "--config"])
+        .arg(&config)
+        .current_dir(&workdir)
+        .env("HOME", &home)
+        .env("PUSH_HOME", &push_home)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(config.is_file());
+    assert!(!push_home.join("config.toml").exists());
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .contains(&format!("push doctor --config {}", config.display())));
     let _ = std::fs::remove_dir_all(root);
 }
 

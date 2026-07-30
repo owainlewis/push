@@ -102,14 +102,13 @@ impl Slack {
         app_token: String,
         bot_token: String,
         allow_user_ids: Vec<String>,
-        state_path: &str,
+        inbox_path: impl AsRef<Path>,
     ) -> Result<Self> {
-        let inbox_path = format!("{state_path}.slack-inbox.db");
         Self::with_api_base(
             app_token,
             bot_token,
             allow_user_ids,
-            &inbox_path,
+            inbox_path.as_ref(),
             API_BASE.to_string(),
         )
     }
@@ -118,7 +117,7 @@ impl Slack {
         app_token: String,
         bot_token: String,
         allow_user_ids: Vec<String>,
-        inbox_path: &str,
+        inbox_path: impl AsRef<Path>,
         api_base: String,
     ) -> Result<Self> {
         Ok(Self {
@@ -409,15 +408,16 @@ async fn receive_loop(state: Arc<State>) {
 }
 
 impl Inbox {
-    fn open(path: &str) -> Result<Self> {
-        if let Some(parent) = Path::new(path).parent() {
+    fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create Slack inbox directory {}", parent.display()))?;
         }
-        let connection =
-            Connection::open(path).with_context(|| format!("open Slack inbox {path}"))?;
-        crate::util::restrict_permissions(Path::new(path), false)
-            .with_context(|| format!("restrict Slack inbox permissions {path}"))?;
+        let connection = Connection::open(path)
+            .with_context(|| format!("open Slack inbox {}", path.display()))?;
+        crate::util::restrict_permissions(path, false)
+            .with_context(|| format!("restrict Slack inbox permissions {}", path.display()))?;
         connection
             .busy_timeout(Duration::from_secs(5))
             .context("configure Slack inbox busy timeout")?;
@@ -437,7 +437,7 @@ impl Inbox {
         )?;
         Ok(Self {
             connection,
-            path: path.to_string(),
+            path: path.to_string_lossy().to_string(),
         })
     }
 

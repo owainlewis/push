@@ -603,8 +603,8 @@ pub struct JobLock {
 }
 
 impl JobLock {
-    fn try_acquire(run_dir: &str, job_name: &str) -> Result<Option<Self>> {
-        let lock_dir = Path::new(run_dir).join("locks");
+    fn try_acquire(run_dir: &Path, job_name: &str) -> Result<Option<Self>> {
+        let lock_dir = run_dir.join("locks");
         std::fs::create_dir_all(&lock_dir)
             .with_context(|| format!("create job lock directory {}", lock_dir.display()))?;
         restrict_permissions(&lock_dir, true)
@@ -743,7 +743,8 @@ impl DeliveryAttempt {
 }
 
 impl Ledger {
-    pub fn open(database_path: &str) -> Result<Self> {
+    pub fn open(database_path: impl AsRef<Path>) -> Result<Self> {
+        let database_path = database_path.as_ref();
         drop(History::open(database_path)?);
         let conn = Connection::open(database_path)?;
         conn.busy_timeout(Duration::from_secs(5))?;
@@ -752,7 +753,7 @@ impl Ledger {
 
     pub fn start_manual(&mut self, cfg: &Config, job: &Job) -> Result<StartOutcome> {
         let now = now_ms();
-        let Some(lock) = JobLock::try_acquire(&cfg.jobs_run_dir, &job.name)? else {
+        let Some(lock) = JobLock::try_acquire(&cfg.paths.jobs_run, &job.name)? else {
             let run_id = Uuid::new_v4().to_string();
             self.insert_skipped(
                 &run_id,
@@ -982,7 +983,7 @@ impl Ledger {
         queued: &QueuedRun,
         now: i64,
     ) -> Result<Option<(String, Job, JobLock)>> {
-        let Some(lock) = JobLock::try_acquire(&cfg.jobs_run_dir, &queued.job_name)? else {
+        let Some(lock) = JobLock::try_acquire(&cfg.paths.jobs_run, &queued.job_name)? else {
             self.conn.execute(
                 "UPDATE job_runs SET state = 'skipped_overlap', finished_at_ms = ?2,
                     error = 'another local executor holds the job lock', delivery_state = 'pending'
@@ -1086,7 +1087,7 @@ impl Ledger {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(statement);
         for name in names {
-            let Some(_lock) = JobLock::try_acquire(&cfg.jobs_run_dir, &name)? else {
+            let Some(_lock) = JobLock::try_acquire(&cfg.paths.jobs_run, &name)? else {
                 continue;
             };
             self.conn.execute(
@@ -1371,7 +1372,7 @@ impl Scheduler {
         // tick starts from a freshly opened ledger.
         let mut ledger = match self.ledger.take() {
             Some(ledger) => ledger,
-            None => Ledger::open(&self.cfg.database_path)?,
+            None => Ledger::open(&self.cfg.paths.database)?,
         };
         ledger.recover_stale_runs(&self.cfg, now)?;
 
@@ -1464,7 +1465,7 @@ impl Scheduler {
             &self.delivery_owner,
             delivery_slots,
         )? {
-            let database_path = self.cfg.database_path.clone();
+            let database_path = self.cfg.paths.database.clone();
             let owner = self.delivery_owner.clone();
             let deliver = deliver.clone();
             self.delivery_workers.spawn(async move {
@@ -1524,7 +1525,7 @@ impl Scheduler {
     fn recover_interrupted_work(&mut self) {
         let mut ledger = match self.ledger.take() {
             Some(ledger) => ledger,
-            None => match Ledger::open(&self.cfg.database_path) {
+            None => match Ledger::open(&self.cfg.paths.database) {
                 Ok(ledger) => ledger,
                 Err(error) => {
                     tracing::error!("open job ledger during scheduler shutdown: {error:#}");
@@ -1587,7 +1588,7 @@ fn log_shutdown_result(
 }
 
 async fn run_delivery<F, Fut>(
-    database_path: String,
+    database_path: PathBuf,
     owner: String,
     row: DeliveryRun,
     attempted_at_ms: i64,
@@ -1611,7 +1612,7 @@ where
 }
 
 async fn run_delivery_with_timeout<F, Fut>(
-    database_path: String,
+    database_path: PathBuf,
     owner: String,
     row: DeliveryRun,
     attempted_at_ms: i64,
@@ -1693,7 +1694,7 @@ fn elapsed_ms_since(start_ms: i64, started: Instant) -> i64 {
 }
 
 async fn run_scheduled(cfg: Config, queued: QueuedRun) -> Result<()> {
-    let mut ledger = Ledger::open(&cfg.database_path)?;
+    let mut ledger = Ledger::open(&cfg.paths.database)?;
     let Some((run_id, job, _lock)) = ledger.claim_scheduled(&cfg, &queued, now_ms())? else {
         return Ok(());
     };
@@ -1755,7 +1756,7 @@ fn format_delivery(row: &DeliveryRun) -> String {
 }
 
 pub async fn run_manual(cfg: &Config, job: Job) -> Result<(String, String)> {
-    let mut ledger = Ledger::open(&cfg.database_path)?;
+    let mut ledger = Ledger::open(&cfg.paths.database)?;
     let (run_id, _lock, job) = match ledger.start_manual(cfg, &job)? {
         StartOutcome::Claimed { run_id, lock, job } => (run_id, lock, job),
         StartOutcome::Skipped { run_id } => {
@@ -2119,7 +2120,7 @@ mod tests {
         let ready = PathBuf::from(std::env::var("PUSH_TEST_CLAIM_READY").unwrap());
         let cfg = cfg(Path::new(&jobs_dir), &database, &run_dir);
         let job = Catalog::load_named(&cfg, "cli-live").unwrap();
-        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
         let StartOutcome::Claimed { lock: _lock, .. } = ledger.start_manual(&cfg, &job).unwrap()
         else {
             panic!("helper manual run should claim");
@@ -2135,8 +2136,8 @@ mod tests {
             temp_dir("jobs-assistant").to_str().unwrap(),
         );
         cfg.jobs_dir = jobs_dir.to_string_lossy().to_string();
-        cfg.database_path = database.to_string_lossy().to_string();
-        cfg.jobs_run_dir = run_dir.to_string_lossy().to_string();
+        cfg.paths.database = database.to_path_buf();
+        cfg.paths.jobs_run = run_dir.to_path_buf();
         cfg
     }
 
@@ -2526,7 +2527,7 @@ mod tests {
         write_job(&jobs_dir, "claim", &scheduled_job(&workdir, true));
         let cfg = cfg(&jobs_dir, &database, &run_dir);
         let job = Catalog::load_named(&cfg, "claim").unwrap();
-        let mut first = Ledger::open(&cfg.database_path).unwrap();
+        let mut first = Ledger::open(&cfg.paths.database).unwrap();
         let id = first
             .enqueue_scheduled(&job, &job.triggers[0], 60_000, 60_000, "telegram", "7")
             .unwrap();
@@ -2538,7 +2539,7 @@ mod tests {
                 [&id],
             )
             .unwrap();
-        let mut second = Ledger::open(&cfg.database_path).unwrap();
+        let mut second = Ledger::open(&cfg.paths.database).unwrap();
 
         let claimed = first.claim_due_deliveries(60_000, "first", 1).unwrap();
         assert_eq!(claimed.len(), 1);
@@ -2584,7 +2585,7 @@ mod tests {
         write_job(&jobs_dir, "delayed-claim", &scheduled_job(&workdir, true));
         let cfg = cfg(&jobs_dir, &database, &run_dir);
         let job = Catalog::load_named(&cfg, "delayed-claim").unwrap();
-        let mut first = Ledger::open(&cfg.database_path).unwrap();
+        let mut first = Ledger::open(&cfg.paths.database).unwrap();
         let id = first
             .enqueue_scheduled(&job, &job.triggers[0], 60_000, 60_000, "telegram", "7")
             .unwrap();
@@ -2609,7 +2610,7 @@ mod tests {
             1
         );
 
-        let mut second = Ledger::open(&cfg.database_path).unwrap();
+        let mut second = Ledger::open(&cfg.paths.database).unwrap();
         assert!(second
             .claim_due_deliveries(60_000 + DELIVERY_CLAIM_LEASE_MS, "second-worker", 1,)
             .unwrap()
@@ -2625,7 +2626,7 @@ mod tests {
         write_job(&jobs_dir, "checkpoint", &scheduled_job(&workdir, true));
         let cfg = cfg(&jobs_dir, &database, &run_dir);
         let job = Catalog::load_named(&cfg, "checkpoint").unwrap();
-        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
         let id = ledger
             .enqueue_scheduled(&job, &job.triggers[0], 60_000, 60_000, "telegram", "7")
             .unwrap();
@@ -2647,7 +2648,7 @@ mod tests {
         let release = Arc::new(tokio::sync::Notify::new());
         let captured_checkpoint = checkpoint_sent.clone();
         let captured_release = release.clone();
-        let database_path = cfg.database_path.clone();
+        let database_path = cfg.paths.database.clone();
         let claimed_at = Instant::now();
         let task = tokio::spawn(async move {
             run_delivery_with_timeout(
@@ -2672,7 +2673,7 @@ mod tests {
         });
         checkpoint_sent.notified().await;
 
-        let saved_chunk = Ledger::open(&cfg.database_path)
+        let saved_chunk = Ledger::open(&cfg.paths.database)
             .unwrap()
             .conn
             .query_row(
@@ -2685,7 +2686,7 @@ mod tests {
 
         release.notify_one();
         task.await.unwrap().unwrap();
-        let ledger = Ledger::open(&cfg.database_path).unwrap();
+        let ledger = Ledger::open(&cfg.paths.database).unwrap();
         let final_state = ledger
             .conn
             .query_row(
@@ -2706,7 +2707,7 @@ mod tests {
         write_job(&jobs_dir, "attempt-timeout", &scheduled_job(&workdir, true));
         let cfg = cfg(&jobs_dir, &database, &run_dir);
         let job = Catalog::load_named(&cfg, "attempt-timeout").unwrap();
-        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
         let id = ledger
             .enqueue_scheduled(&job, &job.triggers[0], 60_000, 60_000, "telegram", "7")
             .unwrap();
@@ -2729,7 +2730,7 @@ mod tests {
         let captured = invoked.clone();
 
         run_delivery_with_timeout(
-            cfg.database_path.clone(),
+            cfg.paths.database.clone(),
             "timeout-worker".to_string(),
             row,
             60_000,
@@ -2743,7 +2744,7 @@ mod tests {
         .await
         .unwrap();
 
-        let ledger = Ledger::open(&cfg.database_path).unwrap();
+        let ledger = Ledger::open(&cfg.paths.database).unwrap();
         let state = ledger
             .conn
             .query_row(
@@ -2777,7 +2778,7 @@ mod tests {
         write_job(&jobs_dir, "backoff", &scheduled_job(&workdir, true));
         let cfg = cfg(&jobs_dir, &database, &run_dir);
         let job = Catalog::load_named(&cfg, "backoff").unwrap();
-        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
         let id = ledger
             .enqueue_scheduled(&job, &job.triggers[0], 60_000, 60_000, "telegram", "7")
             .unwrap();
@@ -2796,7 +2797,7 @@ mod tests {
         drop(ledger);
 
         run_delivery(
-            cfg.database_path.clone(),
+            cfg.paths.database.clone(),
             "slow-worker".to_string(),
             row,
             60_000,
@@ -2809,7 +2810,7 @@ mod tests {
         .await
         .unwrap();
 
-        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
         let completed_at_ms = ledger
             .conn
             .query_row(
@@ -2841,7 +2842,7 @@ mod tests {
         write_job(&jobs_dir, "slow", &scheduled_job(&workdir, false));
         let cfg = cfg(&jobs_dir, &database, &run_dir);
         let job = Catalog::load_named(&cfg, "slow").unwrap();
-        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
         let id = ledger
             .enqueue_scheduled(&job, &job.triggers[0], 60_000, 60_000, "telegram", "7")
             .unwrap();
@@ -2895,7 +2896,7 @@ mod tests {
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
         cfg.agent_commands.codex = slow.bin();
         let catalog = Catalog::load(&cfg).unwrap();
-        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
         let execution_id = ledger
             .enqueue_scheduled(
                 &catalog.jobs["execution"],
@@ -2943,7 +2944,7 @@ mod tests {
             .unwrap();
         checkpoint_saved.notified().await;
         for _ in 0..100 {
-            if Ledger::open(&cfg.database_path)
+            if Ledger::open(&cfg.paths.database)
                 .unwrap()
                 .state(&execution_id)
                 == "running"
@@ -2953,7 +2954,7 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert_eq!(
-            Ledger::open(&cfg.database_path)
+            Ledger::open(&cfg.paths.database)
                 .unwrap()
                 .state(&execution_id),
             "running"
@@ -2968,7 +2969,7 @@ mod tests {
         .expect("scheduler shutdown must finish within its grace plus cleanup");
         assert!(started.elapsed() < Duration::from_millis(500));
 
-        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
         let execution = ledger.runs(Some("execution")).unwrap().remove(0);
         assert_eq!(execution.state, "failed");
         assert_eq!(execution.delivery_state, "pending");
@@ -3165,7 +3166,7 @@ printf '%s\n' '{{"type":"thread.started","thread_id":"scheduled"}}'
             .unwrap();
         scheduler.shutdown().await;
 
-        let rows = Ledger::open(&cfg.database_path)
+        let rows = Ledger::open(&cfg.paths.database)
             .unwrap()
             .runs(Some("scheduled"))
             .unwrap();
@@ -3208,7 +3209,7 @@ printf '%s\n' '{{"type":"thread.started","thread_id":"restart"}}'
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
         cfg.agent_commands.codex = cli.bin();
         let job = Catalog::load_named(&cfg, "restart").unwrap();
-        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
         let first_id = ledger
             .enqueue_scheduled(&job, &job.triggers[0], 60_000, 60_000, "telegram", "7")
             .unwrap();
@@ -3228,7 +3229,7 @@ printf '%s\n' '{{"type":"thread.started","thread_id":"restart"}}'
             restarted.shutdown().await;
         }
 
-        let rows = Ledger::open(&cfg.database_path)
+        let rows = Ledger::open(&cfg.paths.database)
             .unwrap()
             .runs(Some("restart"))
             .unwrap();
@@ -3263,7 +3264,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"delivery-only"}'
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
         cfg.agent_commands.codex = cli.bin();
         let job = Catalog::load_named(&cfg, "delivery-only").unwrap();
-        Ledger::open(&cfg.database_path)
+        Ledger::open(&cfg.paths.database)
             .unwrap()
             .enqueue_scheduled(&job, &job.triggers[0], 60_000, 60_000, "telegram", "7")
             .unwrap();
@@ -3285,7 +3286,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"delivery-only"}'
             .unwrap();
         scheduler.shutdown().await;
 
-        let row = Ledger::open(&cfg.database_path)
+        let row = Ledger::open(&cfg.paths.database)
             .unwrap()
             .runs(Some("delivery-only"))
             .unwrap()
@@ -3310,7 +3311,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"delivery-only"}'
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
         cfg.agent_commands.codex = slow.bin();
         let job = Catalog::load_named(&cfg, "timeout").unwrap();
-        Ledger::open(&cfg.database_path)
+        Ledger::open(&cfg.paths.database)
             .unwrap()
             .enqueue_scheduled(&job, &job.triggers[0], 60_000, 60_000, "telegram", "7")
             .unwrap();
@@ -3319,7 +3320,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"delivery-only"}'
         scheduler.tick(60_000, delivery_ok).await.unwrap();
         scheduler.shutdown().await;
 
-        let rows = Ledger::open(&cfg.database_path)
+        let rows = Ledger::open(&cfg.paths.database)
             .unwrap()
             .runs(Some("timeout"))
             .unwrap();
@@ -3342,7 +3343,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"delivery-only"}'
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
         cfg.agent_commands.codex = failed.bin();
         let job = Catalog::load_named(&cfg, "failure").unwrap();
-        Ledger::open(&cfg.database_path)
+        Ledger::open(&cfg.paths.database)
             .unwrap()
             .enqueue_scheduled(&job, &job.triggers[0], 60_000, 60_000, "telegram", "7")
             .unwrap();
@@ -3351,7 +3352,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"delivery-only"}'
         scheduler.tick(60_000, delivery_ok).await.unwrap();
         scheduler.shutdown().await;
 
-        let row = Ledger::open(&cfg.database_path)
+        let row = Ledger::open(&cfg.paths.database)
             .unwrap()
             .runs(Some("failure"))
             .unwrap()
@@ -3389,7 +3390,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"limited"}'
         cfg.agent_commands.codex = cli.bin();
         cfg.jobs_max_workers = 1;
         let catalog = Catalog::load(&cfg).unwrap();
-        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
         for job in catalog.jobs.values() {
             ledger
                 .enqueue_scheduled(job, &job.triggers[0], 60_000, 60_000, "telegram", "7")
@@ -3400,7 +3401,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"limited"}'
         scheduler.tick(60_000, delivery_ok).await.unwrap();
         assert_eq!(scheduler.workers.len(), 1);
         for _ in 0..100 {
-            if Ledger::open(&cfg.database_path)
+            if Ledger::open(&cfg.paths.database)
                 .unwrap()
                 .queued_runs(10)
                 .unwrap()
@@ -3412,7 +3413,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"limited"}'
             tokio::task::yield_now().await;
         }
         assert_eq!(
-            Ledger::open(&cfg.database_path)
+            Ledger::open(&cfg.paths.database)
                 .unwrap()
                 .queued_runs(10)
                 .unwrap()
@@ -3424,7 +3425,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"limited"}'
         assert_eq!(scheduler.workers.len(), 1);
         scheduler.shutdown().await;
 
-        let rows = Ledger::open(&cfg.database_path)
+        let rows = Ledger::open(&cfg.paths.database)
             .unwrap()
             .runs(None)
             .unwrap();
@@ -3443,7 +3444,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"limited"}'
         write_job(&jobs_dir, "stale", &scheduled_job(&workdir, true));
         let cfg = cfg(&jobs_dir, &database, &run_dir);
         let job = Catalog::load_named(&cfg, "stale").unwrap();
-        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
         let id = ledger
             .enqueue_scheduled(&job, &job.triggers[0], 60_000, 60_000, "telegram", "7")
             .unwrap();
@@ -3452,7 +3453,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"limited"}'
             panic!("scheduled run should claim");
         };
 
-        let mut restarted = Ledger::open(&cfg.database_path).unwrap();
+        let mut restarted = Ledger::open(&cfg.paths.database).unwrap();
         restarted.recover_stale_runs(&cfg, 61_000).unwrap();
         assert_eq!(restarted.state(&id), "running");
         drop(lock);
@@ -3484,7 +3485,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"limited"}'
             ),
         );
         let job = Catalog::load_named(&cfg, "recover-eval").unwrap();
-        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
         let run_id = ledger
             .enqueue_scheduled(&job, &job.triggers[0], 60_000, 60_000, "telegram", "7")
             .unwrap();
@@ -3567,7 +3568,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"after-crash"}'
         let mut restarted = Scheduler::new(cfg.clone(), "telegram".into(), "7".into());
         restarted.tick(start + 60_000, delivery_ok).await.unwrap();
         restarted.tick(start + 120_000, delivery_ok).await.unwrap();
-        let live_rows = Ledger::open(&cfg.database_path)
+        let live_rows = Ledger::open(&cfg.paths.database)
             .unwrap()
             .runs(Some("cli-live"))
             .unwrap();
@@ -3579,7 +3580,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"after-crash"}'
         restarted.tick(start + 180_000, delivery_ok).await.unwrap();
         restarted.shutdown().await;
 
-        let rows = Ledger::open(&cfg.database_path)
+        let rows = Ledger::open(&cfg.paths.database)
             .unwrap()
             .runs(Some("cli-live"))
             .unwrap();
@@ -3604,7 +3605,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"after-crash"}'
         write_job(&jobs_dir, "overlap", &scheduled_job(&workdir, true));
         let cfg = cfg(&jobs_dir, &database, &run_dir);
         let job = Catalog::load_named(&cfg, "overlap").unwrap();
-        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
         let StartOutcome::Claimed { run_id, lock, .. } = ledger.start_manual(&cfg, &job).unwrap()
         else {
             panic!("manual run should hold the lock");
@@ -3634,7 +3635,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"after-crash"}'
         let updated = valid_job(&workdir).replace("Inspect this directory.", "Use the new body.");
         write_job(&jobs_dir, "snapshot", &updated);
 
-        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
         let StartOutcome::Claimed {
             run_id,
             job,
@@ -3682,7 +3683,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"after-crash"}'
         write_job(&jobs_dir, "daily-check", &valid_job(&workdir));
         let cfg = cfg(&jobs_dir, &database, &run_dir);
         let job = Catalog::load_named(&cfg, "daily-check").unwrap();
-        let mut first = Ledger::open(&cfg.database_path).unwrap();
+        let mut first = Ledger::open(&cfg.paths.database).unwrap();
         let StartOutcome::Claimed {
             run_id: first_id,
             lock,
@@ -3691,7 +3692,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"after-crash"}'
         else {
             panic!("first run should claim");
         };
-        let mut second = Ledger::open(&cfg.database_path).unwrap();
+        let mut second = Ledger::open(&cfg.paths.database).unwrap();
         let StartOutcome::Skipped { run_id: skipped } = second.start_manual(&cfg, &job).unwrap()
         else {
             panic!("overlap should skip");
@@ -3718,7 +3719,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"after-crash"}'
         write_job(&jobs_dir, "persist", &valid_job(&workdir));
         let cfg = cfg(&jobs_dir, &database, &run_dir);
         let job = Catalog::load_named(&cfg, "persist").unwrap();
-        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
         let StartOutcome::Claimed { run_id, lock, .. } = ledger.start_manual(&cfg, &job).unwrap()
         else {
             panic!("run should claim");
@@ -3735,7 +3736,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"after-crash"}'
         drop(lock);
         drop(ledger);
 
-        let reopened = Ledger::open(&cfg.database_path).unwrap();
+        let reopened = Ledger::open(&cfg.paths.database).unwrap();
         let rows = reopened.runs(Some("persist")).unwrap();
         assert_eq!(rows[0].state, "failed");
         assert_eq!(rows[0].error.as_deref(), Some("boom"));
@@ -3755,7 +3756,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"after-crash"}'
             &job_with_eval(&workdir, "quality"),
         );
         let job = Catalog::load_named(&cfg, "recover-eval").unwrap();
-        let mut first = Ledger::open(&cfg.database_path).unwrap();
+        let mut first = Ledger::open(&cfg.paths.database).unwrap();
         let StartOutcome::Claimed { run_id, lock, .. } = first.start_manual(&cfg, &job).unwrap()
         else {
             panic!("run should claim");
@@ -3766,7 +3767,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"after-crash"}'
         drop(lock);
         drop(first);
 
-        let mut second = Ledger::open(&cfg.database_path).unwrap();
+        let mut second = Ledger::open(&cfg.paths.database).unwrap();
         let StartOutcome::Claimed { lock, .. } = second.start_manual(&cfg, &job).unwrap() else {
             panic!("new run should recover the interrupted evaluator");
         };
@@ -3816,7 +3817,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"after-crash"}'
         write_job(&jobs_dir, "bounded", &valid_job(&workdir));
         let cfg = cfg(&jobs_dir, &database, &run_dir);
         let job = Catalog::load_named(&cfg, "bounded").unwrap();
-        let mut ledger = Ledger::open(&cfg.database_path).unwrap();
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
         let StartOutcome::Claimed { run_id, lock, .. } = ledger.start_manual(&cfg, &job).unwrap()
         else {
             panic!("run should claim");
@@ -3878,7 +3879,7 @@ printf '%s\n' '{{"type":"thread.started","thread_id":"fresh-thread"}}'
         let args = std::fs::read_to_string(&args_path).unwrap();
         assert_eq!(args.lines().filter(|line| *line == "exec").count(), 2);
         assert!(!args.lines().any(|line| line == "resume"));
-        let rows = Ledger::open(&cfg.database_path)
+        let rows = Ledger::open(&cfg.paths.database)
             .unwrap()
             .runs(Some("execute"))
             .unwrap();
@@ -3935,7 +3936,7 @@ fi
         assert!(args.contains("# Original job"));
         assert!(args.contains("# Candidate response"));
         assert!(args.contains("The work must answer the request."));
-        let rows = Ledger::open(&cfg.database_path)
+        let rows = Ledger::open(&cfg.paths.database)
             .unwrap()
             .runs(Some("evaluated"))
             .unwrap();
@@ -3966,7 +3967,7 @@ fi
         let job = Catalog::load_named(&cfg, "timeout").unwrap();
 
         assert!(run_manual(&cfg, job).await.is_err());
-        let rows = Ledger::open(&cfg.database_path)
+        let rows = Ledger::open(&cfg.paths.database)
             .unwrap()
             .runs(Some("timeout"))
             .unwrap();
@@ -3994,7 +3995,7 @@ printf '%s\n' ok > {}
             .await
             .unwrap();
         assert_eq!(output.1, "recovered");
-        let rows = Ledger::open(&cfg.database_path)
+        let rows = Ledger::open(&cfg.paths.database)
             .unwrap()
             .runs(Some("timeout"))
             .unwrap();

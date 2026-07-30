@@ -2,7 +2,8 @@
 
 Push has one gateway command, one diagnostic command, and a small set of job
 commands. All commands accept `--config <path>` anywhere in the argument list.
-The default is `~/.push/config.toml`.
+The default is `$PUSH_HOME/config.toml`; `PUSH_HOME` defaults to `~/.push`.
+`--config` changes only the selected config file, not the runtime root.
 
 | Command | Purpose |
 | --- | --- |

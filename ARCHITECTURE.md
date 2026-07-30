@@ -74,7 +74,7 @@ responsibilities isolated.
 
 ```text
 main
- ├── config + doctor + assistant init
+ ├── paths + config + doctor + assistant init
  ├── gateway
  │    ├── channel
  │    │    ├── imessage
@@ -174,14 +174,25 @@ Push uses separate stores because they have different update and query needs:
 
 | Store | Purpose |
 | --- | --- |
-| `state.json` | small atomically replaced map of channel cursors and backend session IDs |
-| `push.db` | transactional conversation, delivery, approval compatibility, and job-run history |
-| `<state_path>.slack-inbox.db` | Slack Socket Mode inbox committed before envelope acknowledgement |
-| `audit.jsonl` | append-only operational audit events |
+| `$PUSH_HOME/state.json` | small atomically replaced map of channel cursors and backend session IDs |
+| `$PUSH_HOME/push.db` | transactional conversation, delivery, approval compatibility, and job-run history |
+| `$PUSH_HOME/state.json.slack-inbox.db` | Slack Socket Mode inbox committed before envelope acknowledgement |
+| `$PUSH_HOME/audit.jsonl` | append-only operational audit events |
+| `$PUSH_HOME/run/` | advisory job locks |
+| `$PUSH_HOME/cache/` | disposable agent handoff files |
 | assistant Git repository | user-owned identity, context, evals, jobs, and project resources |
 
 Runtime databases, secrets, locks, sessions, and logs must stay outside the
 assistant repository.
+
+[`src/paths.rs`](src/paths.rs) is the single owner of runtime locations.
+`PUSH_HOME` selects the root and defaults to `~/.push`. Config, startup, jobs,
+history, audit, and channels consume the resolved `PushPaths` value instead of
+reconstructing filenames. The config, database, state, audit, run-lock, inbox,
+and cache locations are derived from that root. Explicit legacy state,
+database, audit, and run-lock settings replace only their matching derived
+locations. `assistant_root` remains independent, and overlap with the runtime
+root fails closed.
 
 ---
 
@@ -192,8 +203,9 @@ The entry point is [`src/main.rs`](src/main.rs).
 ### Step 1: Parse the Command
 
 The binary supports the long-running gateway plus `init`, `doctor`, `reload`,
-and job management commands. Commands that need configuration resolve
-`--config`, defaulting to `~/.push/config.toml`.
+and job management commands. Commands that need configuration use `--config`
+when present. `--config` selects a file without changing `PUSH_HOME`;
+otherwise the config is `$PUSH_HOME/config.toml`.
 
 ### Step 2: Load and Validate Configuration
 

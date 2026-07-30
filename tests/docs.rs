@@ -64,6 +64,23 @@ fn local_documentation_links_resolve() {
     );
 }
 
+#[test]
+fn service_examples_select_one_push_home() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let launchd =
+        std::fs::read_to_string(root.join("examples/launchd/com.owainlewis.push.plist")).unwrap();
+    let systemd = std::fs::read_to_string(root.join("examples/systemd/push.service")).unwrap();
+
+    assert!(launchd.contains("<key>PUSH_HOME</key>"));
+    assert!(launchd.contains("<string>/Users/YOU/.push</string>"));
+    assert!(!launchd.contains("<string>--config</string>"));
+    assert!(systemd.contains("Environment=PUSH_HOME=%h/.push"));
+    assert_eq!(
+        systemd.lines().find(|line| line.starts_with("ExecStart=")),
+        Some("ExecStart=%h/.local/bin/push")
+    );
+}
+
 fn heading_anchors(markdown: &str) -> Vec<String> {
     let mut anchors = Vec::new();
     let mut heading = None;

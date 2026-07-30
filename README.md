@@ -96,9 +96,10 @@ push init ~/Code/assistant
 This creates a Git repository containing `SOUL.md`, shared instructions in
 `AGENTS.md`, a `CLAUDE.md` reference to those instructions, `context/`, `evals/`,
 `jobs/`, and a versioned Push capability skill for Claude Code, Codex, and Pi.
-It then records the repository path in `~/.push/config.toml`.
+It then records the repository path in `$PUSH_HOME/config.toml`. `PUSH_HOME`
+defaults to `~/.push`.
 
-Edit `~/.push/config.toml` to connect a chat channel. A small Telegram setup
+Edit `$PUSH_HOME/config.toml` to connect a chat channel. A small Telegram setup
 looks like this:
 
 ```toml

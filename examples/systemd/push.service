@@ -5,11 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/push --config %h/.push/config.toml
+ExecStart=%h/.local/bin/push
 WorkingDirectory=%h/.push
 Restart=on-failure
 RestartSec=10
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PUSH_HOME=%h/.push
 EnvironmentFile=-%h/.config/push/env
 
 [Install]

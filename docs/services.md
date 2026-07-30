@@ -14,17 +14,14 @@ own the service:
 
 ```sh
 push init ~/Code/assistant
-# Edit ~/.push/config.toml with your channel settings.
+# Edit $PUSH_HOME/config.toml with your channel settings.
 push doctor
 ```
 
-Use absolute paths in service files. The service user needs:
+Set one absolute `PUSH_HOME` in the service definition. It defaults to
+`~/.push` for interactive commands. The service user needs:
 
-- access to the configured `config.toml`
-- write access to `state_path`
-- write access to `audit_log_path`
-- write access to `database_path`
-- write access to `jobs_run_dir`
+- read and write access to `PUSH_HOME`
 - filesystem access to `assistant_root` as allowed by the selected agent
 - agent write access to `assistant_root/jobs/` when jobs should be created from chat
 - access to the selected `claude`, `codex`, or `pi` executable on `PATH`
@@ -38,11 +35,13 @@ Use absolute paths in service files. The service user needs:
   `OPENAI_API_KEY` in the service environment, plus network access to
   `api.openai.com`
 
-`state_path` stores independent cursors for each channel and backend session
-ids. `database_path` stores the canonical conversation journal. Chat agents run
-from `assistant_root`. Keep these paths on durable storage. Restarting the
-service resumes after the last completed row and reuses existing backend
-sessions when the backend for that thread has not changed.
+`$PUSH_HOME/state.json` stores independent cursors for each channel and backend
+session IDs. `$PUSH_HOME/push.db` stores the canonical conversation and job
+journal. The audit log, Slack recovery inbox, job locks, and cache are derived
+from the same root. Chat agents run from `assistant_root`. Keep `PUSH_HOME` on
+durable storage. Restarting the service resumes after the last completed row
+and reuses existing backend sessions when the backend for that thread has not
+changed.
 
 Keep `assistant_root` in its own Git repository. Keep config secrets, state,
 databases, logs, locks, and service credentials outside it.
@@ -71,8 +70,6 @@ and replace `YOU` with your macOS user name:
   <key>ProgramArguments</key>
   <array>
     <string>/Users/YOU/.local/bin/push</string>
-    <string>--config</string>
-    <string>/Users/YOU/.push/config.toml</string>
   </array>
 
   <key>WorkingDirectory</key>
@@ -80,6 +77,8 @@ and replace `YOU` with your macOS user name:
 
   <key>EnvironmentVariables</key>
   <dict>
+    <key>PUSH_HOME</key>
+    <string>/Users/YOU/.push</string>
     <key>PATH</key>
     <string>/Users/YOU/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
@@ -147,11 +146,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/push --config %h/.push/config.toml
+ExecStart=%h/.local/bin/push
 WorkingDirectory=%h/.push
 Restart=on-failure
 RestartSec=10
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PUSH_HOME=%h/.push
 EnvironmentFile=-%h/.config/push/env
 
 [Install]
@@ -195,7 +195,7 @@ loginctl enable-linger "$USER"
 ## Manual Jobs
 
 `push job run <name>` executes in the invoking terminal process, not in the
-managed service. Use the same config file so the CLI and service share
+managed service. Use the same `PUSH_HOME` so the CLI and service share
 `push.db`, `<assistant_root>/jobs`, and the local per-job lock directory.
 Invalid job files are reported and disabled individually; they do not stop the
 messaging service.
@@ -227,6 +227,21 @@ reply without generating a different second response.
 Ignored messages, completed rows, and setup failures advance the cursor. Rows
 newer than an in-flight row do not push the cursor past it until the earlier row
 is completed.
+
+## Backup and Recovery
+
+Stop the service before taking a filesystem-level backup. Back up the complete
+`PUSH_HOME` directory as one unit so config, cursors, the Slack inbox, canonical
+history, audit events, and job delivery state stay consistent. Back up
+`assistant_root` separately through its Git repository because it is
+user-owned and must not live under `PUSH_HOME`.
+
+To restore, stop the service, restore both locations to separate directories,
+set the service `PUSH_HOME` to the restored runtime root, confirm
+`assistant_root` in the restored config, then run `push doctor` before starting
+the service. If a compatible older config sets `state_path`, `database_path`,
+`audit_log_path`, or `jobs_run_dir`, back up and restore those explicit
+locations too. The cache directory is disposable and can be omitted.
 
 ## Security Notes
 

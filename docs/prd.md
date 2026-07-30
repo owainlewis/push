@@ -151,7 +151,7 @@ user prompt.
 | `assistant_root` | Canonical root of the one assistant repository. `SOUL.md`, `context/`, and `jobs/` are derived. |
 | `jobs_agent` | Optional default job backend; otherwise uses `agent`. |
 | `jobs_max_timeout` | Maximum validated job timeout; defaults to `30m`. |
-| `jobs_run_dir` | Local advisory-lock state; defaults to `~/.push/run`. |
+| `jobs_run_dir` | Local advisory-lock state; defaults to `$PUSH_HOME/run`. |
 | `jobs_max_workers` | Maximum concurrent scheduled jobs; defaults to `2`. |
 | `imessage.db_path` | Path to Messages `chat.db`. |
 | `poll_interval` | How often to poll. |
@@ -164,7 +164,7 @@ user prompt.
 | `state_path` | JSON state path. |
 | `audit_log_path` | Local JSONL audit log path. |
 | `audit_log_content` | Whether audit events include message and reply text. |
-| `database_path` | Canonical SQLite history path; defaults to `~/.push/push.db`. |
+| `database_path` | Canonical SQLite history path; defaults to `$PUSH_HOME/push.db`. |
 
 ## Control Commands
 

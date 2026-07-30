@@ -1,6 +1,6 @@
 //! Canonical SQLite conversation history owned by the gateway.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -93,8 +93,8 @@ pub struct History {
 }
 
 impl History {
-    pub fn open(path: &str) -> Result<Self> {
-        let path = PathBuf::from(path);
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create database directory {}", parent.display()))?;

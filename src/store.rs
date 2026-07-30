@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{ErrorKind, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -38,16 +38,17 @@ pub struct Store {
 }
 
 impl Store {
-    pub fn open(path: &str) -> Result<Store> {
-        let p = PathBuf::from(path);
+    pub fn open(path: impl AsRef<Path>) -> Result<Store> {
+        let p = path.as_ref().to_path_buf();
+        let display = p.display();
         let state = match std::fs::read_to_string(&p) {
             Ok(s) => {
                 crate::util::restrict_permissions(&p, false)
-                    .with_context(|| format!("restrict state permissions {path}"))?;
-                serde_json::from_str(&s).with_context(|| format!("parse state {path}"))?
+                    .with_context(|| format!("restrict state permissions {display}"))?;
+                serde_json::from_str(&s).with_context(|| format!("parse state {display}"))?
             }
             Err(e) if e.kind() == ErrorKind::NotFound => State::default(),
-            Err(e) => return Err(anyhow!("read state {path}: {e}")),
+            Err(e) => return Err(anyhow!("read state {display}: {e}")),
         };
         Ok(Store {
             path: p,
