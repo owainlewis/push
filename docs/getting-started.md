@@ -156,9 +156,10 @@ have a configured model provider or authenticated account for the service user.
 
 If you replace the config file created by `push init`, keep its
 `assistant_root` setting. Running the same init command again is safe for a
-complete assistant repository. It preserves user-owned files and refreshes the
-Push-managed skill only when the installed checksum proves that the managed
-copy is unmodified.
+complete assistant repository. It can also complete an older partial layout
+when the selected config already names that exact root. It preserves user-owned
+files and refreshes the Push-managed skill only when the installed checksum
+proves that the managed copy is unmodified.
 
 ## 5. Validate and run
 

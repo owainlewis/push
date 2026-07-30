@@ -55,10 +55,12 @@ databases, logs, locks, and service credentials outside it.
 
 ## macOS launchd
 
-Create the log directory:
+Create private service logs:
 
 ```sh
 mkdir -p ~/Library/Logs
+touch ~/Library/Logs/push.err.log ~/Library/Logs/push.out.log
+chmod 600 ~/Library/Logs/push.err.log ~/Library/Logs/push.out.log
 ```
 
 Create `~/Library/LaunchAgents/com.owainlewis.push.plist`. You can start from
@@ -133,8 +135,8 @@ override when service-level secret injection is preferred.
 
 ## Linux systemd
 
-Use this for Telegram-only deployments. The iMessage channel still requires
-macOS.
+Use this for Telegram or Slack deployments. The iMessage channel still
+requires macOS.
 
 Create the service directories:
 

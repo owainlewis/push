@@ -81,6 +81,14 @@ fn service_examples_select_one_push_home() {
     );
 }
 
+#[test]
+fn service_guide_protects_launchd_logs() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let services = fs::read_to_string(root.join("docs/services.md")).unwrap();
+
+    assert!(services.contains("chmod 600 ~/Library/Logs/push.err.log ~/Library/Logs/push.out.log"));
+}
+
 fn heading_anchors(markdown: &str) -> Vec<String> {
     let mut anchors = Vec::new();
     let mut heading = None;

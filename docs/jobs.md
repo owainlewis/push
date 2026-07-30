@@ -227,12 +227,12 @@ updating the repository keeps its checked-in guidance accurate.
 Pending draft-install approvals from older Push versions are cancelled during
 database migration. Replying to one explains that the job must be requested
 again. On upgrade to schedule activation review, each valid enabled schedule
-whose exact revision exists at the first config-aware Push command is captured
-as the migration baseline. Those revisions are recorded as approved and
-activated once when a valid primary destination exists. If that first command
-has no valid primary destination, Push records an empty baseline and closes the
-migration without grandfathering any schedules. Disabled and invalid jobs are
-not grandfathered.
+whose exact revision exists when the first upgraded command opens job state is
+captured as the migration baseline. Those revisions are recorded as approved
+and activated once when a valid primary destination exists. If that first
+command has no valid primary destination, Push records an empty baseline and
+closes the migration without grandfathering any schedules. Disabled and invalid
+jobs are not grandfathered.
 
 !!! warning
 

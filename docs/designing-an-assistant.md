@@ -198,12 +198,13 @@ jobs/morning-brief.md    scheduled request with timeout and delivery
 ```
 
 Keep job bodies self-contained because every job starts a fresh backend
-session without conversation history. Chat turns start in `assistant_root`, but
-jobs start in the job's configured work directory, which must stay outside the
-assistant repository. A job therefore does not automatically discover skills
-linked under the assistant root. Keep required procedures in the job body, or
-make the skill available through the backend's global skill location or the
-job work directory.
+session without conversation history. Chat turns start in `assistant_root`, and
+jobs use `assistant_root` as their default work directory. Jobs can therefore
+discover project instructions and skills linked there. An explicit alternate
+work directory changes that discovery context and must not overlap Push-owned
+runtime paths. Keep every required procedure in the job body, or make the
+needed skill available through the backend's global skill location or the
+selected work directory.
 
 Put stable preferences in `SOUL.md` or `context/`, and put the schedule, work
 directory, constraints, required procedure, and requested output in the job.
