@@ -256,10 +256,13 @@ execution:
 - `push job run <name>`
 - `push job runs [<name>]`
 
-Push is the only writer to the run ledger. The CLI owns the manual run it
-claims, and the gateway owns scheduled runs. Agents may write requested job
-files directly under `<assistant_root>/jobs` when their filesystem permissions
-allow it, then validate the catalog with `push job validate`.
+Push is the only writer to the run and schedule-activation ledgers. The CLI
+owns the manual run it claims, and the gateway owns scheduled runs. Agents may
+write requested job files directly under `<assistant_root>/jobs` when their
+filesystem permissions allow it, then validate the catalog with
+`push job validate`. Direct authoring does not activate a new or changed enabled
+schedule. The gateway binds owner review to the exact validated revision and
+effective execution and delivery settings before planning it.
 
 ## Alternatives and tradeoffs
 

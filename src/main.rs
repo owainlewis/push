@@ -49,6 +49,7 @@ Commands:
   job show <name>   Show an installed job
   job run <name>    Run an installed job
   job runs [name]   Show job run history
+  job reviews [name]  Show schedule activation review history
 
 Options:
   --config <path>   Use a configuration file (default: $PUSH_HOME/config.toml)
@@ -168,7 +169,10 @@ fn load_run_config(path: &str) -> Result<config::Config> {
         bail!(message);
     }
     let expanded_path = util::expand_home(path);
-    config::Config::load(path).with_context(|| format!("load config {expanded_path}"))
+    let cfg = config::Config::load(path).with_context(|| format!("load config {expanded_path}"))?;
+    jobs::Ledger::capture_legacy_schedule_baseline(&cfg)
+        .context("capture existing schedule migration baseline")?;
+    Ok(cfg)
 }
 
 fn missing_config_message(path: &str) -> Option<String> {
@@ -230,6 +234,7 @@ pub(crate) enum JobCommand {
     Show(String),
     Run(String),
     Runs(Option<String>),
+    Reviews(Option<String>),
 }
 
 impl Command {
@@ -250,6 +255,7 @@ impl Command {
                         | JobCommand::List
                         | JobCommand::Show(_)
                         | JobCommand::Runs(_)
+                        | JobCommand::Reviews(_)
                 )
         )
     }
@@ -332,8 +338,12 @@ impl Args {
             ["job", "run", name] => Command::Job(JobCommand::Run((*name).to_string())),
             ["job", "runs"] => Command::Job(JobCommand::Runs(None)),
             ["job", "runs", name] => Command::Job(JobCommand::Runs(Some((*name).to_string()))),
+            ["job", "reviews"] => Command::Job(JobCommand::Reviews(None)),
+            ["job", "reviews", name] => {
+                Command::Job(JobCommand::Reviews(Some((*name).to_string())))
+            }
             _ => bail!(
-                "unknown command; expected help, version, init [path], doctor, status, paths, reload, restart, job validate, job list, job show <name>, job run <name>, job runs [<name>], --config <path>, or --json"
+                "unknown command; expected help, version, init [path], doctor, status, paths, reload, restart, job validate, job list, job show <name>, job run <name>, job runs [<name>], job reviews [<name>], --config <path>, or --json"
             ),
         };
         Ok(Self {
@@ -435,6 +445,38 @@ async fn run_job_command(config_path: &str, command: JobCommand) -> Result<()> {
                     run.evaluation_state,
                     evaluation_detail,
                     delivery_error,
+                );
+            }
+            Ok(())
+        }
+        JobCommand::Reviews(name) => {
+            if let Some(name) = name.as_deref() {
+                jobs::validate_job_name(name)?;
+            }
+            let ledger = jobs::Ledger::open(&cfg.paths.database)?;
+            for review in ledger.schedule_reviews(name.as_deref())? {
+                let schedules = review
+                    .schedules
+                    .iter()
+                    .map(|trigger| {
+                        format!("{}:{:?}:{}", trigger.id, trigger.schedule, trigger.timezone)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                println!(
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}:{}\t{}\t{}",
+                    review.review_id,
+                    review.job_name,
+                    review.status,
+                    review.content_hash,
+                    schedules,
+                    review.backend,
+                    review.timeout_ms,
+                    review.workdir,
+                    review.delivery_channel,
+                    review.delivery_target,
+                    review.reviewed_by.unwrap_or_else(|| "-".to_string()),
+                    review.reason.unwrap_or_else(|| "-".to_string()),
                 );
             }
             Ok(())
@@ -622,6 +664,12 @@ mod tests {
                 .unwrap()
                 .command,
             Command::Job(JobCommand::Runs(Some("daily".to_string())))
+        );
+        assert_eq!(
+            Args::parse(vec!["job".into(), "reviews".into(), "daily".into()])
+                .unwrap()
+                .command,
+            Command::Job(JobCommand::Reviews(Some("daily".to_string())))
         );
     }
 

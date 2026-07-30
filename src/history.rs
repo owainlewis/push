@@ -6,13 +6,11 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
-#[cfg(test)]
-use crate::approval::QuestionState;
 use crate::approval::{parse_answer, AnswerOrigin, AnswerOutcome, NormalizedAnswer};
 #[cfg(test)]
-use crate::approval::{DeliveryStatus as ApprovalDeliveryStatus, Question};
+use crate::approval::{DeliveryStatus as ApprovalDeliveryStatus, Question, QuestionState};
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 const RETIRED_JOB_APPROVAL_ERROR: &str = "job approval was removed; request direct job creation";
 const MAX_HISTORY_READ_BYTES: usize = 8 * 1024;
 const READ_TRUNCATED: &str = "\n[truncated by push while reading history]";
@@ -332,7 +330,6 @@ impl History {
         Ok(messages)
     }
 
-    /// Test-only seeding for the inbound answer-resolution flow.
     #[cfg(test)]
     pub fn create_question(&mut self, question: &Question, now_ms: i64) -> Result<()> {
         question.validate()?;
@@ -401,6 +398,10 @@ impl History {
                  WHERE channel = ?1 AND thread_key = ?2
                    AND sender_key = ?3 AND chat_key = ?4
                    AND status = 'pending'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM job_schedule_review_questions
+                       WHERE question_id = approval_questions.id
+                   )
                  ORDER BY created_at_ms, id",
             )?;
             let ids = statement
@@ -853,6 +854,91 @@ fn migrate(conn: &Connection) -> Result<()> {
              PRAGMA user_version = 11;",
         )?;
     }
+    if version <= 11 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS job_schedule_reviews (
+                 id TEXT PRIMARY KEY,
+                 job_name TEXT NOT NULL,
+                 content_hash TEXT NOT NULL,
+                 snapshot_hash TEXT NOT NULL,
+                 file_identity TEXT NOT NULL,
+                 path TEXT NOT NULL,
+                 schedules_json TEXT NOT NULL,
+                 backend TEXT NOT NULL,
+                 timeout_ms INTEGER NOT NULL,
+                 workdir TEXT NOT NULL,
+                 delivery_channel TEXT NOT NULL,
+                 delivery_target TEXT NOT NULL,
+                 status TEXT NOT NULL CHECK(status IN (
+                     'proposed', 'approved', 'rejected', 'invalidated', 'activated'
+                 )),
+                 proposed_at_ms INTEGER NOT NULL,
+                 decided_at_ms INTEGER,
+                 activated_at_ms INTEGER,
+                 invalidated_at_ms INTEGER,
+                 reviewed_by TEXT,
+                 reason TEXT
+             );
+             CREATE INDEX IF NOT EXISTS job_schedule_reviews_current_idx
+                 ON job_schedule_reviews(job_name, status, proposed_at_ms);
+             CREATE TABLE IF NOT EXISTS job_schedule_review_questions (
+                 question_id TEXT PRIMARY KEY REFERENCES approval_questions(id),
+                 review_id TEXT NOT NULL REFERENCES job_schedule_reviews(id),
+                 created_at_ms INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS job_schedule_review_questions_review_idx
+                 ON job_schedule_review_questions(review_id, created_at_ms);
+             CREATE TABLE IF NOT EXISTS job_schedule_events (
+                 id INTEGER PRIMARY KEY,
+                 audit_event_id TEXT NOT NULL UNIQUE,
+                 review_id TEXT NOT NULL REFERENCES job_schedule_reviews(id),
+                 job_name TEXT NOT NULL,
+                 content_hash TEXT NOT NULL,
+                 event TEXT NOT NULL CHECK(event IN (
+                     'proposed', 'approved', 'rejected', 'invalidated', 'activated'
+                 )),
+                 actor TEXT,
+                 reason TEXT,
+                 created_at_ms INTEGER NOT NULL,
+                 audit_logged_at_ms INTEGER
+             );
+             CREATE INDEX IF NOT EXISTS job_schedule_events_job_idx
+                 ON job_schedule_events(job_name, created_at_ms, id);
+             CREATE TABLE IF NOT EXISTS job_schedule_meta (
+                 key TEXT PRIMARY KEY,
+                 value TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS job_schedule_legacy_baseline (
+                 review_id TEXT PRIMARY KEY,
+                 job_name TEXT NOT NULL,
+                 content_hash TEXT NOT NULL,
+                 snapshot_hash TEXT NOT NULL,
+                 file_identity TEXT NOT NULL,
+                 path TEXT NOT NULL,
+                 schedules_json TEXT NOT NULL,
+                 backend TEXT NOT NULL,
+                 timeout_ms INTEGER NOT NULL,
+                 workdir TEXT NOT NULL,
+                 delivery_channel TEXT NOT NULL,
+                 delivery_target TEXT NOT NULL
+             );",
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO job_schedule_meta(key, value)
+             VALUES ('legacy_schedule_migration', ?1)",
+            [if version == 0 { "complete" } else { "pending" }],
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO job_schedule_meta(key, value)
+             VALUES ('legacy_schedule_baseline', ?1)",
+            [if version == 0 {
+                "not_required"
+            } else {
+                "unclaimed"
+            }],
+        )?;
+        conn.execute_batch("PRAGMA user_version = 12;")?;
+    }
     conn.execute_batch("COMMIT;")?;
     Ok(())
 }
@@ -1019,6 +1105,40 @@ mod tests {
                 .unwrap(),
             AnswerOutcome::Cancelled(question.id)
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn v11_migration_marks_installed_schedules_for_one_time_preservation() {
+        let path = temp_path("schedule-activation-v11-migration");
+        let history = History::open(path.to_str().unwrap()).unwrap();
+        history.execute_batch_for_test(
+            "DROP TABLE job_schedule_review_questions;
+             DROP TABLE job_schedule_events;
+             DROP TABLE job_schedule_reviews;
+             DROP TABLE job_schedule_legacy_baseline;
+             DROP TABLE job_schedule_meta;
+             PRAGMA user_version = 11;",
+        );
+        drop(history);
+
+        let reopened = History::open(path.to_str().unwrap()).unwrap();
+
+        let migration: String = reopened
+            .conn
+            .query_row(
+                "SELECT value FROM job_schedule_meta
+                 WHERE key = 'legacy_schedule_migration'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(migration, "pending");
+        let version: i64 = reopened
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
         let _ = std::fs::remove_file(path);
     }
 

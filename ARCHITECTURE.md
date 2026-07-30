@@ -596,6 +596,7 @@ timeout.
 | `messages` | canonical inbound and outbound content, generation state, delivery state, chunk checkpoint |
 | `approval_questions` | retained durable question and answer state |
 | `job_runs` | immutable job claims, bounded results, evaluation, scheduling, and delivery |
+| `job_schedule_reviews` and `job_schedule_events` | exact-revision schedule proposals, decisions, activation, and history |
 | `gateway_control_actions` | idempotent control actions such as `/stop` targets |
 | `channel_cursors` | monotonic per-channel polling checkpoints |
 | `backend_sessions` | current backend session for each channel and thread |
@@ -609,9 +610,12 @@ Important constraints:
 - scheduled occurrence identity is unique;
 - control actions are idempotent by inbound message.
 
-The approval tables and inbound answer path remain durable, but current
-production job creation writes runbooks directly and does not create approval
-questions.
+Job files are authored directly. Enabled schedule activation uses the durable
+question path and a separate activation ledger. A question is bound to one
+allowlisted channel identity and the validated content revision, file identity,
+effective backend, timeout, work directory, enabled triggers, and delivery
+target. Answer selection and the schedule decision are recoverable across a
+crash, and the scheduler still revalidates the exact revision before planning.
 
 ### Slack Inbox
 
@@ -626,6 +630,12 @@ message content.
 Events include message metadata, routing, backend starts and failures, answer
 outcomes, delivery results, and completion. Content is omitted by default.
 `audit_log_content = true` opts into message and reply text.
+
+Schedule lifecycle events first enter `job_schedule_events` as a SQLite
+outbox. The gateway syncs each JSONL append before acknowledging it in SQLite
+and retries pending rows on startup and scheduler or conversation activity.
+Replay is at least once, so a crash between append and acknowledgement may
+duplicate the stable schedule `event_id`.
 
 ---
 
@@ -683,19 +693,32 @@ The gateway ticks the scheduler once per second:
 ```text
 1. RECOVER       inspect stale runs and delivery claims
 2. CATALOG       reload and validate installed jobs
-3. PLAN          calculate next cron occurrence in its IANA timezone
-4. ENQUEUE       record one due occurrence in push.db
-5. CLAIM         take work up to jobs_max_workers
-6. EXECUTE       run a fresh unattended backend session
-7. EVALUATE      optionally run the restricted evaluator
-8. STORE         commit result, error, and evaluation state
-9. CLAIM SEND    take due delivery work across gateway processes
-10. DELIVER      send stored chunks and checkpoint progress
+3. REVIEW        reconcile the exact revision and require durable activation
+4. PLAN          calculate next cron occurrence in its IANA timezone
+5. ENQUEUE       record one due occurrence in push.db
+6. CLAIM         take work up to jobs_max_workers
+7. EXECUTE       run a fresh unattended backend session
+8. EVALUATE      optionally run the restricted evaluator
+9. STORE         commit result, error, and evaluation state
+10. CLAIM SEND   take due delivery work across gateway processes
+11. DELIVER      send stored chunks and checkpoint progress
 ```
 
 Push does not catch up occurrences missed while offline. A clock jump queues at
 most one occurrence, daylight-saving gaps are skipped, and repeated local
 times run once at their first instant.
+
+Direct Markdown authoring, validation, inspection, disabled triggers, and
+manual runs do not require schedule activation. A new or changed enabled
+revision is proposed but omitted from planning until the exact owner-bound
+review is approved. Any later validation failure, content change, path or
+symlink replacement, or change to effective execution or delivery settings
+invalidates it. A version-11 database migration activates only valid enabled
+schedules whose exact revisions are captured by the first config-aware open
+after upgrade, so upgrades preserve existing intended recurrence without
+creating a later grandfathering window. When that capture has no valid primary
+destination, the migration records an empty baseline and closes without
+activating schedules.
 
 ### Execution and Delivery Semantics
 

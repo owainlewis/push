@@ -58,7 +58,8 @@ push job show repo-review
 ```
 
 Validation reports every valid and invalid file. An invalid job is disabled
-individually and does not stop messaging or other valid jobs.
+individually and does not stop messaging or other valid jobs. Validation does
+not activate an enabled schedule.
 
 ## Evaluate completed work
 
@@ -140,6 +141,30 @@ Scheduling starts only when the primary destination is enabled and
 allowlisted. A missing or invalid destination disables new scheduled starts
 without affecting conversations or manual jobs.
 
+Saving `enabled = true` creates a schedule activation proposal. The Markdown
+file remains available for validation, inspection, and `push job run`, but the
+scheduler does not plan the enabled trigger until the proposal is approved.
+Push assigns each proposal to one allowlisted conversation when it presents a
+durable question showing the exact job name, content revision, enabled cron
+schedules, effective backend, timeout, work directory, and primary delivery
+target. That persisted identity is the review owner; concurrent conversations
+cannot adopt or answer its question. Reply with the question UUID followed by
+the number for Approve or Reject. A number alone is rejected so a delayed reply
+cannot select a replacement question. The question expires after 24 hours.
+
+Approval is bound to the exact channel, sender, chat, thread or topic, validated
+file revision, file identity, effective execution settings, and delivery
+target. A file edit, invalid file, symlink or path replacement, schedule change,
+backend change, timeout change, work-directory change, or delivery-target
+change invalidates the prior activation before it can run. A later valid
+revision receives a new review. Disabled triggers and jobs without triggers do
+not require activation review.
+
+Use `push job reviews [<name>]` to inspect current and historical schedule
+review state. A manually edited schedule is still detected and kept inactive;
+the next completed request from an allowlisted conversation can receive its
+review question.
+
 Push runs at most `jobs_max_workers` scheduled jobs concurrently. It does not
 catch up cron occurrences missed while offline. Daylight-saving gaps are
 skipped; repeated local times run once at their first instant. Cron expressions
@@ -189,20 +214,30 @@ delivery attempts, destination, bounded results, and error details.
 
 When a user asks for a job, the assistant writes the complete runbook directly
 to `<assistant_root>/jobs/<lowercase-slug>.md` and runs `push job validate`.
-There is no separate draft or approval step. The selected agent's filesystem
-permissions control whether it can change the assistant repository.
+There is no separate draft-file or installation approval step. The selected
+agent's filesystem permissions control whether it can change the assistant
+repository. A new or changed enabled schedule remains inactive until its
+separate activation review succeeds.
 
 For an assistant repository created before this change, replace any `AGENTS.md`
 instruction that says to propose jobs through approval with the direct-write
 rule above. The gateway's runtime instruction overrides that old rule, but
 updating the repository keeps its checked-in guidance accurate.
 
-Pending job approvals from older Push versions are cancelled during database
-migration. Replying to one explains that the job must be requested again.
+Pending draft-install approvals from older Push versions are cancelled during
+database migration. Replying to one explains that the job must be requested
+again. On upgrade to schedule activation review, each valid enabled schedule
+whose exact revision exists at the first config-aware Push command is captured
+as the migration baseline. Those revisions are recorded as approved and
+activated once when a valid primary destination exists. If that first command
+has no valid primary destination, Push records an empty baseline and closes the
+migration without grandfathering any schedules. Disabled and invalid jobs are
+not grandfathered.
 
 !!! warning
 
-    Jobs have no interactive approval path. Push runs Codex jobs with full
-    access and no prompts and Claude jobs in `bypassPermissions` mode. Treat
-    every enabled job as code execution by the Push service user, review
-    changes to the assistant repository, and allow only trusted senders.
+    Schedule activation review is not an agent permission prompt. After
+    activation, Push runs Codex jobs with full access and no prompts and Claude
+    jobs in `bypassPermissions` mode. Treat every activated job as code
+    execution by the Push service user, review changes to the assistant
+    repository, and allow only trusted senders.

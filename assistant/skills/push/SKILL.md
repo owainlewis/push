@@ -4,7 +4,7 @@ description: Operate a Push personal assistant, inspect its health and jobs, and
 license: MIT
 compatibility: Requires the Push CLI and an initialized assistant repository.
 metadata:
-  push-managed-version: "1"
+  push-managed-version: "2"
 ---
 
 # Push
@@ -43,6 +43,7 @@ are:
 - `push job show <name>`
 - `push job run <name>`
 - `push job runs [<name>]`
+- `push job reviews [<name>]`
 
 All commands accept `--config <path>`. Do not assume machine-readable output
 unless `push help` documents it in the installed version. Never expose tokens,
@@ -57,9 +58,12 @@ message content, or sensitive runtime state in diagnostics or replies.
    environment for credentials.
 4. Run `push job validate` after every job change. Do not claim success if
    validation fails.
-5. Use `push job show <name>` to inspect the installed result and
+5. Saving a new or changed enabled schedule does not activate it. Tell the user
+   that Push will present the exact revision for separate owner review.
+6. Use `push job show <name>` to inspect the installed result,
+   `push job reviews <name>` to inspect schedule activation state, and
    `push job runs <name>` to inspect execution and delivery history.
-6. Run `push job run <name>` only when the user asked for the job to execute or
+7. Run `push job run <name>` only when the user asked for the job to execute or
    when execution is a clearly authorized part of the task.
 
 ## Reply normally

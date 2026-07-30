@@ -219,6 +219,12 @@ fn scoped_commands_emit_one_json_document_without_unrelated_output() {
     assert_keys(&runs["data"], &["job_name", "runs"]);
     assert!(runs["data"]["job_name"].is_null());
     assert!(runs["data"]["runs"].is_array());
+
+    let reviews = json_stdout(&fixture.command().args(["job", "reviews"]).output().unwrap());
+    assert_success_envelope(&reviews, "job.reviews");
+    assert_keys(&reviews["data"], &["job_name", "reviews"]);
+    assert!(reviews["data"]["job_name"].is_null());
+    assert!(reviews["data"]["reviews"].is_array());
 }
 
 #[test]
@@ -616,6 +622,80 @@ fn job_runs_json_omits_stored_content_fields() {
     ] {
         assert!(!text.contains(secret));
     }
+}
+
+#[test]
+fn job_reviews_json_exposes_exact_activation_metadata() {
+    let fixture = Fixture::new("schedule-review");
+    let initial = fixture.command().args(["job", "reviews"]).output().unwrap();
+    json_stdout(&initial);
+    let database = fixture.home.join(".push/push.db");
+    let connection = rusqlite::Connection::open(database).unwrap();
+    connection
+        .execute(
+            "INSERT INTO job_schedule_reviews (
+                id, job_name, content_hash, snapshot_hash, file_identity, path,
+                schedules_json, backend, timeout_ms, workdir, delivery_channel,
+                delivery_target, status, proposed_at_ms, decided_at_ms,
+                activated_at_ms, reviewed_by, reason
+             ) VALUES (
+                ?1, 'daily', ?2, ?3, ?4, ?5, ?6, 'codex', 300000, ?7,
+                'telegram', '123', 'activated', 1000, 1100, 1200, ?8, ?9
+             )",
+            params![
+                "review-fingerprint",
+                "content-sha256",
+                "snapshot-sha256",
+                "unix:1:2",
+                fixture.assistant.join("jobs/daily.md").to_string_lossy(),
+                r#"[{"id":"daily","kind":"cron","schedule":"0 9 * * *","timezone":"Europe/London","enabled":true}]"#,
+                fixture.assistant.to_string_lossy(),
+                "channel=telegram thread=dm:123 sender=123 chat=123",
+                "approved exact revision",
+            ],
+        )
+        .unwrap();
+
+    let output = fixture
+        .command()
+        .args(["job", "reviews", "daily"])
+        .output()
+        .unwrap();
+    let payload = json_stdout(&output);
+    assert_success_envelope(&payload, "job.reviews");
+    assert_keys(&payload["data"], &["job_name", "reviews"]);
+    assert_eq!(payload["data"]["job_name"], "daily");
+    let review = &payload["data"]["reviews"][0];
+    assert_keys(
+        review,
+        &[
+            "backend",
+            "content_hash",
+            "delivery",
+            "job_name",
+            "reason",
+            "review_id",
+            "reviewed_by",
+            "schedules",
+            "status",
+            "timeout_ms",
+            "workdir",
+        ],
+    );
+    assert_eq!(review["review_id"], "review-fingerprint");
+    assert_eq!(review["job_name"], "daily");
+    assert_eq!(review["status"], "activated");
+    assert_eq!(review["content_hash"], "content-sha256");
+    assert_eq!(review["backend"], "codex");
+    assert_eq!(review["timeout_ms"], 300000);
+    assert_eq!(review["delivery"]["channel"], "telegram");
+    assert_eq!(review["delivery"]["target"], "123");
+    assert_keys(
+        &review["schedules"][0],
+        &["enabled", "id", "kind", "schedule", "timezone"],
+    );
+    assert_eq!(review["schedules"][0]["id"], "daily");
+    assert_eq!(review["schedules"][0]["enabled"], true);
 }
 
 #[cfg(unix)]

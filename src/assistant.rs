@@ -31,7 +31,7 @@ const AGENTS: &str = r#"# Assistant repository instructions
 - Treat `SOUL.md` as user-owned identity. Do not edit it unless the user asks.
 - Use `context/` for durable user context and working notes.
 - Treat `evals/` as user-owned evaluation criteria. Do not edit them during evaluation.
-- Store job runbooks in `jobs/`. Create or update them directly when the user asks, then run `push job validate`.
+- Store job runbooks in `jobs/`. Create or update them directly when the user asks, then run `push job validate`. Say when an enabled schedule is saved but still awaiting Push's separate owner review.
 - Keep secrets, sessions, databases, logs, and other runtime state outside this repository.
 "#;
 
@@ -61,7 +61,7 @@ Good examples include preferences, active projects, people, recurring processes,
 "#;
 
 const PUSH_SKILL: &str = include_str!("../assistant/skills/push/SKILL.md");
-const PUSH_SKILL_VERSION: u32 = 1;
+const PUSH_SKILL_VERSION: u32 = 2;
 const PUSH_SKILL_LINK: &str = "../../skills/push";
 const PUSH_SKILL_MANIFEST: &str = ".push-managed.json";
 const PUSH_SKILL_PROVIDERS: [&str; 2] = [".agents", ".claude"];

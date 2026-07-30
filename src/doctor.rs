@@ -41,6 +41,7 @@ pub fn doctor(config_path: &str) -> Result<()> {
             bail!("doctor found 1 failed check");
         }
     };
+    jobs::Ledger::capture_legacy_schedule_baseline(&cfg)?;
     let report = run_checks(&cfg);
     print!("{report}");
     if report.is_ok() {

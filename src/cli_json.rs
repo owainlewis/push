@@ -271,6 +271,58 @@ fn run_job_command(config_path: &str, command: JobCommand) -> Result<(), CliErro
                 }),
             )
         }
+        JobCommand::Reviews(name) => {
+            if let Some(name) = name.as_deref() {
+                jobs::validate_job_name(name).map_err(CliError::invalid_input)?;
+            }
+            let ledger = jobs::Ledger::open(&cfg.paths.database).map_err(|error| {
+                CliError::configuration("the schedule review ledger could not be opened", error)
+            })?;
+            let rows = ledger.schedule_reviews(name.as_deref()).map_err(|error| {
+                CliError::configuration("the schedule review ledger could not be read", error)
+            })?;
+            let reviews = rows
+                .into_iter()
+                .map(|review| {
+                    let schedules = review
+                        .schedules
+                        .into_iter()
+                        .map(|trigger| {
+                            json!({
+                                "id": trigger.id,
+                                "kind": trigger.kind,
+                                "schedule": trigger.schedule,
+                                "timezone": trigger.timezone,
+                                "enabled": trigger.enabled,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    json!({
+                        "review_id": review.review_id,
+                        "job_name": review.job_name,
+                        "status": review.status,
+                        "content_hash": review.content_hash,
+                        "schedules": schedules,
+                        "backend": review.backend,
+                        "timeout_ms": review.timeout_ms,
+                        "workdir": review.workdir,
+                        "delivery": {
+                            "channel": review.delivery_channel,
+                            "target": review.delivery_target,
+                        },
+                        "reviewed_by": review.reviewed_by,
+                        "reason": review.reason,
+                    })
+                })
+                .collect::<Vec<_>>();
+            write_success(
+                "job.reviews",
+                json!({
+                    "job_name": name,
+                    "reviews": reviews,
+                }),
+            )
+        }
         JobCommand::Run(_) => unreachable!("job run JSON mode is rejected before config loading"),
     }
 }
@@ -282,12 +334,19 @@ fn load_config(path: &str) -> Result<config::Config, CliError> {
             anyhow!("configuration not found at {path}"),
         ));
     }
-    config::Config::load(path).map_err(|error| {
+    let cfg = config::Config::load(path).map_err(|error| {
         CliError::configuration(
             format!("configuration at {path} could not be loaded; run `push doctor` for details"),
             error,
         )
-    })
+    })?;
+    jobs::Ledger::capture_legacy_schedule_baseline(&cfg).map_err(|error| {
+        CliError::configuration(
+            "the existing schedule migration baseline could not be captured",
+            error,
+        )
+    })?;
+    Ok(cfg)
 }
 
 fn catalog_value(catalog: &jobs::Catalog) -> Value {

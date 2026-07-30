@@ -46,8 +46,8 @@ sends the result back when the work is done.
 <div class="push-chat-bar"><span>Telegram</span><span><i></i> Push is online</span></div>
 <div class="push-chat-body">
 <div class="push-chat-message push-chat-message--user"><span>You · 18:12</span><p>Every weekday at 8am, run my morning brief and send me the three things that need my attention.</p></div>
-<div class="push-chat-status"><span>Push → Codex</span><span>Draft ready for approval</span></div>
-<div class="push-chat-message push-chat-message--assistant"><span>Push · 18:14</span><p>I drafted your morning brief for weekdays at 8am. Approve it to start the schedule.</p></div>
+<div class="push-chat-status"><span>Push → Codex</span><span>Schedule ready for review</span></div>
+<div class="push-chat-message push-chat-message--assistant"><span>Push · 18:14</span><p>I saved your morning brief for weekdays at 8am. Approve this exact revision to start the schedule.</p></div>
 </div>
 <div class="push-chat-footer"><span>Delivered in chat</span><span>Conversation saved</span></div>
 </div>

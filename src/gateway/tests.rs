@@ -224,6 +224,7 @@ fn setup_failure_ctx(
             false,
             "imessage",
         )),
+        schedule_destination: None,
         voice: None,
         setup_failure_replies: Arc::new(Mutex::new(Vec::new())),
         sent_replies: Arc::new(Mutex::new(Vec::new())),
@@ -243,6 +244,12 @@ fn setup_failure_job(row_id: i64) -> Job {
         text: "hello".to_string(),
         reply_with_voice: false,
         voice_attachment: None,
+        approval_origin: AnswerOrigin {
+            channel: "imessage".to_string(),
+            thread_key: "imessage:self:me".to_string(),
+            sender_key: "me".to_string(),
+            chat_key: "me".to_string(),
+        },
     }
 }
 
@@ -1268,6 +1275,77 @@ async fn pending_outbound_is_delivered_after_restart_without_backend_rerun() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn recovered_outbound_still_presents_authored_schedule_review() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("schedule-history-recovery-sessions");
+    let assistant_dir = temp_path("schedule-history-recovery-assistant");
+    let jobs_dir = assistant_dir.join("jobs");
+    let workdir = assistant_dir.join("work");
+    std::fs::create_dir_all(&jobs_dir).unwrap();
+    std::fs::create_dir_all(&workdir).unwrap();
+    let mut config = test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    );
+    config.jobs_dir = jobs_dir.to_string_lossy().to_string();
+    std::fs::write(
+        jobs_dir.join("recovered-schedule.md"),
+        format!(
+            "+++\nversion = 1\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"codex\"\n\n[[triggers]]\nid = \"morning\"\nkind = \"cron\"\nschedule = \"0 8 * * *\"\ntimezone = \"Europe/London\"\nenabled = true\n+++\n\nPrepare a note.\n",
+            workdir.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    let mut history = History::open(&config.paths.database).unwrap();
+    let inbound_id = history
+        .record_inbound(
+            "imessage",
+            "imessage:dm:+15551234567",
+            "imessage:1",
+            "create a schedule",
+        )
+        .unwrap();
+    history
+        .record_outbound(
+            inbound_id,
+            OutboundOrigin::Backend,
+            Some("codex"),
+            "stored reply",
+        )
+        .unwrap();
+    drop(history);
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut gateway = Gateway::new(config).unwrap();
+    gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+    gateway.ctx.schedule_destination = Some(PrimaryDestination {
+        channel: "imessage".to_string(),
+        target: "+15551234567".to_string(),
+    });
+    gateway
+        .tick_fake(vec![message(
+            1,
+            "+15551234567",
+            "+15551234567",
+            false,
+            "create a schedule",
+        )])
+        .await;
+    gateway.queues.clear();
+    gateway.drain_workers().await;
+
+    assert!(calls.lock().unwrap().is_empty());
+    let replies = gateway.ctx.sent_replies.lock().unwrap();
+    assert!(replies
+        .iter()
+        .any(|(_, text)| text.contains("stored reply")));
+    assert!(replies.iter().any(|(_, text)| {
+        text.contains("Review schedule activation") && text.contains("recovered-schedule")
+    }));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn session_state_save_failure_keeps_reply_for_restart_without_backend_rerun() {
     let state_path = temp_state_path();
     let sessions_dir = temp_path("session-save-failure-sessions");
@@ -1781,6 +1859,12 @@ async fn closed_worker_queue_is_recovered_without_another_message() {
         text: "recover older".to_string(),
         reply_with_voice: false,
         voice_attachment: None,
+        approval_origin: AnswerOrigin {
+            channel: "imessage".to_string(),
+            thread_key: thread.to_string(),
+            sender_key: "me@icloud.com".to_string(),
+            chat_key: "me@icloud.com".to_string(),
+        },
     };
 
     let (jobs, rx) = mpsc::channel(QUEUE_DEPTH);
@@ -2075,6 +2159,12 @@ async fn stop_targets_the_current_row_ahead_of_retained_failures() {
         text: text.to_string(),
         reply_with_voice: false,
         voice_attachment: None,
+        approval_origin: AnswerOrigin {
+            channel: "imessage".to_string(),
+            thread_key: thread.to_string(),
+            sender_key: "me@icloud.com".to_string(),
+            chat_key: "me@icloud.com".to_string(),
+        },
     };
     let inbound_ids = ["failed", "active", "/stop"]
         .into_iter()
@@ -2579,6 +2669,66 @@ async fn missing_primary_disables_new_schedules_without_stopping_gateway() {
     let _ = std::fs::remove_dir_all(workdir);
 }
 
+#[test]
+fn missing_primary_closes_upgrade_migration_before_later_schedule_creation() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("missing-primary-migration-sessions");
+    let assistant_dir = temp_path("missing-primary-migration-assistant");
+    let jobs_dir = temp_path("missing-primary-migration-jobs");
+    let workdir = temp_path("missing-primary-migration-work");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    std::fs::create_dir_all(&jobs_dir).unwrap();
+    std::fs::create_dir_all(&workdir).unwrap();
+    let mut cfg = test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    );
+    cfg.jobs_dir = jobs_dir.to_string_lossy().to_string();
+    let history = crate::history::History::open(&cfg.paths.database).unwrap();
+    history.execute_batch_for_test(
+        "DROP TABLE job_schedule_review_questions;
+         DROP TABLE job_schedule_events;
+         DROP TABLE job_schedule_reviews;
+         DROP TABLE job_schedule_legacy_baseline;
+         DROP TABLE job_schedule_meta;
+         PRAGMA user_version = 11;",
+    );
+    drop(history);
+
+    let missing = GatewayGroup::new(cfg.clone()).unwrap();
+    drop(missing);
+    std::fs::write(
+        jobs_dir.join("later.md"),
+        format!(
+            "+++\nversion = 1\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"codex\"\n\n[[triggers]]\nid = \"minute\"\nkind = \"cron\"\nschedule = \"* * * * *\"\ntimezone = \"UTC\"\nenabled = true\n+++\n\nRun.\n",
+            workdir.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    cfg.primary_delivery = Some(PrimaryDeliveryConfig {
+        channel: "imessage".to_string(),
+        target: "+15551234567".to_string(),
+    });
+
+    let valid = GatewayGroup::new(cfg.clone()).unwrap();
+    drop(valid);
+    let reviews = crate::jobs::Ledger::open(&cfg.paths.database)
+        .unwrap()
+        .schedule_reviews(Some("later"))
+        .unwrap();
+    assert_eq!(reviews.len(), 1);
+    assert_eq!(reviews[0].status, "proposed");
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+    let _ = std::fs::remove_dir_all(jobs_dir);
+    let _ = std::fs::remove_dir_all(workdir);
+}
+
 #[tokio::test]
 async fn one_channel_failure_does_not_stop_another_and_shutdown_reaches_survivor() {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -2707,6 +2857,83 @@ async fn route_agent_writes_job_directly_without_approval() {
     assert_eq!(calls.lock().unwrap().len(), 1);
     let replies = gateway.ctx.sent_replies.lock().unwrap().clone();
     assert!(!replies.iter().any(|(_, text)| text.contains("Approve")));
+}
+
+#[tokio::test]
+async fn direct_authored_schedule_is_saved_then_reviewed_in_its_owner_channel() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("direct-schedule-sessions");
+    let assistant_dir = temp_path("direct-schedule-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let mut cfg = test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    );
+    cfg.jobs_dir = assistant_dir.join("jobs").to_string_lossy().to_string();
+    std::fs::create_dir_all(&cfg.jobs_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut gateway = Gateway::new(cfg.clone()).unwrap();
+    gateway.ctx.schedule_destination = Some(PrimaryDestination {
+        channel: "imessage".to_string(),
+        target: "+15551234567".to_string(),
+    });
+    let job_path = Path::new(&cfg.jobs_dir).join("agent-schedule.md");
+    let hook = Arc::new(move || {
+        std::fs::write(
+            &job_path,
+            "+++\nversion = 1\ntimeout = \"5s\"\nbackend = \"codex\"\n\n[[triggers]]\nid = \"morning\"\nkind = \"cron\"\nschedule = \"0 8 * * *\"\ntimezone = \"Europe/London\"\nenabled = true\n+++\n\nPrepare a note.\n",
+        )
+        .unwrap();
+    });
+    gateway.ctx.runners = Arc::new(fake_runners_with_hook(calls, Some(hook)));
+
+    run_messages(
+        &mut gateway,
+        vec![message(
+            1,
+            "+15551234567",
+            "+15551234567",
+            false,
+            "Create a morning schedule",
+        )],
+    )
+    .await;
+
+    let replies = gateway.ctx.sent_replies.lock().unwrap().clone();
+    let review = replies
+        .iter()
+        .map(|(_, text)| text)
+        .find(|text| text.contains("Review schedule activation"))
+        .expect("schedule review should be delivered after direct authoring");
+    assert!(review.contains("Job: agent-schedule"));
+    assert!(review.contains("0 8 * * *"));
+    let question_id = review
+        .split(|character: char| character.is_whitespace() || character == '`')
+        .find(|part| Uuid::parse_str(part).is_ok())
+        .unwrap()
+        .to_string();
+    drop(replies);
+
+    run_messages(
+        &mut gateway,
+        vec![message(
+            2,
+            "+15551234567",
+            "+15551234567",
+            false,
+            &format!("{question_id} 1"),
+        )],
+    )
+    .await;
+
+    assert!(gateway
+        .ctx
+        .sent_replies
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(_, text)| text.contains("Approved schedule activation")));
 }
 
 #[tokio::test]

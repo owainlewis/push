@@ -9,18 +9,19 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use chrono::{Datelike, LocalResult, TimeZone, Timelike, Utc};
-use rusqlite::{params, Connection, TransactionBehavior};
-use serde::Deserialize;
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::agent::{Request, RunError, Runner};
+use crate::approval::{AnswerOrigin, Choice, DeliveryStatus as ApprovalDeliveryStatus, Question};
 use crate::config::{AgentBackend, Config};
 use crate::history::History;
 use crate::prompt::Composer;
-use crate::util::{expand_home, now_ms, restrict_permissions, same_file};
+use crate::util::{expand_home, file_identity, now_ms, restrict_permissions, same_file};
 
 const MAX_STORED_RESULT_BYTES: usize = 64 * 1024;
 const MAX_EVAL_BYTES: usize = 64 * 1024;
@@ -54,7 +55,7 @@ pub struct Eval {
     pub body: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Trigger {
     pub id: String,
@@ -72,7 +73,9 @@ pub struct Job {
     pub timeout: Duration,
     pub workdir: PathBuf,
     pub backend: AgentBackend,
+    pub content_hash: String,
     pub snapshot_hash: String,
+    pub file_identity: String,
     pub evals: Vec<Eval>,
     pub triggers: Vec<Trigger>,
 }
@@ -183,7 +186,9 @@ fn load_file(cfg: &Config, name: &str, path: &Path) -> Result<Job> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
         .with_context(|| format!("read job {}", path.display()))?;
-    validate_contents(cfg, name, path, &bytes)
+    let mut job = validate_contents(cfg, name, path, &bytes)?;
+    job.file_identity = file_identity(&opened);
+    Ok(job)
 }
 
 pub(crate) fn validate_contents(
@@ -224,6 +229,7 @@ pub(crate) fn validate_contents(
             .context("canonicalize default job workdir from assistant_root")?,
     };
     cfg.validate_job_workdir(&workdir)?;
+    let content_hash = hash_bytes(bytes);
     let mut snapshot = Sha256::new();
     snapshot.update(bytes);
     for eval in &evals {
@@ -240,7 +246,9 @@ pub(crate) fn validate_contents(
         timeout,
         workdir,
         backend,
+        content_hash,
         snapshot_hash,
+        file_identity: String::new(),
         evals,
         triggers: metadata.triggers,
     })
@@ -268,6 +276,10 @@ fn load_evals(cfg: &Config, names: &[String]) -> Result<Vec<Eval>> {
         evals.push(eval);
     }
     Ok(evals)
+}
+
+fn hash_bytes(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn load_eval(cfg: &Config, name: &str) -> Result<Eval> {
@@ -633,6 +645,59 @@ pub struct Ledger {
     conn: Connection,
 }
 
+const SCHEDULE_REVIEW_TTL_MS: i64 = 24 * 60 * 60 * 1_000;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleReviewEvent {
+    pub id: i64,
+    pub audit_event_id: String,
+    pub event: String,
+    pub job_name: String,
+    pub content_hash: String,
+    pub review_id: String,
+    pub actor: Option<String>,
+    pub reason: Option<String>,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScheduleDecision {
+    Approved {
+        job_name: String,
+        content_hash: String,
+        event: ScheduleReviewEvent,
+    },
+    Rejected {
+        job_name: String,
+        content_hash: String,
+        event: ScheduleReviewEvent,
+    },
+    Invalidated {
+        job_name: String,
+        content_hash: String,
+        reason: String,
+        event: Option<ScheduleReviewEvent>,
+    },
+    AlreadyHandled,
+    NotScheduleReview,
+}
+
+#[derive(Debug, Clone)]
+struct ScheduleReview {
+    id: String,
+    job_name: String,
+    content_hash: String,
+    snapshot_hash: String,
+    file_identity: String,
+    path: String,
+    schedules_json: String,
+    backend: String,
+    timeout_ms: i64,
+    workdir: String,
+    delivery_channel: String,
+    delivery_target: String,
+}
+
 #[derive(Debug)]
 pub struct RunRow {
     pub id: String,
@@ -655,12 +720,30 @@ pub struct RunRow {
     pub delivery_target: Option<String>,
 }
 
+#[derive(Debug)]
+pub struct ScheduleReviewRow {
+    pub review_id: String,
+    pub job_name: String,
+    pub content_hash: String,
+    pub status: String,
+    pub schedules: Vec<Trigger>,
+    pub backend: String,
+    pub timeout_ms: i64,
+    pub workdir: String,
+    pub delivery_channel: String,
+    pub delivery_target: String,
+    pub reviewed_by: Option<String>,
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct QueuedRun {
     pub id: String,
     pub job_name: String,
     pub snapshot_hash: String,
     pub trigger_id: String,
+    pub delivery_channel: Option<String>,
+    pub delivery_target: Option<String>,
 }
 
 #[derive(Debug)]
@@ -748,7 +831,599 @@ impl Ledger {
         drop(History::open(database_path)?);
         let conn = Connection::open(database_path)?;
         conn.busy_timeout(Duration::from_secs(5))?;
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         Ok(Self { conn })
+    }
+
+    pub fn capture_legacy_schedule_baseline(cfg: &Config) -> Result<()> {
+        let mut ledger = Self::open(&cfg.paths.database)?;
+        let migration: String = ledger.conn.query_row(
+            "SELECT value FROM job_schedule_meta
+             WHERE key = 'legacy_schedule_migration'",
+            [],
+            |row| row.get(0),
+        )?;
+        let baseline: String = ledger.conn.query_row(
+            "SELECT value FROM job_schedule_meta
+             WHERE key = 'legacy_schedule_baseline'",
+            [],
+            |row| row.get(0),
+        )?;
+        if migration != "pending" || baseline != "unclaimed" {
+            return Ok(());
+        }
+
+        let destination = schedule_migration_destination(cfg).ok();
+        let catalog = Catalog::load(cfg)?;
+        let candidates = destination
+            .as_ref()
+            .map(|(channel, target)| {
+                catalog
+                    .jobs
+                    .values()
+                    .filter(|job| job.triggers.iter().any(|trigger| trigger.enabled))
+                    .map(|job| schedule_review(job, channel, target))
+                    .collect::<Result<Vec<_>>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let tx = ledger
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let still_unclaimed = tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM job_schedule_meta
+                WHERE key = 'legacy_schedule_baseline' AND value = 'unclaimed'
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !still_unclaimed {
+            tx.rollback()?;
+            return Ok(());
+        }
+        for review in candidates {
+            tx.execute(
+                "INSERT OR IGNORE INTO job_schedule_legacy_baseline (
+                    review_id, job_name, content_hash, snapshot_hash, file_identity,
+                    path, schedules_json, backend, timeout_ms, workdir,
+                    delivery_channel, delivery_target
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    review.id,
+                    review.job_name,
+                    review.content_hash,
+                    review.snapshot_hash,
+                    review.file_identity,
+                    review.path,
+                    review.schedules_json,
+                    review.backend,
+                    review.timeout_ms,
+                    review.workdir,
+                    review.delivery_channel,
+                    review.delivery_target,
+                ],
+            )?;
+        }
+        tx.execute(
+            "UPDATE job_schedule_meta SET value = 'captured'
+             WHERE key = 'legacy_schedule_baseline' AND value = 'unclaimed'",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn reconcile_schedule_reviews(
+        &mut self,
+        catalog: &Catalog,
+        delivery_channel: &str,
+        delivery_target: &str,
+        now: i64,
+    ) -> Result<(HashSet<String>, Vec<ScheduleReviewEvent>)> {
+        let candidates = catalog
+            .jobs
+            .values()
+            .filter(|job| job.triggers.iter().any(|trigger| trigger.enabled))
+            .map(|job| {
+                schedule_review(job, delivery_channel, delivery_target)
+                    .map(|review| (review.id.clone(), review))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+        let mut events = Vec::new();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let migration: String = tx.query_row(
+            "SELECT value FROM job_schedule_meta WHERE key = 'legacy_schedule_migration'",
+            [],
+            |row| row.get(0),
+        )?;
+        if migration == "pending" {
+            for review in candidates.values() {
+                let preserved = tx.query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM job_schedule_legacy_baseline
+                        WHERE review_id = ?1
+                     )",
+                    [&review.id],
+                    |row| row.get::<_, bool>(0),
+                )?;
+                if preserved && insert_schedule_review(&tx, review, "activated", now)? {
+                    push_schedule_event(
+                        &tx,
+                        &mut events,
+                        review,
+                        "approved",
+                        Some("migration"),
+                        Some("preserved existing installed schedule"),
+                        now,
+                    )?;
+                    push_schedule_event(
+                        &tx,
+                        &mut events,
+                        review,
+                        "activated",
+                        Some("migration"),
+                        Some("preserved existing installed schedule"),
+                        now,
+                    )?;
+                }
+            }
+            tx.execute(
+                "UPDATE job_schedule_meta SET value = 'complete'
+                 WHERE key = 'legacy_schedule_migration'",
+                [],
+            )?;
+            tx.execute("DELETE FROM job_schedule_legacy_baseline", [])?;
+        }
+
+        let live = tx
+            .prepare(
+                "SELECT id, job_name, content_hash, snapshot_hash, file_identity, path,
+                        schedules_json, backend, timeout_ms, workdir,
+                        delivery_channel, delivery_target
+                 FROM job_schedule_reviews
+                 WHERE status IN ('proposed', 'approved', 'activated')
+                 ORDER BY proposed_at_ms, id",
+            )?
+            .query_map([], map_schedule_review)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for review in live {
+            if !candidates.contains_key(&review.id) {
+                let changed = tx.execute(
+                    "UPDATE job_schedule_reviews
+                     SET status = 'invalidated', invalidated_at_ms = ?2,
+                         reason = 'job revision or effective schedule changed'
+                     WHERE id = ?1 AND status IN ('proposed', 'approved', 'activated')",
+                    params![review.id, now],
+                )?;
+                if changed == 1 {
+                    push_schedule_event(
+                        &tx,
+                        &mut events,
+                        &review,
+                        "invalidated",
+                        Some("scheduler"),
+                        Some("job revision or effective schedule changed"),
+                        now,
+                    )?;
+                    cancel_review_questions(&tx, &review.id, now)?;
+                }
+            }
+        }
+
+        for review in candidates.values() {
+            if insert_schedule_review(&tx, review, "proposed", now)? {
+                push_schedule_event(
+                    &tx,
+                    &mut events,
+                    review,
+                    "proposed",
+                    Some("scheduler"),
+                    None,
+                    now,
+                )?;
+            } else {
+                let reproposed = tx.execute(
+                    "UPDATE job_schedule_reviews
+                     SET status = 'proposed', proposed_at_ms = ?2,
+                         decided_at_ms = NULL, activated_at_ms = NULL,
+                         invalidated_at_ms = NULL, reviewed_by = NULL, reason = NULL
+                     WHERE id = ?1 AND status = 'invalidated'",
+                    params![review.id, now],
+                )?;
+                if reproposed == 1 {
+                    cancel_review_questions(&tx, &review.id, now)?;
+                    push_schedule_event(
+                        &tx,
+                        &mut events,
+                        review,
+                        "proposed",
+                        Some("scheduler"),
+                        Some("valid schedule revision returned after invalidation"),
+                        now,
+                    )?;
+                }
+            }
+            let changed = tx.execute(
+                "UPDATE job_schedule_reviews
+                 SET status = 'activated', activated_at_ms = ?2
+                 WHERE id = ?1 AND status = 'approved'",
+                params![review.id, now],
+            )?;
+            if changed == 1 {
+                push_schedule_event(
+                    &tx,
+                    &mut events,
+                    review,
+                    "activated",
+                    Some("scheduler"),
+                    None,
+                    now,
+                )?;
+            }
+        }
+
+        let active = tx
+            .prepare(
+                "SELECT id FROM job_schedule_reviews
+                 WHERE status = 'activated' ORDER BY id",
+            )?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<HashSet<_>>>()?;
+        tx.commit()?;
+        Ok((active, events))
+    }
+
+    pub fn settle_legacy_schedule_migration_without_destination(&mut self) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE job_schedule_meta SET value = 'complete'
+             WHERE key = 'legacy_schedule_migration' AND value = 'pending'",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn schedule_review_questions(
+        &mut self,
+        origin: &AnswerOrigin,
+        target: &str,
+        now: i64,
+    ) -> Result<Vec<Question>> {
+        self.conn.execute(
+            "UPDATE approval_questions SET status = 'expired', updated_at_ms = ?1
+             WHERE status = 'pending' AND expires_at_ms <= ?1",
+            [now],
+        )?;
+        let proposed = self
+            .conn
+            .prepare(
+                "SELECT id, job_name, content_hash, snapshot_hash, file_identity, path,
+                        schedules_json, backend, timeout_ms, workdir,
+                        delivery_channel, delivery_target
+                 FROM job_schedule_reviews
+                 WHERE status = 'proposed'
+                 ORDER BY proposed_at_ms, job_name, id",
+            )?
+            .query_map([], map_schedule_review)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut questions = Vec::new();
+        for review in proposed {
+            let existing =
+                self.conn
+                    .query_row(
+                        "SELECT q.id, q.channel, q.thread_key, q.sender_key, q.chat_key,
+                            q.target, q.prompt, q.choices_json, q.expires_at_ms,
+                            q.delivery_status
+                     FROM job_schedule_review_questions rq
+                     JOIN approval_questions q ON q.id = rq.question_id
+                     WHERE rq.review_id = ?1
+                       AND q.status IN ('pending', 'answered')
+                       AND q.expires_at_ms > ?2
+                     ORDER BY rq.created_at_ms DESC LIMIT 1",
+                        params![review.id, now],
+                        |row| {
+                            Ok((
+                                Question {
+                                    id: row.get(0)?,
+                                    channel: row.get(1)?,
+                                    thread_key: row.get(2)?,
+                                    sender_key: row.get(3)?,
+                                    chat_key: row.get(4)?,
+                                    target: row.get(5)?,
+                                    prompt: row.get(6)?,
+                                    choices: serde_json::from_str(&row.get::<_, String>(7)?)
+                                        .map_err(|error| {
+                                            rusqlite::Error::FromSqlConversionFailure(
+                                                7,
+                                                rusqlite::types::Type::Text,
+                                                Box::new(error),
+                                            )
+                                        })?,
+                                    expires_at_ms: row.get(8)?,
+                                },
+                                row.get::<_, String>(9)?,
+                            ))
+                        },
+                    )
+                    .optional()?;
+            if let Some((question, delivery_status)) = existing {
+                if question.channel == origin.channel
+                    && question.thread_key == origin.thread_key
+                    && question.sender_key == origin.sender_key
+                    && question.chat_key == origin.chat_key
+                    && delivery_status != "delivered"
+                {
+                    questions.push(question);
+                }
+                continue;
+            }
+
+            let question = Question::new(
+                origin.clone(),
+                target,
+                schedule_review_prompt(&review)?,
+                vec![
+                    Choice {
+                        label: "Approve this exact schedule revision".to_string(),
+                        value: "approve".to_string(),
+                    },
+                    Choice {
+                        label: "Reject this schedule revision".to_string(),
+                        value: "reject".to_string(),
+                    },
+                ],
+                now.saturating_add(SCHEDULE_REVIEW_TTL_MS),
+            )?;
+            let choices = serde_json::to_string(&question.choices)?;
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if !insert_schedule_question(&tx, &review, &question, &choices, now)? {
+                tx.rollback()?;
+                continue;
+            }
+            tx.commit()?;
+            questions.push(question);
+        }
+        Ok(questions)
+    }
+
+    pub fn mark_schedule_question_delivery(
+        &mut self,
+        id: &str,
+        status: ApprovalDeliveryStatus,
+        now: i64,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE approval_questions
+             SET delivery_status = ?2, updated_at_ms = ?3
+             WHERE id = ?1
+               AND EXISTS (
+                   SELECT 1 FROM job_schedule_review_questions
+                   WHERE question_id = ?1
+               )",
+            params![id, status.as_str(), now],
+        )?;
+        if changed != 1 {
+            bail!("schedule review question {id:?} does not exist");
+        }
+        Ok(())
+    }
+
+    pub fn resolve_schedule_answer(
+        &mut self,
+        cfg: &Config,
+        question_id: &str,
+        reviewer: &str,
+        now: i64,
+    ) -> Result<ScheduleDecision> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT r.id, r.job_name, r.content_hash, r.snapshot_hash,
+                        r.file_identity, r.path, r.schedules_json, r.backend,
+                        r.timeout_ms, r.workdir, r.delivery_channel,
+                        r.delivery_target, r.status, q.choices_json, q.answer_index,
+                        q.status
+                 FROM job_schedule_review_questions rq
+                 JOIN job_schedule_reviews r ON r.id = rq.review_id
+                 JOIN approval_questions q ON q.id = rq.question_id
+                 WHERE rq.question_id = ?1",
+                [question_id],
+                |row| {
+                    Ok((
+                        ScheduleReview {
+                            id: row.get(0)?,
+                            job_name: row.get(1)?,
+                            content_hash: row.get(2)?,
+                            snapshot_hash: row.get(3)?,
+                            file_identity: row.get(4)?,
+                            path: row.get(5)?,
+                            schedules_json: row.get(6)?,
+                            backend: row.get(7)?,
+                            timeout_ms: row.get(8)?,
+                            workdir: row.get(9)?,
+                            delivery_channel: row.get(10)?,
+                            delivery_target: row.get(11)?,
+                        },
+                        row.get::<_, String>(12)?,
+                        row.get::<_, String>(13)?,
+                        row.get::<_, Option<i64>>(14)?,
+                        row.get::<_, String>(15)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((review, status, choices, answer_index, question_status)) = row else {
+            return Ok(ScheduleDecision::NotScheduleReview);
+        };
+        if status != "proposed" {
+            return Ok(ScheduleDecision::AlreadyHandled);
+        }
+        if question_status != "answered" {
+            return Ok(ScheduleDecision::AlreadyHandled);
+        }
+        let choices: Vec<Choice> = serde_json::from_str(&choices)?;
+        let answer = answer_index
+            .and_then(|value| value.checked_sub(1))
+            .and_then(|index| choices.get(index as usize))
+            .context("stored schedule review answer is invalid")?;
+        if answer.value == "reject" {
+            let Some(event) =
+                self.finish_schedule_review(&review, "rejected", reviewer, None, question_id, now)?
+            else {
+                return Ok(ScheduleDecision::AlreadyHandled);
+            };
+            return Ok(ScheduleDecision::Rejected {
+                job_name: review.job_name,
+                content_hash: review.content_hash,
+                event,
+            });
+        }
+        if answer.value != "approve" {
+            bail!("unsupported schedule review answer {:?}", answer.value);
+        }
+
+        let current = Catalog::load_named(cfg, &review.job_name)
+            .and_then(|job| {
+                let candidate =
+                    schedule_review(&job, &review.delivery_channel, &review.delivery_target)?;
+                if candidate.id != review.id
+                    || job.content_hash != review.content_hash
+                    || job.snapshot_hash != review.snapshot_hash
+                    || job.file_identity != review.file_identity
+                    || job.path.to_string_lossy() != review.path
+                {
+                    bail!("job changed after its schedule was presented");
+                }
+                Ok(())
+            })
+            .context("revalidate exact schedule revision");
+        if let Err(error) = current {
+            let reason = format!("{error:#}");
+            let event = self.finish_schedule_review(
+                &review,
+                "invalidated",
+                reviewer,
+                Some(&reason),
+                question_id,
+                now,
+            )?;
+            let Some(event) = event else {
+                return Ok(ScheduleDecision::AlreadyHandled);
+            };
+            return Ok(ScheduleDecision::Invalidated {
+                job_name: review.job_name,
+                content_hash: review.content_hash,
+                reason,
+                event: Some(event),
+            });
+        }
+        let Some(event) =
+            self.finish_schedule_review(&review, "approved", reviewer, None, question_id, now)?
+        else {
+            return Ok(ScheduleDecision::AlreadyHandled);
+        };
+        Ok(ScheduleDecision::Approved {
+            job_name: review.job_name,
+            content_hash: review.content_hash,
+            event,
+        })
+    }
+
+    pub fn recover_answered_schedule_reviews(
+        &mut self,
+        cfg: &Config,
+        now: i64,
+    ) -> Result<Vec<ScheduleReviewEvent>> {
+        let answered = self
+            .conn
+            .prepare(
+                "SELECT q.id, q.channel, q.thread_key, q.sender_key, q.chat_key
+                 FROM job_schedule_review_questions rq
+                 JOIN approval_questions q ON q.id = rq.question_id
+                 JOIN job_schedule_reviews r ON r.id = rq.review_id
+                 WHERE q.status = 'answered' AND r.status = 'proposed'
+                 ORDER BY q.answered_at_ms, q.id",
+            )?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut events = Vec::new();
+        for (id, channel, thread, sender, chat) in answered {
+            let reviewer = format!("channel={channel} thread={thread} sender={sender} chat={chat}");
+            match self.resolve_schedule_answer(cfg, &id, &reviewer, now)? {
+                ScheduleDecision::Approved { event, .. }
+                | ScheduleDecision::Rejected { event, .. } => events.push(event),
+                ScheduleDecision::Invalidated {
+                    event: Some(event), ..
+                } => events.push(event),
+                ScheduleDecision::Invalidated { event: None, .. }
+                | ScheduleDecision::AlreadyHandled
+                | ScheduleDecision::NotScheduleReview => {}
+            }
+        }
+        Ok(events)
+    }
+
+    fn finish_schedule_review(
+        &mut self,
+        review: &ScheduleReview,
+        status: &str,
+        reviewer: &str,
+        reason: Option<&str>,
+        question_id: &str,
+        now: i64,
+    ) -> Result<Option<ScheduleReviewEvent>> {
+        if !matches!(status, "approved" | "rejected" | "invalidated") {
+            bail!("invalid schedule review decision {status:?}");
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE job_schedule_reviews
+             SET status = ?2, decided_at_ms = ?3, reviewed_by = ?4, reason = ?5,
+                 invalidated_at_ms = CASE WHEN ?2 = 'invalidated' THEN ?3
+                                          ELSE invalidated_at_ms END
+             WHERE id = ?1 AND status = 'proposed'",
+            params![review.id, status, now, reviewer, reason],
+        )?;
+        if changed != 1 {
+            tx.commit()?;
+            return Ok(None);
+        }
+        tx.execute(
+            "UPDATE approval_questions
+             SET status = 'consumed', consumed_at_ms = ?2, updated_at_ms = ?2
+             WHERE id = ?1 AND status = 'answered'",
+            params![question_id, now],
+        )?;
+        let mut events = Vec::new();
+        push_schedule_event(
+            &tx,
+            &mut events,
+            review,
+            status,
+            Some(reviewer),
+            reason,
+            now,
+        )?;
+        tx.commit()?;
+        Ok(Some(events.remove(0)))
     }
 
     pub fn start_manual(&mut self, cfg: &Config, job: &Job) -> Result<StartOutcome> {
@@ -900,6 +1575,85 @@ impl Ledger {
         Ok(rows)
     }
 
+    pub fn schedule_reviews(&self, name: Option<&str>) -> Result<Vec<ScheduleReviewRow>> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, job_name, content_hash, status, schedules_json, backend,
+                    timeout_ms, workdir, delivery_channel, delivery_target,
+                    reviewed_by, reason
+             FROM job_schedule_reviews
+             WHERE (?1 IS NULL OR job_name = ?1)
+             ORDER BY proposed_at_ms DESC, id DESC LIMIT 100",
+        )?;
+        let rows = statement
+            .query_map([name], |row| {
+                let schedules_json = row.get::<_, String>(4)?;
+                let schedules = serde_json::from_str(&schedules_json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+                Ok(ScheduleReviewRow {
+                    review_id: row.get(0)?,
+                    job_name: row.get(1)?,
+                    content_hash: row.get(2)?,
+                    status: row.get(3)?,
+                    schedules,
+                    backend: row.get(5)?,
+                    timeout_ms: row.get(6)?,
+                    workdir: row.get(7)?,
+                    delivery_channel: row.get(8)?,
+                    delivery_target: row.get(9)?,
+                    reviewed_by: row.get(10)?,
+                    reason: row.get(11)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(anyhow::Error::from)?;
+        Ok(rows)
+    }
+
+    pub(crate) fn pending_schedule_audit_events(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ScheduleReviewEvent>> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, audit_event_id, event, job_name, content_hash, review_id,
+                    actor, reason, created_at_ms
+             FROM job_schedule_events
+             WHERE audit_logged_at_ms IS NULL
+             ORDER BY id
+             LIMIT ?1",
+        )?;
+        let rows = statement
+            .query_map([limit as i64], |row| {
+                Ok(ScheduleReviewEvent {
+                    id: row.get(0)?,
+                    audit_event_id: row.get(1)?,
+                    event: row.get(2)?,
+                    job_name: row.get(3)?,
+                    content_hash: row.get(4)?,
+                    review_id: row.get(5)?,
+                    actor: row.get(6)?,
+                    reason: row.get(7)?,
+                    created_at_ms: row.get(8)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub(crate) fn mark_schedule_audit_logged(&mut self, id: i64, now: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE job_schedule_events
+             SET audit_logged_at_ms = ?2
+             WHERE id = ?1 AND audit_logged_at_ms IS NULL",
+            params![id, now],
+        )?;
+        Ok(())
+    }
+
     pub fn enqueue_scheduled(
         &mut self,
         job: &Job,
@@ -960,7 +1714,8 @@ impl Ledger {
 
     pub fn queued_runs(&self, limit: usize) -> Result<Vec<QueuedRun>> {
         let mut statement = self.conn.prepare(
-            "SELECT id, job_name, snapshot_hash, trigger_id
+            "SELECT id, job_name, snapshot_hash, trigger_id,
+                    delivery_channel, delivery_target
              FROM job_runs WHERE state = 'queued'
              ORDER BY scheduled_at_ms, queued_at_ms LIMIT ?1",
         )?;
@@ -971,6 +1726,8 @@ impl Ledger {
                     job_name: row.get(1)?,
                     snapshot_hash: row.get(2)?,
                     trigger_id: row.get(3)?,
+                    delivery_channel: row.get(4)?,
+                    delivery_target: row.get(5)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1013,9 +1770,40 @@ impl Ledger {
                 return Ok(None);
             }
         };
+        let activation_id = queued
+            .delivery_channel
+            .as_deref()
+            .zip(queued.delivery_target.as_deref())
+            .and_then(|(channel, target)| schedule_review(&job, channel, target).ok())
+            .map(|review| review.id);
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let activated = activation_id
+            .as_deref()
+            .map(|id| {
+                tx.query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM job_schedule_reviews
+                        WHERE id = ?1 AND status = 'activated'
+                     )",
+                    [id],
+                    |row| row.get::<_, bool>(0),
+                )
+            })
+            .transpose()?
+            .unwrap_or(false);
+        if !activated {
+            tx.execute(
+                "UPDATE job_runs SET state = 'cancelled', finished_at_ms = ?2,
+                    error = 'schedule activation changed before execution',
+                    delivery_state = 'pending'
+                 WHERE id = ?1 AND state = 'queued'",
+                params![queued.id, now],
+            )?;
+            tx.commit()?;
+            return Ok(None);
+        }
         tx.execute(
             "UPDATE job_runs
              SET state = CASE WHEN result IS NOT NULL AND evaluation_state = 'running'
@@ -1283,6 +2071,273 @@ fn duration_ms(duration: Duration) -> i64 {
     duration.as_millis().min(i64::MAX as u128) as i64
 }
 
+fn schedule_review(
+    job: &Job,
+    delivery_channel: &str,
+    delivery_target: &str,
+) -> Result<ScheduleReview> {
+    let schedules = job
+        .triggers
+        .iter()
+        .filter(|trigger| trigger.enabled)
+        .cloned()
+        .collect::<Vec<_>>();
+    if schedules.is_empty() {
+        bail!("schedule review requires at least one enabled trigger");
+    }
+    let schedules_json = serde_json::to_string(&schedules)?;
+    let path = job.path.to_string_lossy().to_string();
+    let workdir = job.workdir.to_string_lossy().to_string();
+    let timeout_ms = duration_ms(job.timeout);
+    let mut fingerprint = Sha256::new();
+    for value in [
+        job.name.as_str(),
+        job.content_hash.as_str(),
+        job.snapshot_hash.as_str(),
+        job.file_identity.as_str(),
+        path.as_str(),
+        schedules_json.as_str(),
+        job.backend.as_str(),
+        &timeout_ms.to_string(),
+        workdir.as_str(),
+        delivery_channel,
+        delivery_target,
+    ] {
+        fingerprint.update(value.as_bytes());
+        fingerprint.update(b"\0");
+    }
+    Ok(ScheduleReview {
+        id: format!("{:x}", fingerprint.finalize()),
+        job_name: job.name.clone(),
+        content_hash: job.content_hash.clone(),
+        snapshot_hash: job.snapshot_hash.clone(),
+        file_identity: job.file_identity.clone(),
+        path,
+        schedules_json,
+        backend: job.backend.as_str().to_string(),
+        timeout_ms,
+        workdir,
+        delivery_channel: delivery_channel.to_string(),
+        delivery_target: delivery_target.to_string(),
+    })
+}
+
+fn schedule_migration_destination(cfg: &Config) -> Result<(String, String)> {
+    let configured = cfg
+        .primary_delivery
+        .as_ref()
+        .context("primary delivery is not configured")?;
+    let kind = crate::config::ChannelKind::parse(&configured.channel)
+        .context("invalid primary delivery channel")?;
+    if !cfg.enabled_channel_kinds()?.contains(&kind) {
+        bail!("primary delivery channel is not enabled");
+    }
+    let channel = crate::channel::Channel::new_for(cfg, kind)?;
+    let target = channel.primary_target(&configured.target)?;
+    Ok((kind.as_str().to_string(), target))
+}
+
+fn insert_schedule_review(
+    tx: &Transaction<'_>,
+    review: &ScheduleReview,
+    status: &str,
+    now: i64,
+) -> Result<bool> {
+    Ok(tx.execute(
+        "INSERT INTO job_schedule_reviews (
+            id, job_name, content_hash, snapshot_hash, file_identity, path,
+            schedules_json, backend, timeout_ms, workdir, delivery_channel,
+            delivery_target, status, proposed_at_ms, decided_at_ms, activated_at_ms,
+            reviewed_by, reason
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                   ?13, ?14,
+                   CASE WHEN ?13 = 'activated' THEN ?14 ELSE NULL END,
+                   CASE WHEN ?13 = 'activated' THEN ?14 ELSE NULL END,
+                   CASE WHEN ?13 = 'activated' THEN 'migration' ELSE NULL END,
+                   CASE WHEN ?13 = 'activated'
+                        THEN 'preserved existing installed schedule' ELSE NULL END)
+         ON CONFLICT(id) DO NOTHING",
+        params![
+            review.id,
+            review.job_name,
+            review.content_hash,
+            review.snapshot_hash,
+            review.file_identity,
+            review.path,
+            review.schedules_json,
+            review.backend,
+            review.timeout_ms,
+            review.workdir,
+            review.delivery_channel,
+            review.delivery_target,
+            status,
+            now,
+        ],
+    )? == 1)
+}
+
+fn insert_schedule_question(
+    tx: &Transaction<'_>,
+    review: &ScheduleReview,
+    question: &Question,
+    choices_json: &str,
+    now: i64,
+) -> Result<bool> {
+    let proposed = tx.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM job_schedule_reviews
+            WHERE id = ?1 AND status = 'proposed'
+         )",
+        [&review.id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !proposed {
+        return Ok(false);
+    }
+    let claimed = tx.query_row(
+        "SELECT EXISTS(
+            SELECT 1
+            FROM job_schedule_review_questions rq
+            JOIN approval_questions q ON q.id = rq.question_id
+            WHERE rq.review_id = ?1
+              AND q.status IN ('pending', 'answered')
+              AND q.expires_at_ms > ?2
+         )",
+        params![review.id, now],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if claimed {
+        return Ok(false);
+    }
+    tx.execute(
+        "INSERT INTO approval_questions (
+            id, channel, thread_key, sender_key, chat_key, target,
+            prompt, choices_json, expires_at_ms, status, delivery_status,
+            created_at_ms, updated_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                   'pending', 'pending', ?10, ?10)",
+        params![
+            question.id,
+            question.channel,
+            question.thread_key,
+            question.sender_key,
+            question.chat_key,
+            question.target,
+            question.prompt,
+            choices_json,
+            question.expires_at_ms,
+            now,
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO job_schedule_review_questions (
+            question_id, review_id, created_at_ms
+         ) VALUES (?1, ?2, ?3)",
+        params![question.id, review.id, now],
+    )?;
+    Ok(true)
+}
+
+fn push_schedule_event(
+    tx: &Transaction<'_>,
+    events: &mut Vec<ScheduleReviewEvent>,
+    review: &ScheduleReview,
+    event: &str,
+    actor: Option<&str>,
+    reason: Option<&str>,
+    now: i64,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO job_schedule_events (
+            audit_event_id, review_id, job_name, content_hash, event, actor,
+            reason, created_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            Uuid::new_v4().to_string(),
+            review.id,
+            review.job_name,
+            review.content_hash,
+            event,
+            actor,
+            reason,
+            now
+        ],
+    )?;
+    let audit_event_id = tx.query_row(
+        "SELECT audit_event_id FROM job_schedule_events WHERE id = last_insert_rowid()",
+        [],
+        |row| row.get(0),
+    )?;
+    events.push(ScheduleReviewEvent {
+        id: tx.last_insert_rowid(),
+        audit_event_id,
+        event: event.to_string(),
+        job_name: review.job_name.clone(),
+        content_hash: review.content_hash.clone(),
+        review_id: review.id.clone(),
+        actor: actor.map(str::to_string),
+        reason: reason.map(str::to_string),
+        created_at_ms: now,
+    });
+    Ok(())
+}
+
+fn cancel_review_questions(tx: &Transaction<'_>, review_id: &str, now: i64) -> Result<()> {
+    tx.execute(
+        "UPDATE approval_questions
+         SET status = 'cancelled', updated_at_ms = ?2
+         WHERE id IN (
+             SELECT question_id FROM job_schedule_review_questions WHERE review_id = ?1
+         ) AND status IN ('pending', 'answered')",
+        params![review_id, now],
+    )?;
+    Ok(())
+}
+
+fn map_schedule_review(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduleReview> {
+    Ok(ScheduleReview {
+        id: row.get(0)?,
+        job_name: row.get(1)?,
+        content_hash: row.get(2)?,
+        snapshot_hash: row.get(3)?,
+        file_identity: row.get(4)?,
+        path: row.get(5)?,
+        schedules_json: row.get(6)?,
+        backend: row.get(7)?,
+        timeout_ms: row.get(8)?,
+        workdir: row.get(9)?,
+        delivery_channel: row.get(10)?,
+        delivery_target: row.get(11)?,
+    })
+}
+
+fn schedule_review_prompt(review: &ScheduleReview) -> Result<String> {
+    let schedules: Vec<Trigger> = serde_json::from_str(&review.schedules_json)?;
+    let schedules = schedules
+        .iter()
+        .map(|trigger| {
+            format!(
+                "- {}: {:?} in {}",
+                trigger.id, trigger.schedule, trigger.timezone
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(format!(
+        "Review schedule activation\n\nJob: {}\nContent revision: {}\nSchedules:\n{}\nBackend: {}\nTimeout: {}\nWork directory: {}\nDelivery target: {}:{}\n\nThe Markdown file is already saved and remains available for validation and manual inspection. Approval activates only this exact validated revision and effective schedule configuration.",
+        review.job_name,
+        review.content_hash,
+        schedules,
+        review.backend,
+        humantime::format_duration(Duration::from_millis(
+            review.timeout_ms.try_into().unwrap_or(u64::MAX)
+        )),
+        review.workdir,
+        review.delivery_channel,
+        review.delivery_target,
+    ))
+}
+
 fn delivery_backoff_ms(attempts: i64) -> i64 {
     match attempts {
         0 => 0,
@@ -1313,6 +2368,7 @@ pub struct Scheduler {
     validation_initialized: bool,
     scheduling_enabled: bool,
     ledger: Option<Ledger>,
+    schedule_events: Vec<ScheduleReviewEvent>,
 }
 
 impl Scheduler {
@@ -1329,6 +2385,7 @@ impl Scheduler {
             validation_initialized: false,
             scheduling_enabled: true,
             ledger: None,
+            schedule_events: Vec::new(),
         }
     }
 
@@ -1345,6 +2402,7 @@ impl Scheduler {
             validation_initialized: false,
             scheduling_enabled: false,
             ledger: None,
+            schedule_events: Vec::new(),
         }
     }
 
@@ -1375,11 +2433,32 @@ impl Scheduler {
             None => Ledger::open(&self.cfg.paths.database)?,
         };
         ledger.recover_stale_runs(&self.cfg, now)?;
+        self.schedule_events
+            .extend(ledger.recover_answered_schedule_reviews(&self.cfg, now)?);
 
         let catalog = Catalog::load(&self.cfg)?;
         self.report_catalog_errors(&catalog);
+        let active_reviews = if self.scheduling_enabled {
+            let (active, events) = ledger.reconcile_schedule_reviews(
+                &catalog,
+                &self.delivery_channel,
+                &self.delivery_target,
+                now,
+            )?;
+            self.schedule_events.extend(events);
+            active
+        } else {
+            HashSet::new()
+        };
         let mut seen = HashSet::new();
         for job in catalog.jobs.values().filter(|_| self.scheduling_enabled) {
+            let review = schedule_review(job, &self.delivery_channel, &self.delivery_target).ok();
+            if review
+                .as_ref()
+                .is_none_or(|review| !active_reviews.contains(&review.id))
+            {
+                continue;
+            }
             for trigger in job.triggers.iter().filter(|trigger| trigger.enabled) {
                 let key = (job.name.clone(), trigger.id.clone());
                 seen.insert(key.clone());
@@ -1482,6 +2561,10 @@ impl Scheduler {
         }
         self.ledger = Some(ledger);
         Ok(())
+    }
+
+    pub fn take_schedule_events(&mut self) -> Vec<ScheduleReviewEvent> {
+        std::mem::take(&mut self.schedule_events)
     }
 
     pub async fn shutdown(&mut self) {
@@ -2091,6 +3174,7 @@ pub fn format_job(job: &Job) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::AuditLog;
     use crate::test_support::{sh_arg, temp_dir, temp_path, FakeCli};
     use std::io::Write;
     use std::sync::{Arc, Mutex};
@@ -2138,6 +3222,15 @@ mod tests {
         cfg.jobs_dir = jobs_dir.to_string_lossy().to_string();
         cfg.paths.database = database.to_path_buf();
         cfg.paths.jobs_run = run_dir.to_path_buf();
+        cfg.channel = "telegram".to_string();
+        cfg.self_handles.clear();
+        cfg.allow_from.clear();
+        cfg.telegram_bot_token = Some("test-token".to_string());
+        cfg.telegram_allow_user_ids = vec![7];
+        cfg.primary_delivery = Some(crate::config::PrimaryDeliveryConfig {
+            channel: "telegram".to_string(),
+            target: "7".to_string(),
+        });
         cfg
     }
 
@@ -2171,6 +3264,86 @@ mod tests {
             "+++\nversion = 1\ntimeout = \"5s\"\nworkdir = {:?}\nbackend = \"codex\"\n\n[[triggers]]\nid = \"every-minute\"\nkind = \"cron\"\nschedule = \"* * * * *\"\ntimezone = \"UTC\"\nenabled = {enabled}\n+++\n\nRun once.\n",
             workdir.to_string_lossy()
         )
+    }
+
+    fn review_origin() -> AnswerOrigin {
+        AnswerOrigin {
+            channel: "telegram".to_string(),
+            thread_key: "telegram:dm:7".to_string(),
+            sender_key: "7".to_string(),
+            chat_key: "7".to_string(),
+        }
+    }
+
+    fn preserve_existing_schedules(cfg: &Config) {
+        let ledger = Ledger::open(&cfg.paths.database).unwrap();
+        ledger
+            .conn
+            .execute_batch(
+                "UPDATE job_schedule_meta SET value = 'pending'
+             WHERE key = 'legacy_schedule_migration';
+             UPDATE job_schedule_meta SET value = 'unclaimed'
+             WHERE key = 'legacy_schedule_baseline';
+             DELETE FROM job_schedule_legacy_baseline;",
+            )
+            .unwrap();
+        drop(ledger);
+        Ledger::capture_legacy_schedule_baseline(cfg).unwrap();
+    }
+
+    fn activate_existing_schedules(cfg: &Config) {
+        preserve_existing_schedules(cfg);
+        let catalog = Catalog::load(cfg).unwrap();
+        let enabled = catalog
+            .jobs
+            .values()
+            .filter(|job| job.triggers.iter().any(|trigger| trigger.enabled))
+            .count();
+        let (active, _) = Ledger::open(&cfg.paths.database)
+            .unwrap()
+            .reconcile_schedule_reviews(&catalog, "telegram", "7", 1_000)
+            .unwrap();
+        assert_eq!(active.len(), enabled);
+    }
+
+    fn propose_schedule(cfg: &Config, ledger: &mut Ledger, now: i64) -> (Catalog, Question) {
+        let catalog = Catalog::load(cfg).unwrap();
+        let (active, events) = ledger
+            .reconcile_schedule_reviews(&catalog, "telegram", "7", now)
+            .unwrap();
+        assert!(active.is_empty());
+        assert!(events.iter().any(|event| event.event == "proposed"));
+        let questions = ledger
+            .schedule_review_questions(&review_origin(), "7", now)
+            .unwrap();
+        assert_eq!(questions.len(), 1);
+        (catalog, questions.into_iter().next().unwrap())
+    }
+
+    fn answer_schedule(
+        cfg: &Config,
+        ledger: &mut Ledger,
+        question: &Question,
+        answer: usize,
+        now: i64,
+    ) -> ScheduleDecision {
+        let mut history = History::open(&cfg.paths.database).unwrap();
+        let outcome = history
+            .answer_question(&review_origin(), &format!("{} {answer}", question.id), now)
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            crate::approval::AnswerOutcome::Selected(_)
+        ));
+        drop(history);
+        ledger
+            .resolve_schedule_answer(
+                cfg,
+                &question.id,
+                "channel=telegram thread=telegram:dm:7 sender=7 chat=7",
+                now,
+            )
+            .unwrap()
     }
 
     async fn delivery_ok(
@@ -2895,6 +4068,7 @@ mod tests {
         write_job(&jobs_dir, "delivery", &scheduled_job(&workdir, false));
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
         cfg.agent_commands.codex = slow.bin();
+        activate_existing_schedules(&cfg);
         let catalog = Catalog::load(&cfg).unwrap();
         let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
         let execution_id = ledger
@@ -3070,6 +4244,7 @@ mod tests {
             .errors
             .iter()
             .all(|error| error.message.contains("no possible calendar date")));
+        preserve_existing_schedules(&cfg);
         let mut scheduler = Scheduler::new(cfg, "telegram".into(), "7".into());
 
         tokio::time::timeout(Duration::from_millis(100), scheduler.tick(0, delivery_ok))
@@ -3098,6 +4273,753 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn new_enabled_schedule_stays_unplanned_until_exact_review() {
+        let jobs_dir = temp_dir("schedule-review-pending-jobs");
+        let workdir = temp_dir("schedule-review-pending-work");
+        let database = temp_path("schedule-review-pending-db");
+        let run_dir = temp_dir("schedule-review-pending-run");
+        write_job(&jobs_dir, "pending", &scheduled_job(&workdir, true));
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let mut scheduler = Scheduler::new(cfg.clone(), "telegram".into(), "7".into());
+
+        scheduler.tick(0, delivery_ok).await.unwrap();
+        scheduler.tick(60_000, delivery_ok).await.unwrap();
+
+        assert!(scheduler.next.is_empty());
+        assert!(Ledger::open(&cfg.paths.database)
+            .unwrap()
+            .runs(Some("pending"))
+            .unwrap()
+            .is_empty());
+        let events = scheduler.take_schedule_events();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event.as_str())
+                .collect::<Vec<_>>(),
+            vec!["proposed"]
+        );
+    }
+
+    #[test]
+    fn disabled_schedule_remains_manually_claimable_without_review() {
+        let jobs_dir = temp_dir("schedule-review-disabled-jobs");
+        let workdir = temp_dir("schedule-review-disabled-work");
+        let database = temp_path("schedule-review-disabled-db");
+        let run_dir = temp_dir("schedule-review-disabled-run");
+        write_job(&jobs_dir, "disabled", &scheduled_job(&workdir, false));
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let catalog = Catalog::load(&cfg).unwrap();
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
+
+        let (active, events) = ledger
+            .reconcile_schedule_reviews(&catalog, "telegram", "7", 1_000)
+            .unwrap();
+        assert!(active.is_empty());
+        assert!(events.is_empty());
+        assert!(matches!(
+            ledger
+                .start_manual(&cfg, &catalog.jobs["disabled"])
+                .unwrap(),
+            StartOutcome::Claimed { .. }
+        ));
+    }
+
+    #[test]
+    fn schedule_question_binds_channel_owner_and_rejects_duplicate_approval() {
+        let jobs_dir = temp_dir("schedule-review-owner-jobs");
+        let workdir = temp_dir("schedule-review-owner-work");
+        let database = temp_path("schedule-review-owner-db");
+        let run_dir = temp_dir("schedule-review-owner-run");
+        write_job(&jobs_dir, "owner-bound", &scheduled_job(&workdir, true));
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
+        let (_, question) = propose_schedule(&cfg, &mut ledger, 1_000);
+        assert!(question.prompt.contains("Job: owner-bound"));
+        assert!(question.prompt.contains("Backend: codex"));
+        assert!(question.prompt.contains("Delivery target: telegram:7"));
+        assert!(question.prompt.contains("every-minute"));
+        let reviews = ledger.schedule_reviews(Some("owner-bound")).unwrap();
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0].status, "proposed");
+        assert_eq!(reviews[0].delivery_target, "7");
+        let mut competing = Ledger::open(&cfg.paths.database).unwrap();
+        let competing_origin = AnswerOrigin {
+            channel: "imessage".to_string(),
+            thread_key: "imessage:self:me".to_string(),
+            sender_key: "me".to_string(),
+            chat_key: "me".to_string(),
+        };
+        assert!(competing
+            .schedule_review_questions(&competing_origin, "me", 1_050)
+            .unwrap()
+            .is_empty());
+
+        let mut history = History::open(&cfg.paths.database).unwrap();
+        let wrong_channel = AnswerOrigin {
+            channel: "imessage".to_string(),
+            thread_key: "imessage:self:7".to_string(),
+            sender_key: "7".to_string(),
+            chat_key: "7".to_string(),
+        };
+        assert!(matches!(
+            history
+                .answer_question(&wrong_channel, &format!("{} 1", question.id), 1_100)
+                .unwrap(),
+            crate::approval::AnswerOutcome::Mismatched(_)
+        ));
+        let wrong_sender = AnswerOrigin {
+            sender_key: "8".to_string(),
+            ..review_origin()
+        };
+        assert!(matches!(
+            history
+                .answer_question(&wrong_sender, &format!("{} 1", question.id), 1_200)
+                .unwrap(),
+            crate::approval::AnswerOutcome::Mismatched(_)
+        ));
+        assert!(matches!(
+            history
+                .answer_question(&review_origin(), &format!("{} 1", question.id), 1_300)
+                .unwrap(),
+            crate::approval::AnswerOutcome::Selected(_)
+        ));
+        drop(history);
+        assert!(matches!(
+            ledger
+                .resolve_schedule_answer(&cfg, &question.id, "owner", 1_300)
+                .unwrap(),
+            ScheduleDecision::Approved { .. }
+        ));
+
+        let mut history = History::open(&cfg.paths.database).unwrap();
+        assert!(matches!(
+            history
+                .answer_question(&review_origin(), &format!("{} 1", question.id), 1_400)
+                .unwrap(),
+            crate::approval::AnswerOutcome::Duplicate(_)
+        ));
+        assert_eq!(
+            ledger
+                .resolve_schedule_answer(&cfg, &question.id, "owner", 1_400)
+                .unwrap(),
+            ScheduleDecision::AlreadyHandled
+        );
+    }
+
+    #[test]
+    fn concurrent_channels_cannot_adopt_the_same_schedule_review() {
+        let jobs_dir = temp_dir("schedule-review-owner-race-jobs");
+        let workdir = temp_dir("schedule-review-owner-race-work");
+        let database = temp_path("schedule-review-owner-race-db");
+        let run_dir = temp_dir("schedule-review-owner-race-run");
+        write_job(&jobs_dir, "owner-race", &scheduled_job(&workdir, true));
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let catalog = Catalog::load(&cfg).unwrap();
+        Ledger::open(&database)
+            .unwrap()
+            .reconcile_schedule_reviews(&catalog, "telegram", "7", 1_000)
+            .unwrap();
+
+        let origins = [
+            (review_origin(), "7".to_string()),
+            (
+                AnswerOrigin {
+                    channel: "imessage".to_string(),
+                    thread_key: "imessage:self:me".to_string(),
+                    sender_key: "me".to_string(),
+                    chat_key: "me".to_string(),
+                },
+                "me".to_string(),
+            ),
+        ];
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(origins.len()));
+        let handles = origins
+            .into_iter()
+            .map(|(origin, target)| {
+                let database = database.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let mut ledger = Ledger::open(database).unwrap();
+                    barrier.wait();
+                    let questions = ledger
+                        .schedule_review_questions(&origin, &target, 1_100)
+                        .unwrap();
+                    (origin, questions)
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            results
+                .iter()
+                .map(|(_, questions)| questions.len())
+                .sum::<usize>(),
+            1
+        );
+        let (owner, question) = results
+            .iter()
+            .find_map(|(origin, questions)| questions.first().map(|question| (origin, question)))
+            .unwrap();
+        let competing = results
+            .iter()
+            .find(|(origin, _)| origin != owner)
+            .map(|(origin, _)| origin)
+            .unwrap();
+        assert_eq!(question.channel, owner.channel);
+        assert_eq!(question.thread_key, owner.thread_key);
+        assert_eq!(question.sender_key, owner.sender_key);
+        assert_eq!(question.chat_key, owner.chat_key);
+
+        let mut history = History::open(&database).unwrap();
+        assert!(matches!(
+            history
+                .answer_question(competing, &format!("{} 1", question.id), 1_200)
+                .unwrap(),
+            crate::approval::AnswerOutcome::Mismatched(_)
+        ));
+        assert!(matches!(
+            history
+                .answer_question(owner, &format!("{} 1", question.id), 1_300)
+                .unwrap(),
+            crate::approval::AnswerOutcome::Selected(_)
+        ));
+    }
+
+    #[test]
+    fn expired_schedule_answer_cannot_select_reissued_question_without_correlation() {
+        let jobs_dir = temp_dir("schedule-review-expired-answer-jobs");
+        let workdir = temp_dir("schedule-review-expired-answer-work");
+        let database = temp_path("schedule-review-expired-answer-db");
+        let run_dir = temp_dir("schedule-review-expired-answer-run");
+        write_job(&jobs_dir, "expired-answer", &scheduled_job(&workdir, true));
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
+        let (_, first) = propose_schedule(&cfg, &mut ledger, 1_000);
+        let reissued_at = first.expires_at_ms;
+        let second = ledger
+            .schedule_review_questions(&review_origin(), "7", reissued_at)
+            .unwrap()
+            .remove(0);
+        assert_ne!(first.id, second.id);
+
+        let mut history = History::open(&cfg.paths.database).unwrap();
+        assert!(matches!(
+            history
+                .answer_question(&review_origin(), "1", reissued_at + 1)
+                .unwrap(),
+            crate::approval::AnswerOutcome::Expired(id) if id == first.id
+        ));
+        assert_eq!(
+            history.question_state(&second.id, reissued_at + 1).unwrap(),
+            Some(crate::approval::QuestionState::Pending)
+        );
+        assert!(matches!(
+            history
+                .answer_question(
+                    &review_origin(),
+                    &format!("{} 1", second.id),
+                    reissued_at + 2,
+                )
+                .unwrap(),
+            crate::approval::AnswerOutcome::Selected(_)
+        ));
+    }
+
+    #[test]
+    fn invalidated_review_cannot_gain_a_question_from_a_stale_selection() {
+        let jobs_dir = temp_dir("schedule-review-question-race-jobs");
+        let workdir = temp_dir("schedule-review-question-race-work");
+        let database = temp_path("schedule-review-question-race-db");
+        let run_dir = temp_dir("schedule-review-question-race-run");
+        let original = scheduled_job(&workdir, true);
+        write_job(&jobs_dir, "question-race", &original);
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
+        let catalog = Catalog::load(&cfg).unwrap();
+        ledger
+            .reconcile_schedule_reviews(&catalog, "telegram", "7", 1_000)
+            .unwrap();
+        let review = schedule_review(&catalog.jobs["question-race"], "telegram", "7").unwrap();
+
+        write_job(
+            &jobs_dir,
+            "question-race",
+            &original.replace("Run once.", "Run changed."),
+        );
+        let changed = Catalog::load(&cfg).unwrap();
+        ledger
+            .reconcile_schedule_reviews(&changed, "telegram", "7", 1_100)
+            .unwrap();
+        let question = Question::new(
+            review_origin(),
+            "7",
+            schedule_review_prompt(&review).unwrap(),
+            vec![
+                Choice {
+                    label: "Approve".to_string(),
+                    value: "approve".to_string(),
+                },
+                Choice {
+                    label: "Reject".to_string(),
+                    value: "reject".to_string(),
+                },
+            ],
+            2_000,
+        )
+        .unwrap();
+        let choices = serde_json::to_string(&question.choices).unwrap();
+        let tx = ledger
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert!(!insert_schedule_question(&tx, &review, &question, &choices, 1_200).unwrap());
+        tx.commit().unwrap();
+        let question_count: i64 = ledger
+            .conn
+            .query_row(
+                "SELECT count(*) FROM job_schedule_review_questions
+                 WHERE review_id = ?1",
+                [&review.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(question_count, 0);
+
+        write_job(&jobs_dir, "question-race", &original);
+        let restored = Catalog::load(&cfg).unwrap();
+        ledger
+            .reconcile_schedule_reviews(&restored, "telegram", "7", 1_300)
+            .unwrap();
+        assert!(ledger
+            .recover_answered_schedule_reviews(&cfg, 1_400)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            ledger
+                .schedule_reviews(Some("question-race"))
+                .unwrap()
+                .remove(0)
+                .status,
+            "proposed"
+        );
+    }
+
+    #[test]
+    fn revision_race_invalidates_schedule_approval() {
+        let jobs_dir = temp_dir("schedule-review-race-jobs");
+        let workdir = temp_dir("schedule-review-race-work");
+        let database = temp_path("schedule-review-race-db");
+        let run_dir = temp_dir("schedule-review-race-run");
+        write_job(&jobs_dir, "raced", &scheduled_job(&workdir, true));
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
+        let (_, question) = propose_schedule(&cfg, &mut ledger, 1_000);
+        write_job(
+            &jobs_dir,
+            "raced",
+            &scheduled_job(&workdir, true).replace("Run once.", "Run changed."),
+        );
+
+        let decision = answer_schedule(&cfg, &mut ledger, &question, 1, 1_100);
+
+        assert!(matches!(decision, ScheduleDecision::Invalidated { .. }));
+        let events = ledger
+            .conn
+            .query_row(
+                "SELECT group_concat(event, ',') FROM job_schedule_events
+                 WHERE job_name = 'raced' ORDER BY id",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(events, "proposed,invalidated");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_content_in_place_rewrite_invalidates_schedule_approval() {
+        let jobs_dir = temp_dir("schedule-review-in-place-answer-jobs");
+        let workdir = temp_dir("schedule-review-in-place-answer-work");
+        let database = temp_path("schedule-review-in-place-answer-db");
+        let run_dir = temp_dir("schedule-review-in-place-answer-run");
+        let contents = scheduled_job(&workdir, true);
+        write_job(&jobs_dir, "in-place-answer", &contents);
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
+        let (catalog, question) = propose_schedule(&cfg, &mut ledger, 1_000);
+        let original_identity = catalog.jobs["in-place-answer"].file_identity.clone();
+        std::thread::sleep(Duration::from_millis(10));
+        write_job(&jobs_dir, "in-place-answer", &contents);
+        let rewritten = Catalog::load(&cfg).unwrap();
+        assert_ne!(
+            rewritten.jobs["in-place-answer"].file_identity,
+            original_identity
+        );
+
+        assert!(matches!(
+            answer_schedule(&cfg, &mut ledger, &question, 1, 1_100),
+            ScheduleDecision::Invalidated { .. }
+        ));
+    }
+
+    #[test]
+    fn schedule_audit_outbox_replays_after_write_failure_and_restart() {
+        let jobs_dir = temp_dir("schedule-review-audit-outbox-jobs");
+        let workdir = temp_dir("schedule-review-audit-outbox-work");
+        let database = temp_path("schedule-review-audit-outbox-db");
+        let run_dir = temp_dir("schedule-review-audit-outbox-run");
+        let audit_path = temp_path("schedule-review-audit-outbox-log");
+        write_job(&jobs_dir, "audit-outbox", &scheduled_job(&workdir, true));
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let catalog = Catalog::load(&cfg).unwrap();
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
+        ledger
+            .reconcile_schedule_reviews(&catalog, "telegram", "7", 1_000)
+            .unwrap();
+        std::fs::create_dir(&audit_path).unwrap();
+        let audit = AuditLog::new(&audit_path, false, "scheduler");
+
+        assert!(audit.flush_schedule_reviews(&mut ledger).is_err());
+        drop(ledger);
+        let mut reopened = Ledger::open(&cfg.paths.database).unwrap();
+        assert_eq!(
+            reopened.pending_schedule_audit_events(100).unwrap().len(),
+            1
+        );
+
+        std::fs::remove_dir(&audit_path).unwrap();
+        std::fs::write(&audit_path, "{\"partial\":").unwrap();
+        assert_eq!(audit.flush_schedule_reviews(&mut reopened).unwrap(), 1);
+        assert!(reopened
+            .pending_schedule_audit_events(100)
+            .unwrap()
+            .is_empty());
+        let contents = std::fs::read_to_string(&audit_path).unwrap();
+        let lines = contents.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1);
+        let event: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(event["event"], "schedule_review_proposed");
+        let event_id = event["event_id"].as_str().unwrap();
+        let uuid = event_id.strip_prefix("job_schedule_event:").unwrap();
+        Uuid::parse_str(uuid).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_and_regular_path_replacement_fail_closed() {
+        use std::os::unix::fs::symlink;
+
+        for replacement in ["regular", "symlink"] {
+            let jobs_dir = temp_dir(&format!("schedule-review-{replacement}-jobs"));
+            let workdir = temp_dir(&format!("schedule-review-{replacement}-work"));
+            let database = temp_path(&format!("schedule-review-{replacement}-db"));
+            let run_dir = temp_dir(&format!("schedule-review-{replacement}-run"));
+            let contents = scheduled_job(&workdir, true);
+            write_job(&jobs_dir, "replaced", &contents);
+            let cfg = cfg(&jobs_dir, &database, &run_dir);
+            let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
+            let (_, question) = propose_schedule(&cfg, &mut ledger, 1_000);
+            let path = jobs_dir.join("replaced.md");
+            let replacement_path = jobs_dir.join("replacement");
+            std::fs::write(&replacement_path, &contents).unwrap();
+            if replacement == "regular" {
+                std::fs::rename(&replacement_path, &path).unwrap();
+            } else {
+                std::fs::remove_file(&path).unwrap();
+                symlink(&replacement_path, &path).unwrap();
+            }
+
+            assert!(matches!(
+                answer_schedule(&cfg, &mut ledger, &question, 1, 1_100),
+                ScheduleDecision::Invalidated { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn rejection_is_terminal_and_records_history() {
+        let jobs_dir = temp_dir("schedule-review-reject-jobs");
+        let workdir = temp_dir("schedule-review-reject-work");
+        let database = temp_path("schedule-review-reject-db");
+        let run_dir = temp_dir("schedule-review-reject-run");
+        write_job(&jobs_dir, "rejected", &scheduled_job(&workdir, true));
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
+        let (_, question) = propose_schedule(&cfg, &mut ledger, 1_000);
+
+        assert!(matches!(
+            answer_schedule(&cfg, &mut ledger, &question, 2, 1_100),
+            ScheduleDecision::Rejected { .. }
+        ));
+        let status: String = ledger
+            .conn
+            .query_row(
+                "SELECT status FROM job_schedule_reviews WHERE job_name = 'rejected'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "rejected");
+    }
+
+    #[tokio::test]
+    async fn accepted_review_survives_restart_and_wakes_scheduler() {
+        let jobs_dir = temp_dir("schedule-review-restart-jobs");
+        let workdir = temp_dir("schedule-review-restart-work");
+        let database = temp_path("schedule-review-restart-db");
+        let run_dir = temp_dir("schedule-review-restart-run");
+        write_job(&jobs_dir, "restart-review", &scheduled_job(&workdir, true));
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
+        let (_, question) = propose_schedule(&cfg, &mut ledger, 1_000);
+        assert!(matches!(
+            answer_schedule(&cfg, &mut ledger, &question, 1, 1_100),
+            ScheduleDecision::Approved { .. }
+        ));
+        drop(ledger);
+
+        let mut scheduler = Scheduler::new(cfg.clone(), "telegram".into(), "7".into());
+        scheduler.tick(0, delivery_ok).await.unwrap();
+
+        assert!(scheduler
+            .next
+            .contains_key(&("restart-review".to_string(), "every-minute".to_string())));
+        assert!(scheduler
+            .take_schedule_events()
+            .iter()
+            .any(|event| event.event == "activated"));
+        drop(scheduler);
+
+        let mut restarted = Scheduler::new(cfg, "telegram".into(), "7".into());
+        restarted.tick(0, delivery_ok).await.unwrap();
+        assert!(restarted
+            .next
+            .contains_key(&("restart-review".to_string(), "every-minute".to_string())));
+    }
+
+    #[test]
+    fn migration_preserves_only_valid_existing_enabled_schedules() {
+        let jobs_dir = temp_dir("schedule-review-migration-jobs");
+        let workdir = temp_dir("schedule-review-migration-work");
+        let database = temp_path("schedule-review-migration-db");
+        let run_dir = temp_dir("schedule-review-migration-run");
+        write_job(&jobs_dir, "existing", &scheduled_job(&workdir, true));
+        write_job(&jobs_dir, "disabled", &scheduled_job(&workdir, false));
+        write_job(&jobs_dir, "invalid", "not a runbook");
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        preserve_existing_schedules(&cfg);
+        write_job(
+            &jobs_dir,
+            "added-after-migration",
+            &scheduled_job(&workdir, true),
+        );
+        let catalog = Catalog::load(&cfg).unwrap();
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
+
+        let (active, events) = ledger
+            .reconcile_schedule_reviews(&catalog, "telegram", "7", 1_000)
+            .unwrap();
+
+        assert_eq!(active.len(), 1);
+        for expected in [
+            ("existing", "approved"),
+            ("existing", "activated"),
+            ("added-after-migration", "proposed"),
+        ] {
+            assert!(events
+                .iter()
+                .any(|event| { (event.job_name.as_str(), event.event.as_str()) == expected }));
+        }
+        assert_eq!(
+            ledger
+                .schedule_reviews(Some("added-after-migration"))
+                .unwrap()
+                .remove(0)
+                .status,
+            "proposed"
+        );
+        let migration: String = ledger
+            .conn
+            .query_row(
+                "SELECT value FROM job_schedule_meta
+                 WHERE key = 'legacy_schedule_migration'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(migration, "complete");
+    }
+
+    #[test]
+    fn invalid_edit_removes_an_activated_schedule_before_execution() {
+        let jobs_dir = temp_dir("schedule-review-invalid-edit-jobs");
+        let workdir = temp_dir("schedule-review-invalid-edit-work");
+        let database = temp_path("schedule-review-invalid-edit-db");
+        let run_dir = temp_dir("schedule-review-invalid-edit-run");
+        write_job(&jobs_dir, "invalidated", &scheduled_job(&workdir, true));
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
+        let (_, question) = propose_schedule(&cfg, &mut ledger, 1_000);
+        assert!(matches!(
+            answer_schedule(&cfg, &mut ledger, &question, 1, 1_100),
+            ScheduleDecision::Approved { .. }
+        ));
+        let catalog = Catalog::load(&cfg).unwrap();
+        let (active, _) = ledger
+            .reconcile_schedule_reviews(&catalog, "telegram", "7", 1_200)
+            .unwrap();
+        assert_eq!(active.len(), 1);
+        write_job(&jobs_dir, "invalidated", "not a runbook");
+
+        let invalid_catalog = Catalog::load(&cfg).unwrap();
+        let (active, events) = ledger
+            .reconcile_schedule_reviews(&invalid_catalog, "telegram", "7", 1_300)
+            .unwrap();
+
+        assert!(active.is_empty());
+        assert!(events.iter().any(|event| event.event == "invalidated"));
+    }
+
+    #[test]
+    fn queued_run_is_cancelled_after_effective_backend_invalidates_activation() {
+        let jobs_dir = temp_dir("schedule-review-queued-backend-jobs");
+        let workdir = temp_dir("schedule-review-queued-backend-work");
+        let database = temp_path("schedule-review-queued-backend-db");
+        let run_dir = temp_dir("schedule-review-queued-backend-run");
+        let runbook = scheduled_job(&workdir, true).replace("backend = \"codex\"\n", "");
+        write_job(&jobs_dir, "queued-backend", &runbook);
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        preserve_existing_schedules(&cfg);
+        let catalog = Catalog::load(&cfg).unwrap();
+        let job = &catalog.jobs["queued-backend"];
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
+        let (active, _) = ledger
+            .reconcile_schedule_reviews(&catalog, "telegram", "7", 1_000)
+            .unwrap();
+        assert_eq!(active.len(), 1);
+        ledger
+            .enqueue_scheduled(job, &job.triggers[0], 60_000, 1_100, "telegram", "7")
+            .unwrap();
+        let queued = ledger.queued_runs(1).unwrap().remove(0);
+
+        let mut changed_cfg = cfg.clone();
+        changed_cfg.jobs_agent = Some("claude".to_string());
+        let reviews = ledger.schedule_reviews(Some("queued-backend")).unwrap();
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0].status, "activated");
+
+        assert!(ledger
+            .claim_scheduled(&changed_cfg, &queued, 1_300)
+            .unwrap()
+            .is_none());
+        let row = ledger.runs(Some("queued-backend")).unwrap().remove(0);
+        assert_eq!(row.state, "cancelled");
+        assert_eq!(
+            row.error.as_deref(),
+            Some("schedule activation changed before execution")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn queued_run_is_cancelled_after_same_content_path_replacement() {
+        let jobs_dir = temp_dir("schedule-review-queued-path-jobs");
+        let workdir = temp_dir("schedule-review-queued-path-work");
+        let database = temp_path("schedule-review-queued-path-db");
+        let run_dir = temp_dir("schedule-review-queued-path-run");
+        let runbook = scheduled_job(&workdir, true);
+        write_job(&jobs_dir, "queued-path", &runbook);
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        preserve_existing_schedules(&cfg);
+        let catalog = Catalog::load(&cfg).unwrap();
+        let job = &catalog.jobs["queued-path"];
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
+        let (active, _) = ledger
+            .reconcile_schedule_reviews(&catalog, "telegram", "7", 1_000)
+            .unwrap();
+        assert_eq!(active.len(), 1);
+        ledger
+            .enqueue_scheduled(job, &job.triggers[0], 60_000, 1_100, "telegram", "7")
+            .unwrap();
+        let queued = ledger.queued_runs(1).unwrap().remove(0);
+
+        let replacement = jobs_dir.join("replacement.md");
+        std::fs::write(&replacement, &runbook).unwrap();
+        std::fs::rename(&replacement, jobs_dir.join("queued-path.md")).unwrap();
+        let reviews = ledger.schedule_reviews(Some("queued-path")).unwrap();
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0].status, "activated");
+
+        assert!(ledger
+            .claim_scheduled(&cfg, &queued, 1_300)
+            .unwrap()
+            .is_none());
+        let row = ledger.runs(Some("queued-path")).unwrap().remove(0);
+        assert_eq!(row.state, "cancelled");
+        assert_eq!(
+            row.error.as_deref(),
+            Some("schedule activation changed before execution")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn queued_run_is_cancelled_after_same_content_in_place_rewrite() {
+        let jobs_dir = temp_dir("schedule-review-queued-in-place-jobs");
+        let workdir = temp_dir("schedule-review-queued-in-place-work");
+        let database = temp_path("schedule-review-queued-in-place-db");
+        let run_dir = temp_dir("schedule-review-queued-in-place-run");
+        let runbook = scheduled_job(&workdir, true);
+        write_job(&jobs_dir, "queued-in-place", &runbook);
+        let cfg = cfg(&jobs_dir, &database, &run_dir);
+        preserve_existing_schedules(&cfg);
+        let catalog = Catalog::load(&cfg).unwrap();
+        let job = &catalog.jobs["queued-in-place"];
+        let original_identity = job.file_identity.clone();
+        let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
+        let (active, _) = ledger
+            .reconcile_schedule_reviews(&catalog, "telegram", "7", 1_000)
+            .unwrap();
+        assert_eq!(active.len(), 1);
+        ledger
+            .enqueue_scheduled(job, &job.triggers[0], 60_000, 1_100, "telegram", "7")
+            .unwrap();
+        let queued = ledger.queued_runs(1).unwrap().remove(0);
+
+        std::thread::sleep(Duration::from_millis(10));
+        write_job(&jobs_dir, "queued-in-place", &runbook);
+        let rewritten = Catalog::load(&cfg).unwrap();
+        assert_ne!(
+            rewritten.jobs["queued-in-place"].file_identity,
+            original_identity
+        );
+        assert_eq!(
+            ledger
+                .schedule_reviews(Some("queued-in-place"))
+                .unwrap()
+                .remove(0)
+                .status,
+            "activated"
+        );
+
+        assert!(ledger
+            .claim_scheduled(&cfg, &queued, 1_300)
+            .unwrap()
+            .is_none());
+        let row = ledger.runs(Some("queued-in-place")).unwrap().remove(0);
+        assert_eq!(row.state, "cancelled");
+        assert_eq!(
+            row.error.as_deref(),
+            Some("schedule activation changed before execution")
+        );
+    }
+
+    #[tokio::test]
     async fn scheduler_skips_missed_ticks_and_retries_stored_output_without_rerunning() {
         let jobs_dir = temp_dir("scheduler-jobs");
         let workdir = temp_dir("scheduler-work");
@@ -3122,6 +5044,7 @@ printf '%s\n' '{{"type":"thread.started","thread_id":"scheduled"}}'
         write_job(&jobs_dir, "scheduled", &scheduled_job(&workdir, true));
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
         cfg.agent_commands.codex = cli.bin();
+        preserve_existing_schedules(&cfg);
         let mut scheduler = Scheduler::new(cfg.clone(), "telegram".into(), "7".into());
         let start = Utc
             .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
@@ -3208,6 +5131,7 @@ printf '%s\n' '{{"type":"thread.started","thread_id":"restart"}}'
         write_job(&jobs_dir, "restart", &scheduled_job(&workdir, true));
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
         cfg.agent_commands.codex = cli.bin();
+        activate_existing_schedules(&cfg);
         let job = Catalog::load_named(&cfg, "restart").unwrap();
         let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
         let first_id = ledger
@@ -3310,6 +5234,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"delivery-only"}'
         );
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
         cfg.agent_commands.codex = slow.bin();
+        activate_existing_schedules(&cfg);
         let job = Catalog::load_named(&cfg, "timeout").unwrap();
         Ledger::open(&cfg.paths.database)
             .unwrap()
@@ -3342,6 +5267,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"delivery-only"}'
         write_job(&jobs_dir, "failure", &scheduled_job(&workdir, true));
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
         cfg.agent_commands.codex = failed.bin();
+        activate_existing_schedules(&cfg);
         let job = Catalog::load_named(&cfg, "failure").unwrap();
         Ledger::open(&cfg.paths.database)
             .unwrap()
@@ -3389,6 +5315,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"limited"}'
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
         cfg.agent_commands.codex = cli.bin();
         cfg.jobs_max_workers = 1;
+        activate_existing_schedules(&cfg);
         let catalog = Catalog::load(&cfg).unwrap();
         let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
         for job in catalog.jobs.values() {
@@ -3443,6 +5370,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"limited"}'
         let run_dir = temp_dir("scheduled-stale-run");
         write_job(&jobs_dir, "stale", &scheduled_job(&workdir, true));
         let cfg = cfg(&jobs_dir, &database, &run_dir);
+        activate_existing_schedules(&cfg);
         let job = Catalog::load_named(&cfg, "stale").unwrap();
         let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
         let id = ledger
@@ -3484,6 +5412,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"limited"}'
                 "backend = \"codex\"\nevals = [\"quality\"]\n",
             ),
         );
+        activate_existing_schedules(&cfg);
         let job = Catalog::load_named(&cfg, "recover-eval").unwrap();
         let mut ledger = Ledger::open(&cfg.paths.database).unwrap();
         let run_id = ledger
@@ -3539,6 +5468,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"after-crash"}'
         write_job(&jobs_dir, "cli-live", &scheduled_job(&workdir, true));
         let mut cfg = cfg(&jobs_dir, &database, &run_dir);
         cfg.agent_commands.codex = cli.bin();
+        preserve_existing_schedules(&cfg);
         let start = 1_800_000_000_000i64;
         let mut before_restart = Scheduler::new(cfg.clone(), "telegram".into(), "7".into());
         before_restart.tick(start, delivery_ok).await.unwrap();

@@ -41,6 +41,30 @@ pub(crate) fn same_file(expected: &std::fs::Metadata, opened: &std::fs::Metadata
         && opened.is_file()
 }
 
+#[cfg(unix)]
+pub(crate) fn file_identity(metadata: &std::fs::Metadata) -> String {
+    use std::os::unix::fs::MetadataExt;
+    format!(
+        "unix:{}:{}:{}:{}:{}",
+        metadata.dev(),
+        metadata.ino(),
+        metadata.len(),
+        metadata.ctime(),
+        metadata.ctime_nsec()
+    )
+}
+
+#[cfg(not(unix))]
+pub(crate) fn file_identity(metadata: &std::fs::Metadata) -> String {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|value| value.as_nanos())
+        .unwrap_or_default();
+    format!("portable:{}:{modified}", metadata.len())
+}
+
 /// Restricts a Push-owned path to owner-only access (0o700 directories,
 /// 0o600 files). A no-op on non-Unix platforms.
 #[cfg(unix)]
