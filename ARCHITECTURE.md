@@ -87,7 +87,7 @@ main
  │    ├── store
  │    ├── history
  │    ├── audit
- │    ├── rehydration
+ │    ├── prompt composer
  │    ├── voice
  │    └── approval answer handling
  └── jobs
@@ -158,6 +158,15 @@ RunOutput {
 
 `RunError` separates timeouts, missing sessions, and other failures so the
 worker can recover or produce the correct stored fallback response.
+
+For conversation and job runs, the prompt composer owns both string fields.
+`instructions` always contains the same ordered system sections: Push-owned
+base policy, user-owned system identity, and Push-resolved workspace paths.
+`prompt` contains one fresh message context section. Claude Code receives
+`instructions` through its system-prompt flag, Codex through developer
+instructions, and Pi through its system-prompt flag. All three receive
+`prompt` through their ordinary prompt input. Restricted evaluator runs keep
+their separate evaluator-specific instruction contract.
 
 ### Durable State Contract
 
@@ -263,8 +272,8 @@ The main pipeline lives in [`src/gateway/mod.rs`](src/gateway/mod.rs) and
  5. HISTORY INSERT       persist accepted inbound message in push.db
  6. ROUTE                select backend by exact thread, parent, channel, default
  7. ENQUEUE              place message on its per-thread bounded queue
- 8. PREPARE              load SOUL.md, resolved paths, session, optional voice
- 9. REHYDRATE            add bounded canonical history for a fresh session
+ 8. PREPARE              resolve session, workspace, identity, optional voice
+ 9. COMPOSE              frame system sections and untrusted fresh context
 10. RUN BACKEND          invoke the selected agent CLI with a timeout
 11. HISTORY INSERT       persist generated outbound response
 12. SESSION SAVE         persist backend-owned session ID when required
@@ -310,21 +319,35 @@ replacement worker.
 For every turn, the worker:
 
 1. canonicalizes `assistant_root`;
-2. loads `SOUL.md`;
-3. appends gateway-owned absolute assistant paths in memory;
-4. validates the optional `context/` boundary;
+2. validates the optional `context/` boundary;
+3. loads the user-owned `SOUL.md` identity;
+4. resolves the assistant, context, evals, jobs, and working paths;
 5. resolves or creates the backend session mapping.
 
+The prompt composer renders these sections in order:
+
+| Section | Owner and precedence | Transport |
+| --- | --- | --- |
+| Push-owned base policy | Push; highest among composed sections | native system or developer instructions |
+| User-owned system identity | `SOUL.md`; below Push policy | native system or developer instructions |
+| Resolved workspace paths | Push-owned path data | native system or developer instructions |
+| Fresh message context | untrusted current-turn data | ordinary prompt input |
+
+The base policy is limited to Push delivery, instruction-boundary, context,
+identity/eval editing, and job-validation invariants. `SOUL.md` and path values
+are JSON strings so delimiter-like text cannot create a new section.
 Push does not inject every context file. The selected backend decides what to
 inspect in the assistant repository.
 
 ### Session Rehydration
 
-Normal resumed turns contain only the new user request. Fresh sessions include
-at most 20 recent messages from the exact channel-qualified conversation.
-Each historical message is capped at 4 KiB and the history block at 16 KiB.
-Roles and content are JSON-delimited so historical text remains prompt content,
-not system instructions.
+Every turn's fresh context is a JSON object containing only the channel,
+channel-qualified thread, reply-delivery mode, current user message, and
+optional bounded history. Sender text, handles, message content, history, and
+provider metadata are untrusted prompt data. Normal resumed turns have an empty
+history array. Fresh sessions include at most 20 recent messages from the exact
+channel-qualified conversation. Each historical message is capped at 4 KiB and
+the history array at 16 KiB.
 
 If a backend reports that a resumed session is missing, Push rotates the stored
 session and retries once as a fresh, rehydrated session.
@@ -417,7 +440,7 @@ File: [`src/claude.rs`](src/claude.rs)
 | --- | --- |
 | New chat | `claude -p --session-id <uuid>` |
 | Resumed chat | `claude -p --resume <uuid>` |
-| Instructions | `--append-system-prompt <SOUL.md + Push footer>` |
+| Instructions | `--append-system-prompt <composed system sections>` |
 | Unattended job | `--permission-mode bypassPermissions` |
 | Evaluator | safe mode, no tools, no MCP, no Chrome, no session persistence |
 
@@ -432,7 +455,7 @@ File: [`src/codex.rs`](src/codex.rs)
 | --- | --- |
 | New chat | `codex exec --json` |
 | Resumed chat | `codex exec resume <thread-id> --json` |
-| Instructions | `-c developer_instructions=<SOUL.md + Push footer>` |
+| Instructions | `-c developer_instructions=<composed system sections>` |
 | Unattended job | full access with approval prompts disabled |
 | Evaluator | read-only, ephemeral, tools and project instructions disabled |
 
@@ -447,7 +470,7 @@ File: [`src/pi.rs`](src/pi.rs)
 | --- | --- |
 | New chat | `pi --print --mode json` |
 | Resumed chat | `pi --print --mode json --session <session-id>` |
-| Instructions | `--append-system-prompt <SOUL.md + Push footer>` |
+| Instructions | `--append-system-prompt <composed system sections>` |
 | Unattended job | `--approve` only when the project resources are trusted |
 | Evaluator | no approval, tools, extensions, skills, templates, context, or session |
 
@@ -760,7 +783,7 @@ result before proactive delivery.
 | [`src/history.rs`](src/history.rs) | SQLite schema, conversation history, delivery, and migrations |
 | [`src/jobs.rs`](src/jobs.rs) | runbook validation, execution, evaluation, scheduler, and ledger |
 | [`src/audit.rs`](src/audit.rs) | redacted JSONL audit log |
-| [`src/rehydration.rs`](src/rehydration.rs) | bounded fresh-session transcript |
+| [`src/prompt.rs`](src/prompt.rs) | system-section and untrusted prompt-content composition |
 | [`src/voice.rs`](src/voice.rs) | provider-neutral transcription and speech |
 | [`src/assistant.rs`](src/assistant.rs) | assistant repository initialization |
 | [`src/doctor.rs`](src/doctor.rs) | environment and deployment checks |

@@ -18,8 +18,9 @@ use uuid::Uuid;
 
 use crate::agent::{Request, RunError, Runner};
 use crate::config::{AgentBackend, Config};
+use crate::history::History;
+use crate::prompt::Composer;
 use crate::util::{expand_home, now_ms, restrict_permissions, same_file};
-use crate::{history::History, soul};
 
 const MAX_STORED_RESULT_BYTES: usize = 64 * 1024;
 const MAX_EVAL_BYTES: usize = 64 * 1024;
@@ -1936,8 +1937,6 @@ async fn execute(cfg: &Config, job: &Job) -> std::result::Result<String, Executi
             "job workdir changed after validation".to_string(),
         ));
     }
-    let instructions = soul::load(&cfg.assistant_dir)
-        .map_err(|error| ExecutionError::Failed(format!("load SOUL.md: {error}")))?;
     let runner = Runner::for_backend(job.backend, cfg);
     let session_id = runner.initial_session_id();
     let workdir = job.workdir.to_string_lossy().to_string();
@@ -1945,12 +1944,15 @@ async fn execute(cfg: &Config, job: &Job) -> std::result::Result<String, Executi
         .is_ok_and(|assistant_root| assistant_root == current_workdir);
     cfg.backend_context_dir()
         .map_err(|error| ExecutionError::Failed(format!("prepare assistant context: {error}")))?;
+    let composer = Composer::load(&cfg.assistant_dir, &workdir)
+        .map_err(|error| ExecutionError::Failed(format!("compose backend prompt: {error}")))?;
+    let prompt = composer.job(&job.name, &job.body);
     let request = Request {
         session_id: &session_id,
         is_new: true,
         work_dir: &workdir,
-        instructions: &instructions,
-        prompt: &job.body,
+        instructions: &prompt.instructions,
+        prompt: &prompt.content,
     };
     tracing::info!(
         "job {} starting: backend={} workdir={} timeout={}",
@@ -4025,7 +4027,9 @@ printf '%s\n' ok > {}
         let args = std::fs::read_to_string(args_path).unwrap();
         assert!(args.lines().any(|line| line == "--session-id"));
         assert!(!args.lines().any(|line| line == "--resume"));
-        assert!(args.lines().any(|line| line == "Inspect this directory."));
+        assert!(args.contains("# Fresh message context"));
+        assert!(args.contains(r#""job":"claude-job""#));
+        assert!(args.contains(r#""content":"\nInspect this directory.\n""#));
     }
 
     #[tokio::test]
@@ -4057,9 +4061,11 @@ printf '%s\n' ok > {}
         assert!(args.lines().any(|line| line == "--no-approve"));
         assert!(!args.lines().any(|line| line == "--approve"));
         assert!(!args.lines().any(|line| line == "--session"));
+        let prompt =
+            std::fs::read_to_string(format!("{}.stdin", args_path.to_string_lossy())).unwrap();
         assert_eq!(
-            std::fs::read_to_string(format!("{}.stdin", args_path.to_string_lossy())).unwrap(),
-            "\nInspect this directory.\n"
+            crate::prompt::current_message(&prompt).as_deref(),
+            Some("\nInspect this directory.\n")
         );
     }
 

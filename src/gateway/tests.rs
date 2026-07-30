@@ -646,29 +646,31 @@ async fn fake_channel_e2e_replies_once_ignores_unallowlisted_and_reuses_session(
                 .unwrap()
                 .to_string_lossy()
         );
-        assert_eq!(calls[0].prompt, "first");
+        assert_eq!(
+            crate::prompt::current_message(&calls[0].prompt).as_deref(),
+            Some("first")
+        );
         assert_eq!(calls[1].session_id, "fake-session");
         assert!(!calls[1].is_new);
         assert_eq!(calls[1].work_dir, calls[0].work_dir);
-        assert_eq!(calls[1].prompt, "second");
+        assert_eq!(
+            crate::prompt::current_message(&calls[1].prompt).as_deref(),
+            Some("second")
+        );
         for call in calls.iter() {
-            assert!(call.instructions.starts_with("Be useful."));
+            let canonical = std::fs::canonicalize(&assistant_dir).unwrap();
+            assert!(call.instructions.starts_with("# Push-owned base policy"));
+            assert!(call.instructions.contains(r#"{"content":"Be useful."}"#));
+            assert!(call
+                .instructions
+                .contains(&format!(r#""assistant_root":"{}""#, canonical.display())));
             assert!(call.instructions.contains(&format!(
-                "Assistant root: {}",
-                std::fs::canonicalize(&assistant_dir).unwrap().display()
+                r#""context":"{}""#,
+                canonical.join("context").display()
             )));
-            assert!(call.instructions.contains(&format!(
-                "Context: {}",
-                std::fs::canonicalize(assistant_dir.join("context"))
-                    .unwrap()
-                    .display()
-            )));
-            assert!(call.instructions.contains(&format!(
-                "Jobs: {}",
-                std::fs::canonicalize(assistant_dir.join("jobs"))
-                    .unwrap()
-                    .display()
-            )));
+            assert!(call
+                .instructions
+                .contains(&format!(r#""jobs":"{}""#, canonical.join("jobs").display())));
         }
     }
     let events = audit_events(&audit_path);
@@ -778,7 +780,10 @@ async fn imessage_question_delivers_and_plain_number_resolves_once() {
     )
     .await;
     assert_eq!(calls.lock().unwrap().len(), 1);
-    assert_eq!(calls.lock().unwrap()[0].prompt, "hello");
+    assert_eq!(
+        crate::prompt::current_message(&calls.lock().unwrap()[0].prompt).as_deref(),
+        Some("hello")
+    );
     let events = audit_events(&format!("{state_path}.audit.jsonl"));
     assert!(events
         .iter()
@@ -1021,7 +1026,10 @@ async fn missing_backend_session_rotates_and_rehydrates_once() {
     let calls = calls.lock().unwrap();
     assert_eq!(calls.len(), 3);
     assert!(!calls[1].is_new);
-    assert_eq!(calls[1].prompt, "second");
+    assert_eq!(
+        crate::prompt::current_message(&calls[1].prompt).as_deref(),
+        Some("second")
+    );
     assert!(calls[2].is_new);
     assert!(calls[2]
         .prompt
@@ -1031,7 +1039,7 @@ async fn missing_backend_session_rotates_and_rehydrates_once() {
         .contains(r#"{"role":"assistant","content":"fake reply: first"}"#));
     assert!(calls[2]
         .prompt
-        .ends_with(r#"{"role":"user","content":"second"}"#));
+        .ends_with(r#""current_message":{"role":"user","content":"second"}}"#));
     drop(calls);
 
     let events = audit_events(&format!("{state_path}.audit.jsonl"));
@@ -1132,12 +1140,12 @@ async fn backend_switch_and_clear_start_fresh_sessions_with_history() {
     assert!(claude_calls[0].prompt.contains("first"));
     assert!(claude_calls[0]
         .prompt
-        .ends_with(r#"{"role":"user","content":"switch"}"#));
+        .ends_with(r#""current_message":{"role":"user","content":"switch"}}"#));
     assert!(claude_calls[1].is_new);
     assert!(claude_calls[1].prompt.contains("switch"));
     assert!(claude_calls[1]
         .prompt
-        .ends_with(r#"{"role":"user","content":"after clear"}"#));
+        .ends_with(r#""current_message":{"role":"user","content":"after clear"}}"#));
 
     let _ = std::fs::remove_file(&state_path);
     let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
@@ -1430,7 +1438,10 @@ async fn telegram_filters_before_agent_and_replies_to_originating_chat() {
 
     assert_eq!(gateway.store.lock().unwrap().cursor("telegram"), 12);
     assert_eq!(calls.lock().unwrap().len(), 1);
-    assert_eq!(calls.lock().unwrap()[0].prompt, "hello");
+    assert_eq!(
+        crate::prompt::current_message(&calls.lock().unwrap()[0].prompt).as_deref(),
+        Some("hello")
+    );
     assert_eq!(
         gateway.ctx.sent_replies.lock().unwrap().as_slice(),
         [("7".to_string(), "fake reply: hello".to_string())]
@@ -1546,7 +1557,7 @@ async fn enabled_channels_process_concurrently_with_isolated_state_and_origin_re
         .lock()
         .unwrap()
         .iter()
-        .map(|call| call.prompt.clone())
+        .filter_map(|call| crate::prompt::current_message(&call.prompt))
         .collect::<Vec<_>>();
     assert!(prompts.contains(&"from imessage".to_string()));
     assert!(prompts.contains(&"from telegram".to_string()));
@@ -1581,7 +1592,10 @@ async fn telegram_voice_is_transcribed_and_gets_text_and_voice_replies() {
 
     run_messages(&mut gateway, vec![telegram_voice_message(1, 7, 7)]).await;
 
-    assert_eq!(calls.lock().unwrap()[0].prompt, "voice request");
+    assert_eq!(
+        crate::prompt::current_message(&calls.lock().unwrap()[0].prompt).as_deref(),
+        Some("voice request")
+    );
     assert_eq!(
         gateway.ctx.sent_replies.lock().unwrap().as_slice(),
         [("7".to_string(), "fake reply: voice request".to_string())]
@@ -1677,12 +1691,9 @@ async fn slow_voice_transcription_does_not_block_another_telegram_thread() {
         .await;
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if calls
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|call| call.prompt == "fast text request")
-            {
+            if calls.lock().unwrap().iter().any(|call| {
+                crate::prompt::current_message(&call.prompt).as_deref() == Some("fast text request")
+            }) {
                 break;
             }
             tokio::task::yield_now().await;
@@ -1694,7 +1705,10 @@ async fn slow_voice_transcription_does_not_block_another_telegram_thread() {
         .lock()
         .unwrap()
         .iter()
-        .any(|call| call.prompt == "slow voice request"));
+        .any(
+            |call| crate::prompt::current_message(&call.prompt).as_deref()
+                == Some("slow voice request")
+        ));
 
     release.send(()).unwrap();
     gateway.queues.clear();
@@ -1703,7 +1717,10 @@ async fn slow_voice_transcription_does_not_block_another_telegram_thread() {
         .lock()
         .unwrap()
         .iter()
-        .any(|call| call.prompt == "slow voice request"));
+        .any(
+            |call| crate::prompt::current_message(&call.prompt).as_deref()
+                == Some("slow voice request")
+        ));
 
     let _ = std::fs::remove_file(&state_path);
     let _ = std::fs::remove_file(format!("{state_path}.db"));
@@ -1774,7 +1791,10 @@ async fn closed_worker_queue_is_recovered_without_another_message() {
         .map(|call| call.prompt.clone())
         .collect::<Vec<_>>();
     assert_eq!(prompts.len(), 1);
-    assert_eq!(prompts[0], "recover older");
+    assert_eq!(
+        crate::prompt::current_message(&prompts[0]).as_deref(),
+        Some("recover older")
+    );
     assert_eq!(gateway.store.lock().unwrap().last_row(), 1);
     let events = audit_events(&format!("{state_path}.audit.jsonl"));
     assert!(events
@@ -1864,7 +1884,10 @@ async fn stop_interrupts_active_run_and_preserves_queued_messages() {
         .iter()
         .map(|call| call.prompt.clone())
         .collect::<Vec<_>>();
-    assert_eq!(prompts[0], "slow");
+    assert_eq!(
+        crate::prompt::current_message(&prompts[0]).as_deref(),
+        Some("slow")
+    );
     assert!(prompts[1].contains(r#"{"role":"user","content":"queued"}"#));
     let replies = gateway.ctx.sent_replies.lock().unwrap();
     assert!(replies
@@ -1875,7 +1898,7 @@ async fn stop_interrupts_active_run_and_preserves_queued_messages() {
         .any(|(_, reply)| reply.contains("Stopped the current request")));
     assert!(replies
         .iter()
-        .any(|(_, reply)| reply.contains(r#"{"role":"user","content":"queued"}"#)));
+        .any(|(_, reply)| reply.contains("fake reply: queued")));
     assert_eq!(gateway.store.lock().unwrap().last_row(), 3);
 
     let _ = std::fs::remove_file(&state_path);

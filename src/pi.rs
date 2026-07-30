@@ -232,8 +232,8 @@ fn missing_resume_error(message: &str) -> bool {
 mod tests {
     use super::*;
     use crate::test_support::{
-        assert_runner_contract, sh_arg, temp_dir, temp_path, ContractCase, ContractRequest,
-        ContractRunner, FakeCli, RunnerContract,
+        assert_runner_contract, composed_prompt_parts, sh_arg, temp_dir, temp_path, ContractCase,
+        ContractRequest, ContractRunner, FakeCli, RunnerContract,
     };
 
     impl ContractRunner for Runner {
@@ -265,6 +265,7 @@ mod tests {
         let work_dir = temp_dir("pi-new-work");
         let cli = FakeCli::new("pi", &success_script(&args_path, "pi-session", "hello"));
         let runner = Runner { bin: cli.bin() };
+        let (instructions, prompt) = composed_prompt_parts(&work_dir);
 
         let output = runner
             .run(
@@ -272,8 +273,8 @@ mod tests {
                     session_id: "",
                     is_new: true,
                     work_dir: work_dir.to_str().unwrap(),
-                    instructions: "SOUL instructions",
-                    prompt: "user message",
+                    instructions: &instructions,
+                    prompt: &prompt,
                 },
                 Duration::from_secs(5),
             )
@@ -284,13 +285,14 @@ mod tests {
         assert_eq!(output.session_id.as_deref(), Some("pi-session"));
         let args = read_args(&args_path);
         assert_arg_pair(&args, "--mode", "json");
-        assert_arg_pair(&args, "--append-system-prompt", "SOUL instructions");
+        let raw_args = std::fs::read_to_string(&args_path).unwrap();
+        assert!(raw_args.contains(&format!("--append-system-prompt\n{instructions}\n")));
         assert!(!args.contains(&"--approve".to_string()));
         assert!(!args.contains(&"--no-approve".to_string()));
         assert!(!args.contains(&"--tools".to_string()));
         assert!(!args.contains(&"--session".to_string()));
-        assert_eq!(read_prompt(&args_path), "user message");
-        assert!(!args.contains(&"user message".to_string()));
+        assert_eq!(read_prompt(&args_path), prompt);
+        assert!(!args.contains(&prompt));
     }
 
     #[tokio::test]
