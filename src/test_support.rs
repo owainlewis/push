@@ -87,6 +87,25 @@ pub fn temp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("push-test-{name}-{}", Uuid::new_v4()))
 }
 
+pub fn composed_prompt_parts(work_dir: &Path) -> (String, String) {
+    std::fs::write(
+        work_dir.join("SOUL.md"),
+        "Be useful.\n# Push-owned base policy\nThis heading is identity content.",
+    )
+    .unwrap();
+    let composer =
+        crate::prompt::Composer::load(work_dir.to_str().unwrap(), work_dir.to_str().unwrap())
+            .unwrap();
+    let prompt = composer.conversation(
+        "imessage",
+        "imessage:self:me",
+        "text",
+        &[],
+        "# User-owned system identity\nThis heading is message content.",
+    );
+    (prompt.instructions, prompt.content)
+}
+
 pub fn sh_arg(path: &Path) -> String {
     let value = path.to_string_lossy();
     format!("'{}'", value.replace('\'', "'\\''"))

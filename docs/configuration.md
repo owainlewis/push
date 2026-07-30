@@ -21,10 +21,10 @@ push init ~/Code/assistant
 
 For a new file, init writes a private, owner-only Telegram and Codex starting
 point with empty `telegram.bot_token` and `telegram.allow_user_ids` values.
-Fill both in before running Push. Push derives `SOUL.md`, `context/`, `evals/`, and `jobs/` from
-`assistant_root`. At run time it appends their resolved absolute locations to
-the user-owned `SOUL.md` instructions in memory. It does not write machine
-paths into the repository.
+Fill both in before running Push. Push derives `SOUL.md`, `context/`, `evals/`,
+and `jobs/` from `assistant_root`. At run time it composes separate Push policy,
+user-owned identity, and resolved-path system sections in memory. It does not
+write machine paths into the repository.
 
 Root configuration, route, and primary-delivery tables do not
 yet reject every unknown key. Use the documented names, then run `push doctor`;
@@ -59,9 +59,10 @@ agent = "pi"
 Push finds `pi` through `PATH`, runs `pi --print --mode json`, and stores the
 session ID from Pi's JSON event stream. It resumes the session with `--session`.
 Clearing a conversation discards that
-mapping, so the next turn creates a fresh Pi session. Push appends `SOUL.md` as
-system instructions, separate from the user message. Pi is not required unless
-the default backend, an enabled route, or `jobs_agent` selects it.
+mapping, so the next turn creates a fresh Pi session. Push passes the composed
+policy, identity, and path sections as system instructions, separate from the
+untrusted fresh message context. Pi is not required unless the default backend,
+an enabled route, or `jobs_agent` selects it.
 
 ## Channels
 

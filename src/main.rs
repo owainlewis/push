@@ -17,10 +17,9 @@ mod imessage;
 mod jobs;
 mod markdown;
 mod pi;
-mod rehydration;
+mod prompt;
 mod restart;
 mod slack;
-mod soul;
 mod store;
 mod telegram;
 #[cfg(test)]

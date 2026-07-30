@@ -161,8 +161,8 @@ mod tests {
 
     use crate::agent::Request;
     use crate::test_support::{
-        assert_runner_contract, sh_arg, temp_dir, temp_path, ContractCase, ContractRequest,
-        ContractRunner, FakeCli, RunnerContract,
+        assert_runner_contract, composed_prompt_parts, sh_arg, temp_dir, temp_path, ContractCase,
+        ContractRequest, ContractRunner, FakeCli, RunnerContract,
     };
 
     impl ContractRunner for Runner {
@@ -220,6 +220,7 @@ mod tests {
         );
         let cli = FakeCli::new("claude", &script);
         let runner = Runner { bin: cli.bin() };
+        let (instructions, prompt) = composed_prompt_parts(&work_dir);
 
         let out = runner
             .run_unattended(
@@ -227,8 +228,8 @@ mod tests {
                     session_id: "push-session",
                     is_new: true,
                     work_dir: work_dir.to_str().unwrap(),
-                    instructions: "assistant identity",
-                    prompt: "hello",
+                    instructions: &instructions,
+                    prompt: &prompt,
                 },
                 Duration::from_secs(5),
             )
@@ -239,8 +240,9 @@ mod tests {
         assert_eq!(out.session_id, Some("claude-returned".to_string()));
         let args = read_args(&args_path);
         assert_arg_pair(&args, "--session-id", "push-session");
-        assert_arg_pair(&args, "--append-system-prompt", "assistant identity");
-        assert_arg_pair(&args, "-p", "hello");
+        let raw_args = std::fs::read_to_string(&args_path).unwrap();
+        assert!(raw_args.contains(&format!("--append-system-prompt\n{instructions}\n")));
+        assert!(raw_args.contains(&format!("-p\n{prompt}\n")));
         assert_arg_pair(&args, "--permission-mode", "bypassPermissions");
         for flag in ["--tools", "--allowed-tools", "--disallowed-tools"] {
             assert!(

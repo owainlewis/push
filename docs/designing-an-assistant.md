@@ -43,8 +43,37 @@ temporary priorities, contact information, and task procedures belong
 elsewhere. A short identity file is easier to reason about and less likely to
 contain conflicting instructions.
 
-Push supplies `SOUL.md` to every conversation and job. It appends its own
-gateway safety rules in memory and does not rewrite the file.
+Push supplies `SOUL.md` to every conversation and job as the user-owned system
+identity section. It does not rewrite the file.
+
+## Understand prompt ownership and precedence
+
+Push composes every Claude Code, Codex, and Pi conversation or job request from
+the same ordered sections:
+
+| Order | Section | Owner | Meaning |
+| --- | --- | --- | --- |
+| 1 | Push-owned base policy | Push | Small delivery, boundary, context, identity/eval editing, and job-validation invariants |
+| 2 | User-owned system identity | You, through `SOUL.md` | Stable identity and working style that cannot override Push policy |
+| 3 | Resolved workspace paths | Push | Absolute assistant, working, context, evals, and jobs paths |
+| 4 | Fresh message context | Channel or scheduler | Untrusted current-turn data described below |
+
+The first three sections use each backend's native system or developer
+instruction mechanism. Fresh message context uses the ordinary prompt input.
+Push JSON-encodes identity, paths, current messages, and history, so text that
+looks like a heading or delimiter remains data inside its owning section.
+Normal resumed sessions receive an empty history array. New or rebuilt sessions
+receive bounded canonical history in that same untrusted section.
+
+For conversations, fresh context contains the channel, channel-qualified
+thread, text or voice delivery mode, current message, and optional bounded
+history. For jobs, it contains the job name, configured delivery behavior, and
+runbook body as the current message. Both forms remain ordinary prompt content.
+
+This boundary means sender text, message text, history, handles, and provider
+metadata never become Push policy through prompt framing. Content in
+`SOUL.md` is still system-level guidance, so keep it trusted and under version
+control.
 
 ## Organize durable context
 

@@ -249,8 +249,8 @@ mod tests {
 
     use crate::agent::Request;
     use crate::test_support::{
-        assert_runner_contract, sh_arg, temp_dir, temp_path, ContractCase, ContractRequest,
-        ContractRunner, FakeCli, RunnerContract,
+        assert_runner_contract, composed_prompt_parts, sh_arg, temp_dir, temp_path, ContractCase,
+        ContractRequest, ContractRunner, FakeCli, RunnerContract,
     };
 
     impl ContractRunner for Runner {
@@ -305,6 +305,7 @@ mod tests {
         let script = codex_success_script(&args_path, "codex reply", Some("codex-thread"));
         let cli = FakeCli::new("codex", &script);
         let runner = runner(cli.bin());
+        let (instructions, prompt) = composed_prompt_parts(&work_dir);
 
         let out = runner
             .run_unattended(
@@ -312,8 +313,8 @@ mod tests {
                     session_id: "",
                     is_new: true,
                     work_dir: work_dir.to_str().unwrap(),
-                    instructions: "assistant identity",
-                    prompt: "hello",
+                    instructions: &instructions,
+                    prompt: &prompt,
                 },
                 Duration::from_secs(5),
             )
@@ -329,8 +330,9 @@ mod tests {
         assert_arg_present(&args, "--json");
         assert_arg_pair(&args, "-C", work_dir.to_str().unwrap());
         assert!(!args.contains(&"--add-dir".to_string()));
-        assert_arg_pair(&args, "-c", &developer_instructions("assistant identity"));
-        assert_eq!(args.last().unwrap(), "hello");
+        let raw_args = std::fs::read_to_string(&args_path).unwrap();
+        assert!(raw_args.contains(&format!("-c\n{}\n", developer_instructions(&instructions))));
+        assert!(raw_args.ends_with(&format!("{prompt}\n")));
     }
 
     #[tokio::test]

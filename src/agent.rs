@@ -215,8 +215,12 @@ impl FakeRunner {
         if let Some(message) = &self.failure {
             return Err(RunError::Failed(message.clone()));
         }
+        let current_message = crate::prompt::current_message(req.prompt);
         Ok(RunOutput {
-            reply: format!("fake reply: {}", req.prompt),
+            reply: format!(
+                "fake reply: {}",
+                current_message.as_deref().unwrap_or(req.prompt)
+            ),
             session_id: req.is_new.then(|| self.session_id.clone()),
         })
     }
