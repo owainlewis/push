@@ -12,18 +12,18 @@ path = "src/main.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "signal"] }
-tokio-tungstenite = { version = "0.27", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", features = ["sink"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
-toml_edit = "0.23"
+toml_edit = "0.25"
 uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
 humantime = "2"
-sha2 = "0.10"
+sha2 = "0.11"
 chrono-tz = "0.10"
 chrono = "0.4"
 tracing = "0.1"
