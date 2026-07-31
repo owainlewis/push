@@ -5384,6 +5384,10 @@ printf '%s\n' '{"type":"thread.started","thread_id":"limited"}'
         let mut restarted = Ledger::open(&cfg.paths.database).unwrap();
         restarted.recover_stale_runs(&cfg, 61_000).unwrap();
         assert_eq!(restarted.state(&id), "running");
+        // Release the OS lock explicitly before asking the restarted ledger
+        // to recover the claim. This keeps the test independent of when the
+        // file-handle destructor is observed by the runner.
+        lock._file.unlock().unwrap();
         drop(lock);
         restarted.recover_stale_runs(&cfg, 62_000).unwrap();
 
