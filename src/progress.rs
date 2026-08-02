@@ -47,34 +47,84 @@ impl StreamPrefs {
     }
 }
 
-const PREVIEW_MAX: usize = 100;
+const PREVIEW_MAX: usize = 120;
+const PROGRESS_MESSAGE_MAX: usize = 3500;
 
-/// Hermes-style cosmetic line: `⚡ Running ls -la …`
-pub fn format_progress_line(event: &ProgressEvent) -> String {
-    let verb = tool_verb(&event.tool_name);
-    let body = if event.preview.is_empty() {
-        verb
-    } else {
-        format!("{verb} {}", &event.preview)
-    };
-    let body = truncate_one_line(&body, PREVIEW_MAX);
-    match &event.phase {
-        ProgressPhase::Start => format!("⚡ {body}"),
-        ProgressPhase::End { is_error: true } => format!("⚡ Failed {body}"),
-        ProgressPhase::End { is_error: false } => format!("⚡ Done {body}"),
+/// Hermes-style Markdown block for one tool start (Telegram renders fences as copyable).
+pub fn format_progress_block(event: &ProgressEvent) -> String {
+    let preview = truncate_one_line(&event.preview, PREVIEW_MAX);
+    let failed = matches!(event.phase, ProgressPhase::End { is_error: true });
+    let prefix = if failed { "⚠️ " } else { "" };
+    match event.tool_name.as_str() {
+        "bash" | "terminal" | "execute_code" => {
+            let cmd = if preview.is_empty() { "…" } else { &preview };
+            format!("{prefix}💻 Shell\n```\n{cmd}\n```")
+        }
+        "read" | "read_file" => {
+            let path = if preview.is_empty() { "…" } else { &preview };
+            format!("{prefix}📖 read\n`{path}`")
+        }
+        "write" | "write_file" => {
+            let path = if preview.is_empty() { "…" } else { &preview };
+            format!("{prefix}✍️ write\n`{path}`")
+        }
+        "edit" | "patch" => {
+            let path = if preview.is_empty() { "…" } else { &preview };
+            format!("{prefix}✏️ edit\n`{path}`")
+        }
+        "grep" | "find" | "search_files" | "web_search" => {
+            let q = if preview.is_empty() { "…" } else { &preview };
+            format!("{prefix}🔍 search\n`{q}`")
+        }
+        "ls" => {
+            let path = if preview.is_empty() { "." } else { &preview };
+            format!("{prefix}📁 ls\n`{path}`")
+        }
+        other => {
+            let name = if other.is_empty() { "tool" } else { other };
+            if preview.is_empty() {
+                format!("{prefix}⚙️ {name}")
+            } else {
+                format!("{prefix}⚙️ {name}\n`{preview}`")
+            }
+        }
     }
 }
 
-fn tool_verb(tool_name: &str) -> String {
-    match tool_name {
-        "bash" | "terminal" | "execute_code" => "Running".to_string(),
-        "read" | "read_file" => "Reading".to_string(),
-        "write" | "write_file" => "Writing".to_string(),
-        "edit" | "patch" => "Editing".to_string(),
-        "grep" | "find" | "search_files" | "web_search" => "Searching".to_string(),
-        "ls" => "Listing".to_string(),
-        "" => "Working".to_string(),
-        other => format!("Using {other}"),
+/// Append a new tool block into an accumulating progress message.
+pub fn append_progress_message(existing: &str, block: &str) -> String {
+    let combined = if existing.is_empty() {
+        block.to_string()
+    } else {
+        format!("{existing}\n\n{block}")
+    };
+    trim_progress_message(&combined, PROGRESS_MESSAGE_MAX)
+}
+
+fn trim_progress_message(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut blocks: Vec<&str> = text.split("\n\n").collect();
+    while blocks.len() > 1 && blocks.join("\n\n").chars().count() > max {
+        blocks.remove(0);
+    }
+    let joined = blocks.join("\n\n");
+    if joined.chars().count() <= max {
+        format!("…\n\n{joined}")
+    } else {
+        let mut out = String::from("…\n\n");
+        for ch in joined
+            .chars()
+            .rev()
+            .take(max.saturating_sub(4))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            out.push(ch);
+        }
+        out
     }
 }
 
@@ -142,13 +192,14 @@ mod tests {
     }
 
     #[test]
-    fn formats_hermes_style_bash_line() {
-        let line = format_progress_line(&ProgressEvent {
+    fn formats_hermes_style_shell_fence() {
+        let block = format_progress_block(&ProgressEvent {
             tool_name: "bash".into(),
             preview: "curl https://example.com".into(),
             phase: ProgressPhase::Start,
         });
-        assert_eq!(line, "⚡ Running curl https://example.com");
+        assert!(block.contains("💻 Shell"));
+        assert!(block.contains("```\ncurl https://example.com\n```"));
     }
 
     #[test]
@@ -157,5 +208,22 @@ mod tests {
             preview_from_args("bash", &json!({"command": "ls -la"})),
             "ls -la"
         );
+    }
+
+    #[test]
+    fn append_keeps_multiple_tool_blocks() {
+        let first = format_progress_block(&ProgressEvent {
+            tool_name: "bash".into(),
+            preview: "ls".into(),
+            phase: ProgressPhase::Start,
+        });
+        let second = format_progress_block(&ProgressEvent {
+            tool_name: "read".into(),
+            preview: "a.txt".into(),
+            phase: ProgressPhase::Start,
+        });
+        let msg = append_progress_message(&first, &second);
+        assert!(msg.contains("Shell"));
+        assert!(msg.contains("read"));
     }
 }

@@ -11,7 +11,9 @@ use tracing::{error, info, warn};
 
 use crate::agent::{Request, RunError};
 use crate::history::{DeliveryStatus, OutboundMessage, OutboundOrigin};
-use crate::progress::{format_progress_line, ProgressEvent, ProgressPhase};
+use crate::progress::{
+    append_progress_message, format_progress_block, ProgressEvent, ProgressPhase,
+};
 use crate::prompt::{ComposedPrompt, Composer};
 use crate::voice::MAX_AUDIO_BYTES;
 
@@ -377,7 +379,11 @@ where
     };
     if let Some((tx, handle)) = progress_bundle {
         drop(tx);
-        let _ = handle.await;
+        // Never let a stuck progress edit block the final reply.
+        match tokio::time::timeout(Duration::from_secs(5), handle).await {
+            Ok(_) => {}
+            Err(_) => warn!("[{}] progress pump timed out after backend run", job.thread),
+        }
     }
 
     match result {
@@ -1070,7 +1076,8 @@ fn backend_request<'a>(
     }
 }
 
-const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(300);
+const PROGRESS_EDIT_INTERVAL: Duration = Duration::from_millis(450);
+const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_secs(8);
 
 async fn pump_progress(
     ctx: Ctx,
@@ -1078,43 +1085,83 @@ async fn pump_progress(
     thread: String,
     mut rx: mpsc::UnboundedReceiver<ProgressEvent>,
 ) {
-    let mut last = Instant::now()
-        .checked_sub(PROGRESS_MIN_INTERVAL)
+    let mut body = String::new();
+    let mut message_id: Option<i64> = None;
+    let mut last_flush = Instant::now()
+        .checked_sub(PROGRESS_EDIT_INTERVAL)
         .unwrap_or_else(Instant::now);
+    let mut dirty = false;
+
     while let Some(event) = rx.recv().await {
         match &event.phase {
             ProgressPhase::Start => {}
             ProgressPhase::End { is_error: true } => {}
             ProgressPhase::End { is_error: false } => continue,
         }
-        let elapsed = last.elapsed();
-        if elapsed < PROGRESS_MIN_INTERVAL {
-            tokio::time::sleep(PROGRESS_MIN_INTERVAL - elapsed).await;
+        let block = format_progress_block(&event);
+        body = append_progress_message(&body, &block);
+        dirty = true;
+
+        let elapsed = last_flush.elapsed();
+        if message_id.is_some() && elapsed < PROGRESS_EDIT_INTERVAL {
+            continue;
         }
-        let text = format_progress_line(&event);
-        if let Err(error) = send_progress_ephemeral(&ctx, &target, &text).await {
-            warn!("[{thread}] progress send failed: {error}");
+        if flush_progress(&ctx, &target, &thread, &body, &mut message_id).await {
+            last_flush = Instant::now();
+            dirty = false;
         }
-        last = Instant::now();
+    }
+
+    if dirty && !body.is_empty() {
+        let _ = flush_progress(&ctx, &target, &thread, &body, &mut message_id).await;
     }
 }
 
-/// Cosmetic progress delivery: never recorded in canonical history.
-async fn send_progress_ephemeral(ctx: &Ctx, target: &str, text: &str) -> Result<()> {
-    #[cfg(test)]
-    {
-        ctx.sent_progress
-            .lock()
-            .unwrap()
-            .push((target.to_string(), text.to_string()));
-        Ok(())
-    }
-    #[cfg(not(test))]
-    {
-        let chunks = ctx.channel.outbound_chunks(text, "");
-        for chunk in &chunks {
-            super::send_reply_chunk(ctx, target, chunk).await?;
+async fn flush_progress(
+    ctx: &Ctx,
+    target: &str,
+    thread: &str,
+    body: &str,
+    message_id: &mut Option<i64>,
+) -> bool {
+    let send = async {
+        match message_id {
+            Some(id) => {
+                ctx.channel.edit_progress(target, *id, body).await?;
+                Ok::<_, anyhow::Error>(None)
+            }
+            None => Ok(ctx.channel.send_progress(target, body).await?),
         }
-        Ok(())
+    };
+    match tokio::time::timeout(PROGRESS_SEND_TIMEOUT, send).await {
+        Ok(Ok(Some(id))) => {
+            *message_id = Some(id);
+            #[cfg(test)]
+            {
+                ctx.sent_progress
+                    .lock()
+                    .unwrap()
+                    .push((target.to_string(), body.to_string()));
+            }
+            true
+        }
+        Ok(Ok(None)) => {
+            #[cfg(test)]
+            {
+                ctx.sent_progress
+                    .lock()
+                    .unwrap()
+                    .push((target.to_string(), body.to_string()));
+            }
+            true
+        }
+        Ok(Err(error)) => {
+            warn!("[{thread}] progress update failed: {error}");
+            false
+        }
+        Err(_) => {
+            warn!("[{thread}] progress update timed out");
+            false
+        }
     }
 }
