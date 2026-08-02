@@ -11,11 +11,44 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::channel::{InboundVoice, RawMessage};
-use crate::voice::{AudioClip, MAX_AUDIO_BYTES};
+use crate::config::{
+    DEFAULT_TELEGRAM_BASE_FILE_URL, DEFAULT_TELEGRAM_BASE_URL, DEFAULT_TELEGRAM_MAX_AUDIO_BYTES,
+};
+use crate::voice::AudioClip;
 
 pub const TEXT_LIMIT: usize = 4096;
 const LONG_POLL_SECONDS: u64 = 25;
 const HTTP_TIMEOUT_SECONDS: u64 = LONG_POLL_SECONDS + 10;
+
+/// Telegram Bot API endpoint settings. Defaults match the public api.telegram.org hosts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramEndpoints {
+    pub base_url: String,
+    pub base_file_url: String,
+    pub max_audio_bytes: usize,
+}
+
+impl Default for TelegramEndpoints {
+    fn default() -> Self {
+        Self {
+            base_url: DEFAULT_TELEGRAM_BASE_URL.to_string(),
+            base_file_url: DEFAULT_TELEGRAM_BASE_FILE_URL.to_string(),
+            max_audio_bytes: DEFAULT_TELEGRAM_MAX_AUDIO_BYTES,
+        }
+    }
+}
+
+fn bot_method_url(base_url: &str, token: &str, method: &str) -> String {
+    format!("{base_url}{token}/{method}")
+}
+
+fn bot_file_url(base_file_url: &str, token: &str, file_path: &str) -> String {
+    format!("{base_file_url}{token}/{file_path}")
+}
+
+fn audio_limit_message(max_audio_bytes: usize) -> String {
+    format!("Telegram voice message exceeds the configured {max_audio_bytes} byte limit")
+}
 
 struct TransportResponse {
     status: u16,
@@ -46,6 +79,9 @@ trait Transport: Send + Sync {
 
 struct ReqwestTransport {
     client: reqwest::Client,
+    base_url: String,
+    base_file_url: String,
+    max_audio_bytes: usize,
 }
 
 impl Transport for ReqwestTransport {
@@ -56,7 +92,7 @@ impl Transport for ReqwestTransport {
         body: Value,
     ) -> TransportFuture<'a> {
         Box::pin(async move {
-            let url = format!("https://api.telegram.org/bot{token}/{method}");
+            let url = bot_method_url(&self.base_url, token, method);
             let response = self
                 .client
                 .post(url)
@@ -75,7 +111,8 @@ impl Transport for ReqwestTransport {
 
     fn download<'a>(&'a self, token: &'a str, file_path: &'a str) -> BytesFuture<'a> {
         Box::pin(async move {
-            let url = format!("https://api.telegram.org/file/bot{token}/{file_path}");
+            let url = bot_file_url(&self.base_file_url, token, file_path);
+            let max_audio_bytes = self.max_audio_bytes;
             let mut response = self
                 .client
                 .get(url)
@@ -89,23 +126,23 @@ impl Transport for ReqwestTransport {
             }
             if response
                 .content_length()
-                .is_some_and(|size| size > MAX_AUDIO_BYTES as u64)
+                .is_some_and(|size| size > max_audio_bytes as u64)
             {
-                bail!("Telegram voice message exceeds the 20 MB limit");
+                bail!("{}", audio_limit_message(max_audio_bytes));
             }
             let mut bytes = Vec::with_capacity(
                 response
                     .content_length()
                     .unwrap_or_default()
-                    .min(MAX_AUDIO_BYTES as u64) as usize,
+                    .min(max_audio_bytes as u64) as usize,
             );
             while let Some(chunk) = response
                 .chunk()
                 .await
                 .context("read Telegram voice message")?
             {
-                if bytes.len().saturating_add(chunk.len()) > MAX_AUDIO_BYTES {
-                    bail!("Telegram voice message exceeds the 20 MB limit");
+                if bytes.len().saturating_add(chunk.len()) > max_audio_bytes {
+                    bail!("{}", audio_limit_message(max_audio_bytes));
                 }
                 bytes.extend_from_slice(&chunk);
             }
@@ -120,7 +157,7 @@ impl Transport for ReqwestTransport {
         clip: &'a AudioClip,
     ) -> TransportFuture<'a> {
         Box::pin(async move {
-            let url = format!("https://api.telegram.org/bot{token}/sendVoice");
+            let url = bot_method_url(&self.base_url, token, "sendVoice");
             let mut form = reqwest::multipart::Form::new();
             let object = payload
                 .as_object()
@@ -158,17 +195,27 @@ pub struct Telegram {
     token: Arc<str>,
     allow_user_ids: Arc<HashSet<i64>>,
     allow_chat_ids: Arc<HashSet<i64>>,
+    max_audio_bytes: usize,
     transport: Arc<dyn Transport>,
 }
 
 impl Telegram {
-    pub fn new(token: String, allow_user_ids: Vec<i64>, allow_chat_ids: Vec<i64>) -> Self {
+    pub fn new(
+        token: String,
+        allow_user_ids: Vec<i64>,
+        allow_chat_ids: Vec<i64>,
+        endpoints: TelegramEndpoints,
+    ) -> Self {
         Self {
             token: Arc::from(token),
             allow_user_ids: Arc::new(allow_user_ids.into_iter().collect()),
             allow_chat_ids: Arc::new(allow_chat_ids.into_iter().collect()),
+            max_audio_bytes: endpoints.max_audio_bytes,
             transport: Arc::new(ReqwestTransport {
                 client: reqwest::Client::new(),
+                base_url: endpoints.base_url,
+                base_file_url: endpoints.base_file_url,
+                max_audio_bytes: endpoints.max_audio_bytes,
             }),
         }
     }
@@ -180,10 +227,28 @@ impl Telegram {
         allow_chat_ids: Vec<i64>,
         transport: Arc<dyn Transport>,
     ) -> Self {
+        Self::with_transport_limit(
+            token,
+            allow_user_ids,
+            allow_chat_ids,
+            DEFAULT_TELEGRAM_MAX_AUDIO_BYTES,
+            transport,
+        )
+    }
+
+    #[cfg(test)]
+    fn with_transport_limit(
+        token: String,
+        allow_user_ids: Vec<i64>,
+        allow_chat_ids: Vec<i64>,
+        max_audio_bytes: usize,
+        transport: Arc<dyn Transport>,
+    ) -> Self {
         Self {
             token: Arc::from(token),
             allow_user_ids: Arc::new(allow_user_ids.into_iter().collect()),
             allow_chat_ids: Arc::new(allow_chat_ids.into_iter().collect()),
+            max_audio_bytes,
             transport,
         }
     }
@@ -306,8 +371,11 @@ impl Telegram {
     }
 
     pub async fn download_voice(&self, voice: &InboundVoice) -> Result<AudioClip> {
-        if voice.file_size.is_some_and(|size| size > MAX_AUDIO_BYTES) {
-            bail!("Telegram voice message exceeds the 20 MB limit");
+        if voice
+            .file_size
+            .is_some_and(|size| size > self.max_audio_bytes)
+        {
+            bail!("{}", audio_limit_message(self.max_audio_bytes));
         }
         let transport_response = self
             .transport
@@ -734,7 +802,12 @@ mod tests {
 
     #[test]
     fn allowlist_accepts_user_or_chat_id() {
-        let telegram = Telegram::new("secret".to_string(), vec![7], vec![9]);
+        let telegram = Telegram::new(
+            "secret".to_string(),
+            vec![7],
+            vec![9],
+            TelegramEndpoints::default(),
+        );
         let mut message = Update {
             update_id: 1,
             message: Some(TelegramMessage {
@@ -1077,5 +1150,25 @@ mod tests {
         assert!(sent
             .iter()
             .all(|chunk| chunk.encode_utf16().count() <= TEXT_LIMIT));
+    }
+
+    #[test]
+    fn bot_urls_use_configured_bases() {
+        assert_eq!(
+            bot_method_url("https://api.telegram.org/bot", "tok", "getUpdates"),
+            "https://api.telegram.org/bottok/getUpdates"
+        );
+        assert_eq!(
+            bot_file_url("https://api.telegram.org/file/bot", "tok", "voice.oga"),
+            "https://api.telegram.org/file/bottok/voice.oga"
+        );
+        assert_eq!(
+            bot_method_url("http://127.0.0.1:8081/bot", "tok", "getUpdates"),
+            "http://127.0.0.1:8081/bottok/getUpdates"
+        );
+        assert_eq!(
+            bot_file_url("http://127.0.0.1:8081/file/bot", "tok", "path/file.bin"),
+            "http://127.0.0.1:8081/file/bottok/path/file.bin"
+        );
     }
 }

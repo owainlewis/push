@@ -165,6 +165,11 @@ impl Channel {
                     .ok_or_else(|| anyhow::anyhow!("Telegram bot token is not configured"))?,
                 cfg.telegram_allow_user_ids.clone(),
                 cfg.telegram_allow_chat_ids.clone(),
+                crate::telegram::TelegramEndpoints {
+                    base_url: cfg.telegram_base_url.clone(),
+                    base_file_url: cfg.telegram_base_file_url.clone(),
+                    max_audio_bytes: cfg.telegram_max_audio_bytes,
+                },
             ))),
             ChannelKind::Slack => Ok(Self::Slack(Slack::new(
                 cfg.slack_app_token()
@@ -755,7 +760,12 @@ mod tests {
     }
 
     fn telegram() -> Channel {
-        Channel::Telegram(Telegram::new("secret".to_string(), vec![7], vec![9]))
+        Channel::Telegram(Telegram::new(
+            "secret".to_string(),
+            vec![7],
+            vec![9],
+            crate::telegram::TelegramEndpoints::default(),
+        ))
     }
 
     fn slack() -> Channel {

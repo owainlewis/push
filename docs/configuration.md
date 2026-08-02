@@ -225,6 +225,9 @@ requests. Review [permissions and security](security.md) before enabling jobs.
 | `telegram.bot_token` | `TELEGRAM_BOT_TOKEN` fallback | Private Bot API token; the environment value is used when this is omitted |
 | `telegram.allow_user_ids` | `[]` | Trusted numeric sender IDs |
 | `telegram.allow_chat_ids` | `[]` | Trusted numeric private-chat IDs |
+| `telegram.base_url` | `https://api.telegram.org/bot` | Bot API method base URL; point at a local Bot API server such as `http://127.0.0.1:8081/bot` |
+| `telegram.base_file_url` | `https://api.telegram.org/file/bot` | Bot API file download base URL; for a local server use `http://127.0.0.1:8081/file/bot` |
+| `telegram.max_audio_bytes` | `20971520` (20 MiB) | Maximum inbound voice download size; raise for a self-hosted Bot API that accepts larger files |
 
 ### Slack
 

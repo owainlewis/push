@@ -14,6 +14,9 @@ pub const TELEGRAM_BOT_TOKEN_ENV: &str = "TELEGRAM_BOT_TOKEN";
 pub const SLACK_APP_TOKEN_ENV: &str = "SLACK_APP_TOKEN";
 pub const SLACK_BOT_TOKEN_ENV: &str = "SLACK_BOT_TOKEN";
 pub const DEFAULT_VOICE_NAME: &str = "cedar";
+pub const DEFAULT_TELEGRAM_BASE_URL: &str = "https://api.telegram.org/bot";
+pub const DEFAULT_TELEGRAM_BASE_FILE_URL: &str = "https://api.telegram.org/file/bot";
+pub const DEFAULT_TELEGRAM_MAX_AUDIO_BYTES: usize = 20 * 1024 * 1024;
 const SUPPORTED_VOICE_NAMES: &[&str] = &[
     "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse",
     "marin", "cedar",
@@ -62,6 +65,12 @@ pub struct Config {
     pub telegram_allow_user_ids: Vec<i64>,
     #[serde(default)]
     pub telegram_allow_chat_ids: Vec<i64>,
+    #[serde(default = "default_telegram_base_url")]
+    pub telegram_base_url: String,
+    #[serde(default = "default_telegram_base_file_url")]
+    pub telegram_base_file_url: String,
+    #[serde(default = "default_telegram_max_audio_bytes")]
+    pub telegram_max_audio_bytes: usize,
     #[serde(default)]
     pub slack_app_token: Option<String>,
     #[serde(default)]
@@ -223,6 +232,9 @@ impl Config {
                 ("bot_token", "telegram_bot_token"),
                 ("allow_user_ids", "telegram_allow_user_ids"),
                 ("allow_chat_ids", "telegram_allow_chat_ids"),
+                ("base_url", "telegram_base_url"),
+                ("base_file_url", "telegram_base_file_url"),
+                ("max_audio_bytes", "telegram_max_audio_bytes"),
             ],
         )?;
         flatten_provider_section(
@@ -288,6 +300,8 @@ impl Config {
         c.assistant_root = assistant_root.to_string_lossy().to_string();
         c.assistant_dir = c.assistant_root.clone();
         c.jobs_dir = assistant_root.join("jobs").to_string_lossy().to_string();
+        c.telegram_base_url = normalize_telegram_api_base(&c.telegram_base_url);
+        c.telegram_base_file_url = normalize_telegram_api_base(&c.telegram_base_file_url);
         validate_runtime_outside_assistant(&c)?;
         c.validate()?;
         c.config_path = config_path.to_string_lossy().to_string();
@@ -535,6 +549,15 @@ impl Config {
                         .is_some_and(|v| v.trim().is_empty())
                     {
                         bail!("telegram.bot_token cannot be empty");
+                    }
+                    if self.telegram_base_url.trim().is_empty() {
+                        bail!("telegram.base_url cannot be empty");
+                    }
+                    if self.telegram_base_file_url.trim().is_empty() {
+                        bail!("telegram.base_file_url cannot be empty");
+                    }
+                    if self.telegram_max_audio_bytes == 0 {
+                        bail!("telegram.max_audio_bytes must be positive");
                     }
                 }
                 ChannelKind::Slack => {
@@ -882,6 +905,19 @@ fn default_agent() -> String {
 fn default_voice_name() -> String {
     DEFAULT_VOICE_NAME.to_string()
 }
+fn default_telegram_base_url() -> String {
+    DEFAULT_TELEGRAM_BASE_URL.to_string()
+}
+fn default_telegram_base_file_url() -> String {
+    DEFAULT_TELEGRAM_BASE_FILE_URL.to_string()
+}
+fn default_telegram_max_audio_bytes() -> usize {
+    DEFAULT_TELEGRAM_MAX_AUDIO_BYTES
+}
+
+fn normalize_telegram_api_base(value: &str) -> String {
+    value.trim().trim_end_matches('/').to_string()
+}
 fn default_jobs_dir() -> String {
     "~/.push/jobs".to_string()
 }
@@ -914,6 +950,9 @@ mod tests {
             telegram_bot_token: None,
             telegram_allow_user_ids: Vec::new(),
             telegram_allow_chat_ids: Vec::new(),
+            telegram_base_url: DEFAULT_TELEGRAM_BASE_URL.to_string(),
+            telegram_base_file_url: DEFAULT_TELEGRAM_BASE_FILE_URL.to_string(),
+            telegram_max_audio_bytes: DEFAULT_TELEGRAM_MAX_AUDIO_BYTES,
             slack_app_token: None,
             slack_bot_token: None,
             slack_allow_user_ids: Vec::new(),
@@ -1047,5 +1086,40 @@ mod tests {
         assert!(error.to_string().contains("not a symlink"));
         let _ = std::fs::remove_dir_all(assistant);
         let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn telegram_local_bot_api_settings_parse_and_normalize() {
+        let root = temp_dir("config-telegram-local-api");
+        let config_path = root.join("config.toml");
+        let assistant = root.join("assistant");
+        std::fs::create_dir_all(&assistant).unwrap();
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+channel = "telegram"
+agent = "pi"
+assistant_root = "{assistant}"
+
+[telegram]
+bot_token = "secret"
+allow_user_ids = [1]
+base_url = "http://127.0.0.1:8081/bot/"
+base_file_url = "http://127.0.0.1:8081/file/bot/"
+max_audio_bytes = 104857600
+"#,
+                assistant = assistant.display()
+            ),
+        )
+        .unwrap();
+        let cfg = Config::load_with_paths(
+            config_path.to_str().unwrap(),
+            PushPaths::from_root(root.join("runtime")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cfg.telegram_base_url, "http://127.0.0.1:8081/bot");
+        assert_eq!(cfg.telegram_base_file_url, "http://127.0.0.1:8081/file/bot");
+        assert_eq!(cfg.telegram_max_audio_bytes, 104857600);
     }
 }
