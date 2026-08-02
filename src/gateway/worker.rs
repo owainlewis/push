@@ -3,7 +3,7 @@
 
 use std::future::{pending, Future};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tokio::sync::{mpsc, watch};
@@ -11,6 +11,7 @@ use tracing::{error, info, warn};
 
 use crate::agent::{Request, RunError};
 use crate::history::{DeliveryStatus, OutboundMessage, OutboundOrigin};
+use crate::progress::{format_progress_line, ProgressEvent, ProgressPhase};
 use crate::prompt::{ComposedPrompt, Composer};
 use crate::voice::MAX_AUDIO_BYTES;
 
@@ -220,6 +221,20 @@ where
         }
     };
 
+    let progress_bundle = if ctx.stream_prefs.is_enabled(&job.thread) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let pump_ctx = ctx.clone();
+        let target = job.target.clone();
+        let thread = job.thread.clone();
+        let handle = tokio::spawn(async move {
+            pump_progress(pump_ctx, target, thread, rx).await;
+        });
+        Some((tx, handle))
+    } else {
+        None
+    };
+    let progress = progress_bundle.as_ref().map(|(tx, _)| tx.clone());
+
     let run = async {
         let mut session_id = session_id;
         let mut prompt = match conversation_prompt(ctx, &job, &composer, is_new) {
@@ -253,9 +268,10 @@ where
             prompt.rehydrated_messages
         );
         let mut result = runner
-            .run(
+            .run_with_progress(
                 backend_request(&session_id, is_new, &work_dir, &prompt),
                 ctx.run_timeout,
+                progress.clone(),
             )
             .await;
         // If the session id already exists (e.g. left over from a previous run
@@ -268,9 +284,10 @@ where
                         RunError::Failed(format!("compose resumed prompt: {error}"))
                     })?;
                     result = runner
-                        .run(
+                        .run_with_progress(
                             backend_request(&session_id, false, &work_dir, &prompt),
                             ctx.run_timeout,
+                            progress.clone(),
                         )
                         .await;
                 }
@@ -322,9 +339,10 @@ where
                 ),
             );
             result = runner
-                .run(
+                .run_with_progress(
                     backend_request(&session_id, true, &work_dir, &prompt),
                     ctx.run_timeout,
+                    progress.clone(),
                 )
                 .await;
         }
@@ -357,6 +375,10 @@ where
         result = &mut run => Some(result),
         _ = &mut interrupt => None,
     };
+    if let Some((tx, handle)) = progress_bundle {
+        drop(tx);
+        let _ = handle.await;
+    }
 
     match result {
         Some(Ok(out)) => {
@@ -746,7 +768,8 @@ fn complete_job(ctx: &Ctx, job: &Job, reason: &str) {
 
 /// Handles gateway-level slash commands before anything reaches the agent.
 fn command(ctx: &Ctx, job: &Job) -> Option<String> {
-    match job.text.trim().to_lowercase().as_str() {
+    let text = job.text.trim().to_lowercase();
+    match text.as_str() {
         "/clear" | "/new" | "/reset" => match ctx.store.lock().unwrap().rotate(
             &job.thread,
             job.backend.as_str(),
@@ -758,8 +781,25 @@ fn command(ctx: &Ctx, job: &Job) -> Option<String> {
             Ok(()) => Some("Started a fresh conversation.".to_string()),
             Err(_) => Some("Couldn't reset the conversation.".to_string()),
         },
+        "/stream" | "/stream on" | "/stream off" => {
+            let enabled = match text.as_str() {
+                "/stream on" => {
+                    ctx.stream_prefs.set(&job.thread, true);
+                    true
+                }
+                "/stream off" => {
+                    ctx.stream_prefs.set(&job.thread, false);
+                    false
+                }
+                _ => ctx.stream_prefs.toggle(&job.thread),
+            };
+            Some(format!(
+                "Stream progress: {}.",
+                if enabled { "on" } else { "off" }
+            ))
+        }
         "/help" => Some(
-            "Commands:\n/clear - start a fresh conversation\n/stop - stop the active request\n/help - this message"
+            "Commands:\n/clear - start a fresh conversation\n/stop - stop the active request\n/stream - toggle cosmetic tool progress\n/help - this message"
                 .to_string(),
         ),
         _ => None,
@@ -1010,5 +1050,54 @@ fn backend_request<'a>(
         work_dir,
         instructions: &prompt.instructions,
         prompt: &prompt.content,
+    }
+}
+
+const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(300);
+
+async fn pump_progress(
+    ctx: Ctx,
+    target: String,
+    thread: String,
+    mut rx: mpsc::UnboundedReceiver<ProgressEvent>,
+) {
+    let mut last = Instant::now()
+        .checked_sub(PROGRESS_MIN_INTERVAL)
+        .unwrap_or_else(Instant::now);
+    while let Some(event) = rx.recv().await {
+        match &event.phase {
+            ProgressPhase::Start => {}
+            ProgressPhase::End { is_error: true } => {}
+            ProgressPhase::End { is_error: false } => continue,
+        }
+        let elapsed = last.elapsed();
+        if elapsed < PROGRESS_MIN_INTERVAL {
+            tokio::time::sleep(PROGRESS_MIN_INTERVAL - elapsed).await;
+        }
+        let text = format_progress_line(&event);
+        if let Err(error) = send_progress_ephemeral(&ctx, &target, &text).await {
+            warn!("[{thread}] progress send failed: {error}");
+        }
+        last = Instant::now();
+    }
+}
+
+/// Cosmetic progress delivery: never recorded in canonical history.
+async fn send_progress_ephemeral(ctx: &Ctx, target: &str, text: &str) -> Result<()> {
+    #[cfg(test)]
+    {
+        ctx.sent_progress
+            .lock()
+            .unwrap()
+            .push((target.to_string(), text.to_string()));
+        Ok(())
+    }
+    #[cfg(not(test))]
+    {
+        let chunks = ctx.channel.outbound_chunks(text, "");
+        for chunk in &chunks {
+            super::send_reply_chunk(ctx, target, chunk).await?;
+        }
+        Ok(())
     }
 }

@@ -23,6 +23,7 @@ use crate::channel::{Channel, InboundVoice, RawMessage};
 use crate::config::{AgentBackend, ChannelKind, Config, PrimaryDeliveryConfig};
 use crate::history::{History, OutboundOrigin};
 use crate::jobs;
+use crate::progress::StreamPrefs;
 use crate::store::Store;
 use crate::util::now_ms;
 use crate::voice::Voice;
@@ -60,10 +61,13 @@ struct Ctx {
     audit: Arc<AuditLog>,
     voice: Option<Voice>,
     schedule_destination: Option<PrimaryDestination>,
+    stream_prefs: StreamPrefs,
     #[cfg(test)]
     setup_failure_replies: Arc<Mutex<Vec<String>>>,
     #[cfg(test)]
     sent_replies: Arc<Mutex<Vec<(String, String)>>>,
+    #[cfg(test)]
+    sent_progress: Arc<Mutex<Vec<(String, String)>>>,
     #[cfg(test)]
     sent_voice_replies: SentVoiceReplies,
     #[cfg(test)]
@@ -412,6 +416,7 @@ impl Gateway {
             assistant_dir: cfg.assistant_dir.clone(),
             audit,
             schedule_destination: None,
+            stream_prefs: StreamPrefs::default(),
             #[cfg(not(test))]
             voice: Voice::from_config(&cfg),
             #[cfg(test)]
@@ -420,6 +425,8 @@ impl Gateway {
             setup_failure_replies: Arc::new(Mutex::new(Vec::new())),
             #[cfg(test)]
             sent_replies: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(test)]
+            sent_progress: Arc::new(Mutex::new(Vec::new())),
             #[cfg(test)]
             sent_voice_replies: Arc::new(Mutex::new(Vec::new())),
             #[cfg(test)]

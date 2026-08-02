@@ -323,6 +323,7 @@ These messages are handled by the gateway before backend dispatch:
 | --- | --- |
 | `/clear`, `/new`, `/reset` | Start a fresh backend session for that conversation |
 | `/stop` | Stop the active request; already queued messages continue in order |
+| `/stream`, `/stream on`, `/stream off` | Toggle cosmetic tool-progress messages for that conversation (Pi). Does not change LLM prompts or canonical history. |
 | `/help` | Return the available chat commands |
 
 Starting a fresh session preserves canonical history. Push can seed the new

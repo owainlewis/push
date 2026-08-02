@@ -4,10 +4,12 @@ use std::time::Duration;
 use std::{io, process::Stdio};
 
 use serde_json::Value;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 
 use crate::agent::{final_reply, Request, RunError, RunOutput};
+use crate::progress::{preview_from_args, ProgressEvent, ProgressPhase};
 
 /// Runner invokes `pi` in non-interactive JSON event mode.
 pub struct Runner {
@@ -23,8 +25,19 @@ enum RunMode {
 
 impl Runner {
     /// Executes one turn and returns Pi's final reply plus its stable session id.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn run(&self, req: Request<'_>, timeout: Duration) -> Result<RunOutput, RunError> {
-        self.run_with_mode(req, timeout, RunMode::Configured).await
+        self.run_with_progress(req, timeout, None).await
+    }
+
+    pub async fn run_with_progress(
+        &self,
+        req: Request<'_>,
+        timeout: Duration,
+        progress: Option<mpsc::UnboundedSender<ProgressEvent>>,
+    ) -> Result<RunOutput, RunError> {
+        self.run_with_mode(req, timeout, RunMode::Configured, progress)
+            .await
     }
 
     pub async fn run_unattended(
@@ -39,6 +52,7 @@ impl Runner {
             RunMode::Unattended {
                 trust_project_resources,
             },
+            None,
         )
         .await
     }
@@ -48,7 +62,8 @@ impl Runner {
         req: Request<'_>,
         timeout: Duration,
     ) -> Result<RunOutput, RunError> {
-        self.run_with_mode(req, timeout, RunMode::Evaluator).await
+        self.run_with_mode(req, timeout, RunMode::Evaluator, None)
+            .await
     }
 
     async fn run_with_mode(
@@ -56,23 +71,13 @@ impl Runner {
         req: Request<'_>,
         timeout: Duration,
         mode: RunMode,
+        progress: Option<mpsc::UnboundedSender<ProgressEvent>>,
     ) -> Result<RunOutput, RunError> {
         let attempt = crate::agent::output_with_retry(|| {
             let mut cmd = self.command(&req, mode);
             let prompt = req.prompt.as_bytes().to_vec();
-            async move {
-                let mut child = cmd.spawn()?;
-                let mut stdin = child.stdin.take().ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::BrokenPipe, "pi stdin unavailable")
-                })?;
-                let write_result = stdin.write_all(&prompt).await;
-                drop(stdin);
-                let output = child.wait_with_output().await?;
-                if output.status.success() {
-                    write_result?;
-                }
-                Ok(output)
-            }
+            let progress = progress.clone();
+            async move { run_child(&mut cmd, &prompt, progress).await }
         });
         let out = match tokio::time::timeout(timeout, attempt).await {
             Err(_) => return Err(RunError::Timeout),
@@ -80,7 +85,6 @@ impl Runner {
             Ok(Ok(output)) => output,
         };
 
-        let parsed = parse_jsonl(&out.stdout);
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             if !req.is_new && missing_resume_error(&stderr) {
@@ -91,27 +95,29 @@ impl Runner {
             }
             return Err(RunError::Failed(exit_diagnostic(
                 out.status.code(),
-                parsed.as_ref().err().map(String::as_str),
+                out.parse_error.as_deref(),
             )));
         }
 
-        let parsed = parsed.map_err(RunError::Failed)?;
-        if req.is_new && parsed.session_id.is_none() {
+        if let Some(error) = out.parse_error {
+            return Err(RunError::Failed(error));
+        }
+        if req.is_new && out.parsed.session_id.is_none() {
             return Err(RunError::Failed(
                 "pi did not report a session id".to_string(),
             ));
         }
-        if parsed.assistant_failed {
+        if out.parsed.assistant_failed {
             return Err(RunError::Failed(
                 "Pi assistant request failed; check Pi provider and authentication settings"
                     .to_string(),
             ));
         }
-        let reply = parsed.reply.unwrap_or_default();
+        let reply = out.parsed.reply.unwrap_or_default();
 
         Ok(RunOutput {
             reply: final_reply("pi", &reply)?,
-            session_id: req.is_new.then_some(parsed.session_id).flatten(),
+            session_id: req.is_new.then_some(out.parsed.session_id).flatten(),
         })
     }
 
@@ -152,6 +158,70 @@ impl Runner {
     }
 }
 
+struct ChildOutput {
+    status: std::process::ExitStatus,
+    stderr: Vec<u8>,
+    parsed: ParsedOutput,
+    parse_error: Option<String>,
+}
+
+async fn run_child(
+    cmd: &mut Command,
+    prompt: &[u8],
+    progress: Option<mpsc::UnboundedSender<ProgressEvent>>,
+) -> io::Result<ChildOutput> {
+    let mut child = cmd.spawn()?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "pi stdin unavailable"))?;
+    let write_result = stdin.write_all(prompt).await;
+    drop(stdin);
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "pi stdout unavailable"))?;
+    let mut stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "pi stderr unavailable"))?;
+
+    let stderr_task = tokio::spawn(async move {
+        let mut stderr = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut stderr).await;
+        stderr
+    });
+
+    let mut parsed = ParsedOutput::default();
+    let mut parse_error = None;
+    let mut lines = BufReader::new(stdout).lines();
+    while let Some(line) = lines.next_line().await? {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match apply_jsonl_line(&mut parsed, &line, progress.as_ref()) {
+            Ok(()) => {}
+            Err(error) => {
+                parse_error = Some(error);
+                break;
+            }
+        }
+    }
+
+    let status = child.wait().await?;
+    let stderr = stderr_task.await.unwrap_or_default();
+    if status.success() {
+        write_result?;
+    }
+    Ok(ChildOutput {
+        status,
+        stderr,
+        parsed,
+        parse_error,
+    })
+}
+
 #[derive(Default)]
 struct ParsedOutput {
     session_id: Option<String>,
@@ -159,53 +229,84 @@ struct ParsedOutput {
     assistant_failed: bool,
 }
 
-fn parse_jsonl(stdout: &[u8]) -> Result<ParsedOutput, String> {
-    let stdout = std::str::from_utf8(stdout)
-        .map_err(|_| "pi returned malformed JSON output (invalid UTF-8)".to_string())?;
-    let mut parsed = ParsedOutput::default();
-    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
-        let event: Value = serde_json::from_str(line)
-            .map_err(|_| "pi returned malformed JSON output".to_string())?;
-        match event.get("type").and_then(Value::as_str) {
-            Some("session") => {
-                parsed.session_id = event
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|id| !id.is_empty())
-                    .map(str::to_string);
-            }
-            Some("message_end") => {
-                let Some(message) = event.get("message") else {
-                    continue;
-                };
-                if message.get("role").and_then(Value::as_str) != Some("assistant") {
-                    continue;
-                }
-                if matches!(
-                    message.get("stopReason").and_then(Value::as_str),
-                    Some("error" | "aborted")
-                ) {
-                    parsed.reply = None;
-                    parsed.assistant_failed = true;
-                    continue;
-                }
-                let text = message
-                    .get("content")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
-                    .filter_map(|part| part.get("text").and_then(Value::as_str))
-                    .collect::<Vec<_>>()
-                    .join("");
-                parsed.reply = Some(text);
-                parsed.assistant_failed = false;
-            }
-            _ => {}
+fn apply_jsonl_line(
+    parsed: &mut ParsedOutput,
+    line: &str,
+    progress: Option<&mpsc::UnboundedSender<ProgressEvent>>,
+) -> Result<(), String> {
+    let event: Value =
+        serde_json::from_str(line).map_err(|_| "pi returned malformed JSON output".to_string())?;
+    match event.get("type").and_then(Value::as_str) {
+        Some("session") => {
+            parsed.session_id = event
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string);
         }
+        Some("message_end") => {
+            let Some(message) = event.get("message") else {
+                return Ok(());
+            };
+            if message.get("role").and_then(Value::as_str) != Some("assistant") {
+                return Ok(());
+            }
+            if matches!(
+                message.get("stopReason").and_then(Value::as_str),
+                Some("error" | "aborted")
+            ) {
+                parsed.reply = None;
+                parsed.assistant_failed = true;
+                return Ok(());
+            }
+            let text = message
+                .get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("");
+            parsed.reply = Some(text);
+            parsed.assistant_failed = false;
+        }
+        Some("tool_execution_start") => {
+            if let Some(tx) = progress {
+                let tool_name = event
+                    .get("toolName")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let args = event.get("args").cloned().unwrap_or(Value::Null);
+                let _ = tx.send(ProgressEvent {
+                    preview: preview_from_args(&tool_name, &args),
+                    tool_name,
+                    phase: ProgressPhase::Start,
+                });
+            }
+        }
+        Some("tool_execution_end") => {
+            if let Some(tx) = progress {
+                if event.get("isError").and_then(Value::as_bool) == Some(true) {
+                    let tool_name = event
+                        .get("toolName")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let args = event.get("args").cloned().unwrap_or(Value::Null);
+                    let _ = tx.send(ProgressEvent {
+                        preview: preview_from_args(&tool_name, &args),
+                        tool_name,
+                        phase: ProgressPhase::End { is_error: true },
+                    });
+                }
+            }
+        }
+        _ => {}
     }
-    Ok(parsed)
+    Ok(())
 }
 
 fn exit_diagnostic(status: Option<i32>, parse_error: Option<&str>) -> String {
@@ -293,6 +394,34 @@ mod tests {
         assert!(!args.contains(&"--session".to_string()));
         assert_eq!(read_prompt(&args_path), prompt);
         assert!(!args.contains(&prompt));
+    }
+
+    #[tokio::test]
+    async fn streams_tool_progress_events_before_final_reply() {
+        let work_dir = temp_dir("pi-progress-work");
+        let script = "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"session\",\"id\":\"progress-session\"}'\nprintf '%s\\n' '{\"type\":\"tool_execution_start\",\"toolCallId\":\"1\",\"toolName\":\"bash\",\"args\":{\"command\":\"ls -la\"}}'\nprintf '%s\\n' '{\"type\":\"tool_execution_end\",\"toolCallId\":\"1\",\"toolName\":\"bash\",\"result\":null,\"isError\":false}'\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"stopReason\":\"stop\"}}'\n";
+        let cli = FakeCli::new("pi", script);
+        let runner = Runner { bin: cli.bin() };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let output = runner
+            .run_with_progress(
+                request(work_dir.to_str().unwrap(), true),
+                Duration::from_secs(5),
+                Some(tx),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output.reply, "done");
+        let event = rx.recv().await.expect("progress event");
+        assert_eq!(event.tool_name, "bash");
+        assert_eq!(event.preview, "ls -la");
+        assert!(matches!(event.phase, crate::progress::ProgressPhase::Start));
+        assert!(
+            rx.try_recv().is_err(),
+            "successful tool end should not emit"
+        );
     }
 
     #[tokio::test]

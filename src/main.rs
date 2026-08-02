@@ -19,6 +19,7 @@ mod jobs;
 mod markdown;
 mod paths;
 mod pi;
+mod progress;
 mod prompt;
 mod restart;
 mod slack;
