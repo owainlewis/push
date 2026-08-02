@@ -37,6 +37,26 @@ thread = "telegram:dm:123456789"
 agent = "claude"
 ```
 
+## Local Bot API Server
+
+By default Push talks to `https://api.telegram.org`. To use a self-hosted
+[Telegram Bot API server](https://github.com/tdlib/telegram-bot-api) (for
+example to download files larger than the public 20 MB limit), point Push at
+that server:
+
+```toml
+[telegram]
+bot_token = "replace-with-the-token-from-BotFather"
+allow_user_ids = [123456789]
+base_url = "http://127.0.0.1:8081/bot"
+base_file_url = "http://127.0.0.1:8081/file/bot"
+max_audio_bytes = 104857600
+```
+
+Trailing slashes on the base URLs are stripped. Keep the local Bot API process
+running before `push doctor` or `push`. Omitting these keys keeps the public
+defaults.
+
 `push init` creates a new config with owner-only mode `0600` on Unix. An
 environment variable remains supported through `TELEGRAM_BOT_TOKEN`. Push never
 prints the token. Run:
