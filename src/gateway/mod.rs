@@ -808,7 +808,7 @@ impl Gateway {
                     voice_attachment: m.voice.clone(),
                     approval_origin,
                 };
-                if job.text.trim().eq_ignore_ascii_case("/stop") {
+                if worker::normalize_slash_command(&job.text) == "/stop" {
                     if !self.stop(job).await {
                         return;
                     }

@@ -768,7 +768,7 @@ fn complete_job(ctx: &Ctx, job: &Job, reason: &str) {
 
 /// Handles gateway-level slash commands before anything reaches the agent.
 fn command(ctx: &Ctx, job: &Job) -> Option<String> {
-    let text = job.text.trim().to_lowercase();
+    let text = normalize_slash_command(&job.text);
     match text.as_str() {
         "/clear" | "/new" | "/reset" => match ctx.store.lock().unwrap().rotate(
             &job.thread,
@@ -803,6 +803,23 @@ fn command(ctx: &Ctx, job: &Job) -> Option<String> {
                 .to_string(),
         ),
         _ => None,
+    }
+}
+
+/// Strip Telegram `@botname` suffixes so `/stream@MyBot` matches `/stream`.
+pub(super) fn normalize_slash_command(text: &str) -> String {
+    let text = text.trim().to_lowercase();
+    let Some(rest) = text.strip_prefix('/') else {
+        return text;
+    };
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let cmd = parts.next().unwrap_or("");
+    let args = parts.next().unwrap_or("").trim();
+    let cmd = cmd.split('@').next().unwrap_or(cmd);
+    if args.is_empty() {
+        format!("/{cmd}")
+    } else {
+        format!("/{cmd} {args}")
     }
 }
 
