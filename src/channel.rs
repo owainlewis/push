@@ -23,6 +23,9 @@ pub struct InboundVoice {
     pub filename: String,
     /// Channels that already have the bytes may provide them directly.
     pub data: Option<Vec<u8>>,
+    /// When true, Push downloads the file to disk and hands the path to the
+    /// agent instead of cloud speech-to-text (Telegram audio/document files).
+    pub agent_handoff: bool,
 }
 
 #[derive(Debug, Clone)]

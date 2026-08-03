@@ -93,8 +93,8 @@ where
                     ctx.audit
                         .failed(event, job.row_id, &job.thread, Some(job.backend), detail),
                 );
-                let delivery = record_and_deliver(ctx, &job, OutboundOrigin::Gateway, reply).await;
-                report_delivery(ctx, &job, delivery, reply, event, "deliver voice fallback");
+                let delivery = record_and_deliver(ctx, &job, OutboundOrigin::Gateway, &reply).await;
+                report_delivery(ctx, &job, delivery, &reply, event, "deliver voice fallback");
                 return;
             }
         }
@@ -568,7 +568,7 @@ async fn interrupt(cancel: &mut watch::Receiver<i64>, row_id: i64) {
 enum VoicePreparationError {
     User {
         event: &'static str,
-        reply: &'static str,
+        reply: String,
         detail: String,
     },
     History(anyhow::Error),
@@ -579,20 +579,23 @@ async fn prepare_voice(ctx: &Ctx, job: &Job) -> std::result::Result<String, Voic
         .voice_attachment
         .as_ref()
         .expect("voice preparation requires an attachment");
+    if attachment.agent_handoff {
+        return prepare_agent_audio_handoff(ctx, job, attachment).await;
+    }
     if attachment
         .file_size
         .is_some_and(|size| size > MAX_AUDIO_BYTES)
     {
         return Err(VoicePreparationError::User {
             event: "voice_too_large",
-            reply: "That voice message is too large. The limit is 20 MB.",
+            reply: "That voice message is too large. The limit is 20 MB.".to_string(),
             detail: "voice message exceeds the 20 MB limit".to_string(),
         });
     }
     let Some(voice) = &ctx.voice else {
         return Err(VoicePreparationError::User {
             event: "voice_not_configured",
-            reply: "Voice messages are unavailable. Set voice.openai_api_key in config or OPENAI_API_KEY, restart Push, or send text instead.",
+            reply: "Voice messages are unavailable. Set voice.openai_api_key in config or OPENAI_API_KEY, restart Push, or send text instead.".to_string(),
             detail: "OpenAI API key is not configured".to_string(),
         });
     };
@@ -602,7 +605,8 @@ async fn prepare_voice(ctx: &Ctx, job: &Job) -> std::result::Result<String, Voic
         .await
         .map_err(|error| VoicePreparationError::User {
             event: "voice_download_failed",
-            reply: "I could not download that voice message. Please try again or send text.",
+            reply: "I could not download that voice message. Please try again or send text."
+                .to_string(),
             detail: format!("voice download failed: {error:#}"),
         })?;
     let transcript = voice
@@ -610,7 +614,8 @@ async fn prepare_voice(ctx: &Ctx, job: &Job) -> std::result::Result<String, Voic
         .await
         .map_err(|error| VoicePreparationError::User {
             event: "voice_transcription_failed",
-            reply: "I could not transcribe that voice message. Please try again or send text.",
+            reply: "I could not transcribe that voice message. Please try again or send text."
+                .to_string(),
             detail: format!("voice transcription failed: {error:#}"),
         })?;
     ctx.history
@@ -619,6 +624,97 @@ async fn prepare_voice(ctx: &Ctx, job: &Job) -> std::result::Result<String, Voic
         .replace_inbound_content(job.inbound_id, &transcript)
         .map_err(VoicePreparationError::History)?;
     Ok(transcript)
+}
+
+async fn prepare_agent_audio_handoff(
+    ctx: &Ctx,
+    job: &Job,
+    attachment: &crate::channel::InboundVoice,
+) -> std::result::Result<String, VoicePreparationError> {
+    let max_bytes = ctx.cfg.telegram_max_audio_bytes;
+    if attachment.file_size.is_some_and(|size| size > max_bytes) {
+        return Err(VoicePreparationError::User {
+            event: "voice_too_large",
+            reply: format!(
+                "That audio file is too large. The configured limit is {max_bytes} bytes."
+            ),
+            detail: format!("audio file exceeds the {max_bytes} byte limit"),
+        });
+    }
+    let clip = ctx
+        .channel
+        .download_voice(attachment)
+        .await
+        .map_err(|error| VoicePreparationError::User {
+            event: "voice_download_failed",
+            reply: "I could not download that audio file. Please try again or send text."
+                .to_string(),
+            detail: format!("audio download failed: {error:#}"),
+        })?;
+    if clip.bytes.len() > max_bytes {
+        return Err(VoicePreparationError::User {
+            event: "voice_too_large",
+            reply: format!(
+                "That audio file is too large. The configured limit is {max_bytes} bytes."
+            ),
+            detail: format!("audio file exceeds the {max_bytes} byte limit"),
+        });
+    }
+
+    let dir = ctx.cfg.paths.cache.join("inbound-audio");
+    std::fs::create_dir_all(&dir).map_err(|error| VoicePreparationError::User {
+        event: "voice_download_failed",
+        reply: "I could not save that audio file locally. Please try again or send text."
+            .to_string(),
+        detail: format!("create inbound-audio dir failed: {error}"),
+    })?;
+    let filename = safe_audio_filename(&clip.filename);
+    let path = dir.join(format!("{}_{filename}", job.row_id));
+    std::fs::write(&path, &clip.bytes).map_err(|error| VoicePreparationError::User {
+        event: "voice_download_failed",
+        reply: "I could not save that audio file locally. Please try again or send text."
+            .to_string(),
+        detail: format!("write inbound audio failed: {error}"),
+    })?;
+
+    let caption = job.text.trim();
+    let caption = if caption.is_empty() || caption == "[Audio file]" {
+        String::new()
+    } else {
+        format!("\n\nCaption from Telegram:\n{caption}")
+    };
+    let prompt = format!(
+        "Telegram audio file saved to:\n{}\n\nTranscribe it with the local audio transcription pipeline/skill (background run; do not wait for completion). Confirm when started.{caption}",
+        path.display()
+    );
+    ctx.history
+        .lock()
+        .unwrap()
+        .replace_inbound_content(job.inbound_id, &prompt)
+        .map_err(VoicePreparationError::History)?;
+    Ok(prompt)
+}
+
+fn safe_audio_filename(name: &str) -> String {
+    let base = std::path::Path::new(name)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("audio.bin");
+    let cleaned: String = base
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "audio.bin".to_string()
+    } else {
+        cleaned
+    }
 }
 
 /// Error and completion labels for one gateway-authored reply flow.

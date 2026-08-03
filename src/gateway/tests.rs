@@ -3180,6 +3180,7 @@ fn telegram_voice_message(row_id: i64, user_id: i64, chat_id: i64) -> RawMessage
         mime_type: "audio/ogg".to_string(),
         filename: "voice.ogg".to_string(),
         data: Some(vec![1, 2, 3]),
+        agent_handoff: false,
     });
     message
 }

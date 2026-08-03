@@ -531,6 +531,11 @@ impl Update {
                 thread_id: None,
             };
         };
+        let voice = inbound_audio_attachment(&message);
+        let text = message
+            .text
+            .or(message.caption)
+            .unwrap_or_default();
         RawMessage {
             row_id: self.update_id,
             provider_event_id: None,
@@ -541,19 +546,84 @@ impl Update {
                 .unwrap_or_default(),
             chat_identifier: message.chat.id.to_string(),
             is_group: message.chat.kind != "private",
-            text: message.text.unwrap_or_default(),
-            voice: message.voice.map(|voice| InboundVoice {
-                locator: voice.file_id,
-                file_size: voice.file_size,
-                mime_type: voice.mime_type.unwrap_or_else(|| "audio/ogg".to_string()),
-                filename: "voice.ogg".to_string(),
-                data: None,
-            }),
+            text,
+            voice,
             is_from_me: false,
             is_supported: true,
             thread_id: message.message_thread_id,
         }
     }
+}
+
+fn inbound_audio_attachment(message: &TelegramMessage) -> Option<InboundVoice> {
+    if let Some(voice) = &message.voice {
+        return Some(InboundVoice {
+            locator: voice.file_id.clone(),
+            file_size: voice.file_size,
+            mime_type: voice
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "audio/ogg".to_string()),
+            filename: "voice.ogg".to_string(),
+            data: None,
+            agent_handoff: false,
+        });
+    }
+    if let Some(audio) = &message.audio {
+        return Some(InboundVoice {
+            locator: audio.file_id.clone(),
+            file_size: audio.file_size,
+            mime_type: audio
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "audio/mpeg".to_string()),
+            filename: audio
+                .file_name
+                .clone()
+                .unwrap_or_else(|| "audio.mp3".to_string()),
+            data: None,
+            agent_handoff: true,
+        });
+    }
+    if let Some(document) = &message.document {
+        if is_audio_document(document) {
+            return Some(InboundVoice {
+                locator: document.file_id.clone(),
+                file_size: document.file_size,
+                mime_type: document
+                    .mime_type
+                    .clone()
+                    .unwrap_or_else(|| "application/octet-stream".to_string()),
+                filename: document
+                    .file_name
+                    .clone()
+                    .unwrap_or_else(|| "audio.bin".to_string()),
+                data: None,
+                agent_handoff: true,
+            });
+        }
+    }
+    None
+}
+
+fn is_audio_document(document: &TelegramDocument) -> bool {
+    if document
+        .mime_type
+        .as_deref()
+        .is_some_and(|mime| mime.starts_with("audio/"))
+    {
+        return true;
+    }
+    let name = document
+        .file_name
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    [
+        ".ogg", ".oga", ".mp3", ".m4a", ".wav", ".flac", ".aac", ".opus", ".wma",
+    ]
+    .iter()
+    .any(|ext| name.ends_with(ext))
 }
 
 #[derive(Deserialize)]
@@ -564,7 +634,13 @@ struct TelegramMessage {
     #[serde(default)]
     text: Option<String>,
     #[serde(default)]
+    caption: Option<String>,
+    #[serde(default)]
     voice: Option<TelegramVoice>,
+    #[serde(default)]
+    audio: Option<TelegramAudio>,
+    #[serde(default)]
+    document: Option<TelegramDocument>,
     #[serde(default)]
     message_thread_id: Option<i64>,
 }
@@ -576,6 +652,28 @@ struct TelegramVoice {
     file_size: Option<usize>,
     #[serde(default)]
     mime_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TelegramAudio {
+    file_id: String,
+    #[serde(default)]
+    file_size: Option<usize>,
+    #[serde(default)]
+    mime_type: Option<String>,
+    #[serde(default)]
+    file_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TelegramDocument {
+    file_id: String,
+    #[serde(default)]
+    file_size: Option<usize>,
+    #[serde(default)]
+    mime_type: Option<String>,
+    #[serde(default)]
+    file_name: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -817,7 +915,10 @@ mod tests {
                     kind: "private".to_string(),
                 },
                 text: Some("hi".to_string()),
+                caption: None,
                 voice: None,
+                audio: None,
+                document: None,
                 message_thread_id: None,
             }),
         }
@@ -841,11 +942,14 @@ mod tests {
                     kind: "private".to_string(),
                 },
                 text: None,
+                caption: None,
                 voice: Some(TelegramVoice {
                     file_id: "file-123".to_string(),
                     file_size: Some(42),
                     mime_type: Some("audio/ogg".to_string()),
                 }),
+                audio: None,
+                document: None,
                 message_thread_id: None,
             }),
         }
@@ -855,7 +959,87 @@ mod tests {
         let voice = message.voice.unwrap();
         assert_eq!(voice.locator, "file-123");
         assert_eq!(voice.file_size, Some(42));
+        assert!(!voice.agent_handoff);
         assert!(voice.data.is_none());
+    }
+
+    #[test]
+    fn parses_audio_and_audio_documents_as_agent_handoff() {
+        let audio = Update {
+            update_id: 3,
+            message: Some(TelegramMessage {
+                from: Some(User { id: 7 }),
+                chat: Chat {
+                    id: 7,
+                    kind: "private".to_string(),
+                },
+                text: None,
+                caption: Some("planning".to_string()),
+                voice: None,
+                audio: Some(TelegramAudio {
+                    file_id: "audio-1".to_string(),
+                    file_size: Some(99),
+                    mime_type: Some("audio/mp4".to_string()),
+                    file_name: Some("meeting.m4a".to_string()),
+                }),
+                document: None,
+                message_thread_id: None,
+            }),
+        }
+        .into_raw();
+        assert_eq!(audio.text, "planning");
+        let handoff = audio.voice.unwrap();
+        assert!(handoff.agent_handoff);
+        assert_eq!(handoff.locator, "audio-1");
+        assert_eq!(handoff.filename, "meeting.m4a");
+
+        let document = Update {
+            update_id: 4,
+            message: Some(TelegramMessage {
+                from: Some(User { id: 7 }),
+                chat: Chat {
+                    id: 7,
+                    kind: "private".to_string(),
+                },
+                text: None,
+                caption: None,
+                voice: None,
+                audio: None,
+                document: Some(TelegramDocument {
+                    file_id: "doc-1".to_string(),
+                    file_size: Some(12),
+                    mime_type: None,
+                    file_name: Some("Grabadora.mp3".to_string()),
+                }),
+                message_thread_id: None,
+            }),
+        }
+        .into_raw();
+        assert!(document.voice.unwrap().agent_handoff);
+
+        let pdf = Update {
+            update_id: 5,
+            message: Some(TelegramMessage {
+                from: Some(User { id: 7 }),
+                chat: Chat {
+                    id: 7,
+                    kind: "private".to_string(),
+                },
+                text: None,
+                caption: None,
+                voice: None,
+                audio: None,
+                document: Some(TelegramDocument {
+                    file_id: "doc-2".to_string(),
+                    file_size: Some(12),
+                    mime_type: Some("application/pdf".to_string()),
+                    file_name: Some("notes.pdf".to_string()),
+                }),
+                message_thread_id: None,
+            }),
+        }
+        .into_raw();
+        assert!(pdf.voice.is_none());
     }
 
     #[tokio::test]
@@ -873,6 +1057,7 @@ mod tests {
             mime_type: "audio/ogg".to_string(),
             filename: "voice.ogg".to_string(),
             data: None,
+            agent_handoff: false,
         };
 
         let clip = telegram.download_voice(&voice).await.unwrap();
