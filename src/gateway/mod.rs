@@ -598,10 +598,7 @@ impl Gateway {
                 continue;
             }
             if let Some((thread, target)) = self.channel.accept(m) {
-                let reply_with_voice = m
-                    .voice
-                    .as_ref()
-                    .is_some_and(|voice| !voice.agent_handoff);
+                let reply_with_voice = m.voice.as_ref().is_some_and(|voice| !voice.agent_handoff);
                 let message_text = match m.voice.as_ref() {
                     Some(voice) if voice.agent_handoff => {
                         let caption = m.text.trim();

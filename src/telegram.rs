@@ -399,9 +399,8 @@ impl Telegram {
         // ponytail: upgrade to a Transport::read_local hook if another channel needs it.
         let path = std::path::Path::new(&file_path);
         let bytes = if path.is_absolute() {
-            std::fs::read(path).with_context(|| {
-                format!("read local Telegram Bot API file {}", path.display())
-            })?
+            std::fs::read(path)
+                .with_context(|| format!("read local Telegram Bot API file {}", path.display()))?
         } else {
             self.transport.download(&self.token, &file_path).await?
         };
@@ -545,10 +544,7 @@ impl Update {
             };
         };
         let voice = inbound_audio_attachment(&message);
-        let text = message
-            .text
-            .or(message.caption)
-            .unwrap_or_default();
+        let text = message.text.or(message.caption).unwrap_or_default();
         RawMessage {
             row_id: self.update_id,
             provider_event_id: None,
