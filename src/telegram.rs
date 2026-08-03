@@ -249,6 +249,23 @@ impl Telegram {
         self.allow_user_ids.contains(&chat_id) || self.allow_chat_ids.contains(&chat_id)
     }
 
+    pub async fn send_plain(&self, target: &str, text: &str) -> Result<()> {
+        let mut payload = target_payload(target);
+        payload["text"] = json!(text);
+        let transport_response = self
+            .post_with_topic_fallback("sendMessage", payload)
+            .await?;
+        let response: ApiResponse<Value> = serde_json::from_value(transport_response.body)
+            .map_err(|_| anyhow::anyhow!("Telegram sendMessage returned an invalid response"))?;
+        if !response.ok {
+            bail!(
+                "Telegram sendMessage returned HTTP {}",
+                transport_response.status
+            );
+        }
+        Ok(())
+    }
+
     pub async fn send_rich(&self, target: &str, text: &str) -> Result<()> {
         if text.encode_utf16().count() > TEXT_LIMIT {
             bail!("Telegram rich message exceeds the {TEXT_LIMIT} character chunk limit");
@@ -271,9 +288,70 @@ impl Telegram {
         Ok(())
     }
 
-    pub async fn send_plain(&self, target: &str, text: &str) -> Result<()> {
+    /// Send a rich progress bubble and return Telegram's message id for later edits.
+    #[cfg_attr(test, allow(dead_code))]
+    pub async fn send_progress(&self, target: &str, text: &str) -> Result<i64> {
+        if text.encode_utf16().count() > TEXT_LIMIT {
+            bail!("Telegram rich message exceeds the {TEXT_LIMIT} character chunk limit");
+        }
+        let html = crate::markdown::to_telegram_html(text);
+        let mut payload = target_payload(target);
+        payload["text"] = json!(html);
+        payload["parse_mode"] = json!("HTML");
+        match self.send_message_id(payload).await {
+            Ok(id) => Ok(id),
+            Err(_) => self.send_plain_with_id(target, text).await,
+        }
+    }
+
+    /// Edit an existing progress bubble in place.
+    #[cfg_attr(test, allow(dead_code))]
+    pub async fn edit_progress(&self, target: &str, message_id: i64, text: &str) -> Result<()> {
+        if text.encode_utf16().count() > TEXT_LIMIT {
+            bail!("Telegram rich message exceeds the {TEXT_LIMIT} character chunk limit");
+        }
+        let html = crate::markdown::to_telegram_html(text);
+        let mut payload = target_payload(target);
+        payload["message_id"] = json!(message_id);
+        payload["text"] = json!(html);
+        payload["parse_mode"] = json!("HTML");
+        let transport_response = self
+            .post_with_topic_fallback("editMessageText", payload)
+            .await?;
+        let response: ApiResponse<Value> = serde_json::from_value(transport_response.body.clone())
+            .map_err(|_| {
+                anyhow::anyhow!("Telegram editMessageText returned an invalid response")
+            })?;
+        if response.ok {
+            return Ok(());
+        }
+        // Fall back to plain edit if HTML is rejected.
+        let mut plain = target_payload(target);
+        plain["message_id"] = json!(message_id);
+        plain["text"] = json!(text);
+        let transport_response = self
+            .post_with_topic_fallback("editMessageText", plain)
+            .await?;
+        let response: ApiResponse<Value> = serde_json::from_value(transport_response.body)
+            .map_err(|_| {
+                anyhow::anyhow!("Telegram editMessageText returned an invalid response")
+            })?;
+        if !response.ok {
+            bail!(
+                "Telegram editMessageText returned HTTP {}",
+                transport_response.status
+            );
+        }
+        Ok(())
+    }
+
+    async fn send_plain_with_id(&self, target: &str, text: &str) -> Result<i64> {
         let mut payload = target_payload(target);
         payload["text"] = json!(text);
+        self.send_message_id(payload).await
+    }
+
+    async fn send_message_id(&self, payload: Value) -> Result<i64> {
         let transport_response = self
             .post_with_topic_fallback("sendMessage", payload)
             .await?;
@@ -285,7 +363,12 @@ impl Telegram {
                 transport_response.status
             );
         }
-        Ok(())
+        response
+            .result
+            .as_ref()
+            .and_then(|value| value.get("message_id"))
+            .and_then(Value::as_i64)
+            .context("Telegram sendMessage omitted message_id")
     }
 
     pub async fn send_typing(&self, target: &str) -> Result<()> {

@@ -169,6 +169,9 @@ user prompt.
 ## Control Commands
 
 - `/clear`, `/new`, `/reset`: rotate the current backend session.
+- `/stream`, `/stream on`, `/stream off`: toggle cosmetic tool-progress
+  messages for the current conversation (in-memory; off after restart). Progress
+  is never stored in canonical history and does not change agent prompts.
 - `/help`: show available commands.
 
 ## Acceptance Criteria

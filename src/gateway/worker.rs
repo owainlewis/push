@@ -3,7 +3,7 @@
 
 use std::future::{pending, Future};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tokio::sync::{mpsc, watch};
@@ -11,6 +11,9 @@ use tracing::{error, info, warn};
 
 use crate::agent::{Request, RunError};
 use crate::history::{DeliveryStatus, OutboundMessage, OutboundOrigin};
+use crate::progress::{
+    append_progress_message, format_progress_block, ProgressEvent, ProgressPhase,
+};
 use crate::prompt::{ComposedPrompt, Composer};
 use crate::voice::MAX_AUDIO_BYTES;
 
@@ -220,6 +223,20 @@ where
         }
     };
 
+    let progress_bundle = if ctx.stream_prefs.is_enabled(&job.thread) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let pump_ctx = ctx.clone();
+        let target = job.target.clone();
+        let thread = job.thread.clone();
+        let handle = tokio::spawn(async move {
+            pump_progress(pump_ctx, target, thread, rx).await;
+        });
+        Some((tx, handle))
+    } else {
+        None
+    };
+    let progress = progress_bundle.as_ref().map(|(tx, _)| tx.clone());
+
     let run = async {
         let mut session_id = session_id;
         let mut prompt = match conversation_prompt(ctx, &job, &composer, is_new) {
@@ -253,9 +270,10 @@ where
             prompt.rehydrated_messages
         );
         let mut result = runner
-            .run(
+            .run_with_progress(
                 backend_request(&session_id, is_new, &work_dir, &prompt),
                 ctx.run_timeout,
+                progress.clone(),
             )
             .await;
         // If the session id already exists (e.g. left over from a previous run
@@ -268,9 +286,10 @@ where
                         RunError::Failed(format!("compose resumed prompt: {error}"))
                     })?;
                     result = runner
-                        .run(
+                        .run_with_progress(
                             backend_request(&session_id, false, &work_dir, &prompt),
                             ctx.run_timeout,
+                            progress.clone(),
                         )
                         .await;
                 }
@@ -322,9 +341,10 @@ where
                 ),
             );
             result = runner
-                .run(
+                .run_with_progress(
                     backend_request(&session_id, true, &work_dir, &prompt),
                     ctx.run_timeout,
+                    progress.clone(),
                 )
                 .await;
         }
@@ -357,6 +377,14 @@ where
         result = &mut run => Some(result),
         _ = &mut interrupt => None,
     };
+    if let Some((tx, handle)) = progress_bundle {
+        drop(tx);
+        // Never let a stuck progress edit block the final reply.
+        match tokio::time::timeout(Duration::from_secs(5), handle).await {
+            Ok(_) => {}
+            Err(_) => warn!("[{}] progress pump timed out after backend run", job.thread),
+        }
+    }
 
     match result {
         Some(Ok(out)) => {
@@ -746,7 +774,8 @@ fn complete_job(ctx: &Ctx, job: &Job, reason: &str) {
 
 /// Handles gateway-level slash commands before anything reaches the agent.
 fn command(ctx: &Ctx, job: &Job) -> Option<String> {
-    match job.text.trim().to_lowercase().as_str() {
+    let text = normalize_slash_command(&job.text);
+    match text.as_str() {
         "/clear" | "/new" | "/reset" => match ctx.store.lock().unwrap().rotate(
             &job.thread,
             job.backend.as_str(),
@@ -758,11 +787,45 @@ fn command(ctx: &Ctx, job: &Job) -> Option<String> {
             Ok(()) => Some("Started a fresh conversation.".to_string()),
             Err(_) => Some("Couldn't reset the conversation.".to_string()),
         },
+        "/stream" | "/stream on" | "/stream off" => {
+            let enabled = match text.as_str() {
+                "/stream on" => {
+                    ctx.stream_prefs.set(&job.thread, true);
+                    true
+                }
+                "/stream off" => {
+                    ctx.stream_prefs.set(&job.thread, false);
+                    false
+                }
+                _ => ctx.stream_prefs.toggle(&job.thread),
+            };
+            Some(format!(
+                "Stream progress: {}.",
+                if enabled { "on" } else { "off" }
+            ))
+        }
         "/help" => Some(
-            "Commands:\n/clear - start a fresh conversation\n/stop - stop the active request\n/help - this message"
+            "Commands:\n/clear - start a fresh conversation\n/stop - stop the active request\n/stream - toggle cosmetic tool progress\n/help - this message"
                 .to_string(),
         ),
         _ => None,
+    }
+}
+
+/// Strip Telegram `@botname` suffixes so `/stream@MyBot` matches `/stream`.
+pub(super) fn normalize_slash_command(text: &str) -> String {
+    let text = text.trim().to_lowercase();
+    let Some(rest) = text.strip_prefix('/') else {
+        return text;
+    };
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let cmd = parts.next().unwrap_or("");
+    let args = parts.next().unwrap_or("").trim();
+    let cmd = cmd.split('@').next().unwrap_or(cmd);
+    if args.is_empty() {
+        format!("/{cmd}")
+    } else {
+        format!("/{cmd} {args}")
     }
 }
 
@@ -1010,5 +1073,95 @@ fn backend_request<'a>(
         work_dir,
         instructions: &prompt.instructions,
         prompt: &prompt.content,
+    }
+}
+
+const PROGRESS_EDIT_INTERVAL: Duration = Duration::from_millis(450);
+const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_secs(8);
+
+async fn pump_progress(
+    ctx: Ctx,
+    target: String,
+    thread: String,
+    mut rx: mpsc::UnboundedReceiver<ProgressEvent>,
+) {
+    let mut body = String::new();
+    let mut message_id: Option<i64> = None;
+    let mut last_flush = Instant::now()
+        .checked_sub(PROGRESS_EDIT_INTERVAL)
+        .unwrap_or_else(Instant::now);
+    let mut dirty = false;
+
+    while let Some(event) = rx.recv().await {
+        match &event.phase {
+            ProgressPhase::Start => {}
+            ProgressPhase::End { is_error: true } => {}
+            ProgressPhase::End { is_error: false } => continue,
+        }
+        let block = format_progress_block(&event);
+        body = append_progress_message(&body, &block);
+        dirty = true;
+
+        let elapsed = last_flush.elapsed();
+        if message_id.is_some() && elapsed < PROGRESS_EDIT_INTERVAL {
+            continue;
+        }
+        if flush_progress(&ctx, &target, &thread, &body, &mut message_id).await {
+            last_flush = Instant::now();
+            dirty = false;
+        }
+    }
+
+    if dirty && !body.is_empty() {
+        let _ = flush_progress(&ctx, &target, &thread, &body, &mut message_id).await;
+    }
+}
+
+async fn flush_progress(
+    ctx: &Ctx,
+    target: &str,
+    thread: &str,
+    body: &str,
+    message_id: &mut Option<i64>,
+) -> bool {
+    let send = async {
+        match message_id {
+            Some(id) => {
+                ctx.channel.edit_progress(target, *id, body).await?;
+                Ok::<_, anyhow::Error>(None)
+            }
+            None => Ok(ctx.channel.send_progress(target, body).await?),
+        }
+    };
+    match tokio::time::timeout(PROGRESS_SEND_TIMEOUT, send).await {
+        Ok(Ok(Some(id))) => {
+            *message_id = Some(id);
+            #[cfg(test)]
+            {
+                ctx.sent_progress
+                    .lock()
+                    .unwrap()
+                    .push((target.to_string(), body.to_string()));
+            }
+            true
+        }
+        Ok(Ok(None)) => {
+            #[cfg(test)]
+            {
+                ctx.sent_progress
+                    .lock()
+                    .unwrap()
+                    .push((target.to_string(), body.to_string()));
+            }
+            true
+        }
+        Ok(Err(error)) => {
+            warn!("[{thread}] progress update failed: {error}");
+            false
+        }
+        Err(_) => {
+            warn!("[{thread}] progress update timed out");
+            false
+        }
     }
 }

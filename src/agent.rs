@@ -5,7 +5,10 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
+use tokio::sync::mpsc;
+
 use crate::config::{AgentBackend, Config};
+use crate::progress::ProgressEvent;
 use crate::{claude, codex, pi};
 
 /// One headless agent turn.
@@ -55,10 +58,10 @@ pub enum Runner {
 /// replaced. Retry only that transient spawn error, within the caller's
 /// overall timeout, and preserve every other error unchanged. `spawn` must
 /// build a fresh child process attempt on every call.
-pub(crate) async fn output_with_retry<F, Fut>(mut spawn: F) -> std::io::Result<std::process::Output>
+pub(crate) async fn output_with_retry<F, Fut, T>(mut spawn: F) -> std::io::Result<T>
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = std::io::Result<std::process::Output>>,
+    Fut: std::future::Future<Output = std::io::Result<T>>,
 {
     let mut attempts = 0;
     loop {
@@ -122,13 +125,28 @@ impl Runner {
         matches!(self, Runner::Claude(_))
     }
 
+    /// Like [`Self::run_with_progress`] with no progress channel.
+    #[allow(dead_code)] // jobs and other callers; gateway uses run_with_progress
     pub async fn run(&self, req: Request<'_>, timeout: Duration) -> Result<RunOutput, RunError> {
+        self.run_with_progress(req, timeout, None).await
+    }
+
+    /// Like [`Self::run`], optionally forwarding cosmetic tool progress (Pi only).
+    pub async fn run_with_progress(
+        &self,
+        req: Request<'_>,
+        timeout: Duration,
+        progress: Option<mpsc::UnboundedSender<ProgressEvent>>,
+    ) -> Result<RunOutput, RunError> {
         match self {
             Runner::Claude(r) => r.run(req, timeout).await,
             Runner::Codex(r) => r.run(req, timeout).await,
-            Runner::Pi(r) => r.run(req, timeout).await,
+            Runner::Pi(r) => r.run_with_progress(req, timeout, progress).await,
             #[cfg(test)]
-            Runner::Fake(r) => r.run(req, timeout).await,
+            Runner::Fake(r) => {
+                let _ = progress;
+                r.run(req, timeout).await
+            }
         }
     }
 

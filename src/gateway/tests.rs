@@ -226,8 +226,10 @@ fn setup_failure_ctx(
         )),
         schedule_destination: None,
         voice: None,
+        stream_prefs: crate::progress::StreamPrefs::default(),
         setup_failure_replies: Arc::new(Mutex::new(Vec::new())),
         sent_replies: Arc::new(Mutex::new(Vec::new())),
+        sent_progress: Arc::new(Mutex::new(Vec::new())),
         sent_voice_replies: Arc::new(Mutex::new(Vec::new())),
         send_failures_remaining: Arc::new(Mutex::new(0)),
         send_failure_after: Arc::new(Mutex::new(None)),
@@ -508,6 +510,69 @@ async fn cursor_save_failure_retries_without_rerunning_or_redelivering() {
             .unwrap(),
         1
     );
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stream_command_toggles_without_backend_run() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("stream-toggle-sessions");
+    let assistant_dir = temp_path("stream-toggle-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut gateway = Gateway::new(test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    ))
+    .unwrap();
+    gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+
+    run_messages(
+        &mut gateway,
+        vec![message(1, "+15551234567", "+15551234567", false, "/stream")],
+    )
+    .await;
+    assert!(gateway
+        .ctx
+        .stream_prefs
+        .is_enabled("imessage:dm:+15551234567"));
+    assert!(gateway
+        .ctx
+        .sent_replies
+        .lock()
+        .unwrap()
+        .last()
+        .is_some_and(|(_, text)| text.starts_with("Stream progress: on.")));
+
+    run_messages(
+        &mut gateway,
+        vec![message(
+            2,
+            "+15551234567",
+            "+15551234567",
+            false,
+            "/stream off",
+        )],
+    )
+    .await;
+    assert!(!gateway
+        .ctx
+        .stream_prefs
+        .is_enabled("imessage:dm:+15551234567"));
+    assert!(gateway
+        .ctx
+        .sent_replies
+        .lock()
+        .unwrap()
+        .last()
+        .is_some_and(|(_, text)| text.starts_with("Stream progress: off.")));
+    assert!(calls.lock().unwrap().is_empty());
 
     let _ = std::fs::remove_file(&state_path);
     let _ = std::fs::remove_file(format!("{state_path}.db"));

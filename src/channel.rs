@@ -289,6 +289,29 @@ impl Channel {
         }
     }
 
+    /// Send a cosmetic progress bubble. Telegram returns a message id for edits.
+    pub async fn send_progress(&self, target: &str, text: &str) -> Result<Option<i64>> {
+        match self {
+            Self::Telegram(channel) => Ok(Some(channel.send_progress(target, text).await?)),
+            // Progress edits are Telegram-first; other channels skip delivery.
+            Self::IMessage(_) | Self::Slack(_) => {
+                let _ = (target, text);
+                Ok(Some(1))
+            }
+        }
+    }
+
+    /// Edit a Telegram progress bubble in place. No-op on other channels.
+    pub async fn edit_progress(&self, target: &str, message_id: i64, text: &str) -> Result<()> {
+        match self {
+            Self::Telegram(channel) => channel.edit_progress(target, message_id, text).await,
+            Self::IMessage(_) | Self::Slack(_) => {
+                let _ = (target, message_id, text);
+                Ok(())
+            }
+        }
+    }
+
     pub async fn download_voice(&self, voice: &InboundVoice) -> Result<AudioClip> {
         match self {
             Self::IMessage(channel) => ChannelContract::download_voice(channel, voice).await,
