@@ -250,7 +250,20 @@ impl Telegram {
     }
 
     pub async fn send_plain(&self, target: &str, text: &str) -> Result<()> {
-        self.send_plain_with_id(target, text).await.map(|_| ())
+        let mut payload = target_payload(target);
+        payload["text"] = json!(text);
+        let transport_response = self
+            .post_with_topic_fallback("sendMessage", payload)
+            .await?;
+        let response: ApiResponse<Value> = serde_json::from_value(transport_response.body)
+            .map_err(|_| anyhow::anyhow!("Telegram sendMessage returned an invalid response"))?;
+        if !response.ok {
+            bail!(
+                "Telegram sendMessage returned HTTP {}",
+                transport_response.status
+            );
+        }
+        Ok(())
     }
 
     pub async fn send_rich(&self, target: &str, text: &str) -> Result<()> {
