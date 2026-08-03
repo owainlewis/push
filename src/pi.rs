@@ -228,6 +228,68 @@ fn missing_resume_error(message: &str) -> bool {
         .contains("no session found matching")
 }
 
+/// Best-effort delete of abandoned Pi session JSONL files after `/new`.
+///
+/// Pi stores sessions as `~/.pi/agent/sessions/--<cwd>--/<timestamp>_<uuid>.jsonl`
+/// (or under `$PI_CODING_AGENT_DIR/sessions`). Push only keeps one active id per
+/// thread; orphaned files otherwise accumulate on disk and never cost tokens.
+///
+/// ponytail: walk project session dirs for `*_{id}.jsonl`. Upgrade path: call a
+/// Pi delete API if one is added.
+pub fn discard_session(session_id: &str) -> usize {
+    let Some(id) = safe_session_file_id(session_id) else {
+        return 0;
+    };
+    discard_session_under(&sessions_root(), id)
+}
+
+fn safe_session_file_id(session_id: &str) -> Option<&str> {
+    let id = session_id.trim();
+    if id.len() < 8 || id.contains('/') || id.contains('\\') || id.contains("..") {
+        return None;
+    }
+    Some(id)
+}
+
+fn sessions_root() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("PI_CODING_AGENT_DIR") {
+        if !dir.trim().is_empty() {
+            return std::path::PathBuf::from(dir).join("sessions");
+        }
+    }
+    match std::env::var_os("HOME") {
+        Some(home) => std::path::PathBuf::from(home).join(".pi/agent/sessions"),
+        None => std::path::PathBuf::from(".pi/agent/sessions"),
+    }
+}
+
+fn discard_session_under(root: &std::path::Path, id: &str) -> usize {
+    let suffix = format!("_{id}.jsonl");
+    let Ok(projects) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for project in projects.flatten() {
+        let project_path = project.path();
+        if !project_path.is_dir() {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(&project_path) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let path = file.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name.ends_with(&suffix) && std::fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +297,24 @@ mod tests {
         assert_runner_contract, composed_prompt_parts, sh_arg, temp_dir, temp_path, ContractCase,
         ContractRequest, ContractRunner, FakeCli, RunnerContract,
     };
+
+    #[test]
+    fn discards_matching_session_jsonl_only() {
+        let root = temp_dir("pi-discard-sessions");
+        let project = root.join("--tmp-project--");
+        std::fs::create_dir_all(&project).unwrap();
+        let keep = project.join("2026-01-01T00-00-00-000Z_keep-session-aaaaaaaa.jsonl");
+        let drop = project.join("2026-01-01T00-00-00-000Z_drop-session-bbbbbbbb.jsonl");
+        std::fs::write(&keep, "{}\n").unwrap();
+        std::fs::write(&drop, "{}\n").unwrap();
+
+        assert_eq!(discard_session_under(&root, "drop-session-bbbbbbbb"), 1);
+        assert!(keep.exists());
+        assert!(!drop.exists());
+        assert_eq!(discard_session_under(&root, "drop-session-bbbbbbbb"), 0);
+        assert_eq!(discard_session("../etc/passwd"), 0);
+        assert_eq!(safe_session_file_id("short"), None);
+    }
 
     impl ContractRunner for Runner {
         fn run<'a>(

@@ -285,24 +285,53 @@ impl Store {
     }
 
     /// Assigns a fresh backend session to a thread (the `/clear` behavior).
-    pub fn rotate(&mut self, thread: &str, backend: &str, initial_id: String) -> Result<()> {
+    ///
+    /// Returns the previous `session_id` when one existed, so callers can discard
+    /// abandoned backend artifacts (for example Pi session JSONL files).
+    pub fn rotate(
+        &mut self,
+        thread: &str,
+        backend: &str,
+        initial_id: String,
+    ) -> Result<Option<String>> {
         validate_backend(backend)?;
         let (channel, thread_key) = split_thread(thread)?;
         self.fail_session_write_for_test()?;
-        self.conn
-            .execute(
-                "INSERT INTO backend_sessions (
-                     channel, thread_key, backend, session_id, started
-                 ) VALUES (?1, ?2, ?3, ?4, 0)
-                 ON CONFLICT(channel, thread_key) DO UPDATE SET
-                     backend = excluded.backend,
-                     session_id = excluded.session_id,
-                     started = 0,
-                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
-                params![channel, thread_key, backend, initial_id],
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .with_context(|| {
+                format!(
+                    "begin session rotate transaction in {}",
+                    self.database_path.display()
+                )
+            })?;
+        let previous = tx
+            .query_row(
+                "SELECT session_id
+                 FROM backend_sessions
+                 WHERE channel = ?1 AND thread_key = ?2",
+                params![channel, thread_key],
+                |row| row.get::<_, String>(0),
             )
-            .with_context(|| format!("rotate session for {thread:?}"))?;
-        Ok(())
+            .optional()
+            .with_context(|| format!("read session before rotate for {thread:?}"))?
+            .and_then(|id| non_empty_session_id(&id).map(str::to_string));
+        tx.execute(
+            "INSERT INTO backend_sessions (
+                 channel, thread_key, backend, session_id, started
+             ) VALUES (?1, ?2, ?3, ?4, 0)
+             ON CONFLICT(channel, thread_key) DO UPDATE SET
+                 backend = excluded.backend,
+                 session_id = excluded.session_id,
+                 started = 0,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+            params![channel, thread_key, backend, initial_id],
+        )
+        .with_context(|| format!("rotate session for {thread:?}"))?;
+        tx.commit()
+            .with_context(|| format!("commit session rotate for {thread:?}"))?;
+        Ok(previous)
     }
 
     fn migrate_legacy_state(&mut self, _fail_before_commit: bool) -> Result<()> {
@@ -802,9 +831,12 @@ mod tests {
             store.mark_started(thread, None).unwrap();
         }
 
-        store
-            .rotate("telegram:dm:7", "codex", "telegram-new".into())
-            .unwrap();
+        assert_eq!(
+            store
+                .rotate("telegram:dm:7", "codex", "telegram-new".into())
+                .unwrap(),
+            Some("telegram:dm:7-old".into())
+        );
         assert_eq!(
             store
                 .session_for("telegram:dm:7", "codex", "unused".into())

@@ -169,6 +169,8 @@ user prompt.
 ## Control Commands
 
 - `/clear`, `/new`, `/reset`: rotate the current backend session.
+  For Pi, also delete the abandoned session JSONL under `~/.pi/agent/sessions`
+  (best-effort; missing files are ignored).
 - `/help`: show available commands.
 
 ## Acceptance Criteria
