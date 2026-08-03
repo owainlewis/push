@@ -394,7 +394,20 @@ impl Telegram {
             .result
             .context("Telegram getFile omitted the file path")?
             .file_path;
-        let bytes = self.transport.download(&self.token, &file_path).await?;
+        // Local Bot API (--local) returns an absolute filesystem path and does not
+        // serve those files over /file/bot…; read them directly.
+        // ponytail: upgrade to a Transport::read_local hook if another channel needs it.
+        let path = std::path::Path::new(&file_path);
+        let bytes = if path.is_absolute() {
+            std::fs::read(path).with_context(|| {
+                format!("read local Telegram Bot API file {}", path.display())
+            })?
+        } else {
+            self.transport.download(&self.token, &file_path).await?
+        };
+        if bytes.len() > self.max_audio_bytes {
+            bail!("{}", audio_limit_message(self.max_audio_bytes));
+        }
         Ok(AudioClip {
             bytes,
             filename: voice.filename.clone(),
@@ -1069,6 +1082,32 @@ mod tests {
             fake.download_paths.lock().unwrap().as_slice(),
             ["voice/file.oga"]
         );
+    }
+
+    #[tokio::test]
+    async fn reads_absolute_local_bot_api_paths_from_disk() {
+        let file = crate::test_support::temp_path("local-bot-api-audio.bin");
+        std::fs::write(&file, b"local-bytes").unwrap();
+        let fake = Arc::new(FakeTransport::with_responses(vec![json!({
+            "ok": true,
+            "result": {"file_path": file.to_string_lossy()}
+        })]));
+        let telegram =
+            Telegram::with_transport("secret".to_string(), vec![7], vec![], fake.clone());
+        let voice = InboundVoice {
+            locator: "file-local".to_string(),
+            file_size: Some(11),
+            mime_type: "audio/mp4".to_string(),
+            filename: "meeting.m4a".to_string(),
+            data: None,
+            agent_handoff: true,
+        };
+
+        let clip = telegram.download_voice(&voice).await.unwrap();
+
+        assert_eq!(clip.bytes, b"local-bytes");
+        assert!(fake.download_paths.lock().unwrap().is_empty());
+        let _ = std::fs::remove_file(&file);
     }
 
     #[tokio::test]

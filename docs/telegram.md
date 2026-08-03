@@ -55,7 +55,8 @@ max_audio_bytes = 104857600
 
 Trailing slashes on the base URLs are stripped. Keep the local Bot API process
 running before `push doctor` or `push`. Omitting these keys keeps the public
-defaults.
+defaults. With `telegram-bot-api --local`, `getFile` returns absolute filesystem
+paths; Push reads those files directly instead of using `base_file_url`.
 
 `push init` creates a new config with owner-only mode `0600` on Unix. An
 environment variable remains supported through `TELEGRAM_BOT_TOKEN`. Push never
