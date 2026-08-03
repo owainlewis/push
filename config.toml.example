@@ -11,6 +11,11 @@ assistant_root = "~/Code/assistant"
 bot_token = "replace-with-the-token-from-BotFather"
 # Replace this once with your numeric Telegram user ID.
 allow_user_ids = [123456789]
+# Optional. Local Bot API server (default: public api.telegram.org).
+# base_url = "http://127.0.0.1:8081/bot"
+# base_file_url = "http://127.0.0.1:8081/file/bot"
+# Optional. Raise above 20 MiB when using a local Bot API for larger voice files.
+# max_audio_bytes = 104857600
 
 # Slack alternative. See docs/slack.md.
 # channel = "slack"

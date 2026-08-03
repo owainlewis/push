@@ -598,11 +598,18 @@ impl Gateway {
                 continue;
             }
             if let Some((thread, target)) = self.channel.accept(m) {
-                let reply_with_voice = m.voice.is_some();
-                let message_text = if reply_with_voice {
-                    "[Voice message]".to_string()
-                } else {
-                    m.text.trim().to_string()
+                let reply_with_voice = m.voice.as_ref().is_some_and(|voice| !voice.agent_handoff);
+                let message_text = match m.voice.as_ref() {
+                    Some(voice) if voice.agent_handoff => {
+                        let caption = m.text.trim();
+                        if caption.is_empty() {
+                            "[Audio file]".to_string()
+                        } else {
+                            caption.to_string()
+                        }
+                    }
+                    Some(_) => "[Voice message]".to_string(),
+                    None => m.text.trim().to_string(),
                 };
                 let approval_origin = self.channel.approval_origin(m, &thread);
                 let approval = if reply_with_voice {

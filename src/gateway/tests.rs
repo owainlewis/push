@@ -3021,6 +3021,9 @@ fn test_config(state_path: &str, _sessions_dir: &str, assistant_dir: &str) -> Co
         telegram_bot_token: None,
         telegram_allow_user_ids: Vec::new(),
         telegram_allow_chat_ids: Vec::new(),
+        telegram_base_url: crate::config::DEFAULT_TELEGRAM_BASE_URL.to_string(),
+        telegram_base_file_url: crate::config::DEFAULT_TELEGRAM_BASE_FILE_URL.to_string(),
+        telegram_max_audio_bytes: crate::config::DEFAULT_TELEGRAM_MAX_AUDIO_BYTES,
         slack_app_token: None,
         slack_bot_token: None,
         slack_allow_user_ids: Vec::new(),
@@ -3177,6 +3180,7 @@ fn telegram_voice_message(row_id: i64, user_id: i64, chat_id: i64) -> RawMessage
         mime_type: "audio/ogg".to_string(),
         filename: "voice.ogg".to_string(),
         data: Some(vec![1, 2, 3]),
+        agent_handoff: false,
     });
     message
 }

@@ -23,6 +23,9 @@ pub struct InboundVoice {
     pub filename: String,
     /// Channels that already have the bytes may provide them directly.
     pub data: Option<Vec<u8>>,
+    /// When true, Push downloads the file to disk and hands the path to the
+    /// agent instead of cloud speech-to-text (Telegram audio/document files).
+    pub agent_handoff: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +168,11 @@ impl Channel {
                     .ok_or_else(|| anyhow::anyhow!("Telegram bot token is not configured"))?,
                 cfg.telegram_allow_user_ids.clone(),
                 cfg.telegram_allow_chat_ids.clone(),
+                crate::telegram::TelegramEndpoints {
+                    base_url: cfg.telegram_base_url.clone(),
+                    base_file_url: cfg.telegram_base_file_url.clone(),
+                    max_audio_bytes: cfg.telegram_max_audio_bytes,
+                },
             ))),
             ChannelKind::Slack => Ok(Self::Slack(Slack::new(
                 cfg.slack_app_token()
@@ -755,7 +763,12 @@ mod tests {
     }
 
     fn telegram() -> Channel {
-        Channel::Telegram(Telegram::new("secret".to_string(), vec![7], vec![9]))
+        Channel::Telegram(Telegram::new(
+            "secret".to_string(),
+            vec![7],
+            vec![9],
+            crate::telegram::TelegramEndpoints::default(),
+        ))
     }
 
     fn slack() -> Channel {

@@ -11,11 +11,44 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::channel::{InboundVoice, RawMessage};
-use crate::voice::{AudioClip, MAX_AUDIO_BYTES};
+use crate::config::{
+    DEFAULT_TELEGRAM_BASE_FILE_URL, DEFAULT_TELEGRAM_BASE_URL, DEFAULT_TELEGRAM_MAX_AUDIO_BYTES,
+};
+use crate::voice::AudioClip;
 
 pub const TEXT_LIMIT: usize = 4096;
 const LONG_POLL_SECONDS: u64 = 25;
 const HTTP_TIMEOUT_SECONDS: u64 = LONG_POLL_SECONDS + 10;
+
+/// Telegram Bot API endpoint settings. Defaults match the public api.telegram.org hosts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramEndpoints {
+    pub base_url: String,
+    pub base_file_url: String,
+    pub max_audio_bytes: usize,
+}
+
+impl Default for TelegramEndpoints {
+    fn default() -> Self {
+        Self {
+            base_url: DEFAULT_TELEGRAM_BASE_URL.to_string(),
+            base_file_url: DEFAULT_TELEGRAM_BASE_FILE_URL.to_string(),
+            max_audio_bytes: DEFAULT_TELEGRAM_MAX_AUDIO_BYTES,
+        }
+    }
+}
+
+fn bot_method_url(base_url: &str, token: &str, method: &str) -> String {
+    format!("{base_url}{token}/{method}")
+}
+
+fn bot_file_url(base_file_url: &str, token: &str, file_path: &str) -> String {
+    format!("{base_file_url}{token}/{file_path}")
+}
+
+fn audio_limit_message(max_audio_bytes: usize) -> String {
+    format!("Telegram voice message exceeds the configured {max_audio_bytes} byte limit")
+}
 
 struct TransportResponse {
     status: u16,
@@ -46,6 +79,9 @@ trait Transport: Send + Sync {
 
 struct ReqwestTransport {
     client: reqwest::Client,
+    base_url: String,
+    base_file_url: String,
+    max_audio_bytes: usize,
 }
 
 impl Transport for ReqwestTransport {
@@ -56,7 +92,7 @@ impl Transport for ReqwestTransport {
         body: Value,
     ) -> TransportFuture<'a> {
         Box::pin(async move {
-            let url = format!("https://api.telegram.org/bot{token}/{method}");
+            let url = bot_method_url(&self.base_url, token, method);
             let response = self
                 .client
                 .post(url)
@@ -75,7 +111,8 @@ impl Transport for ReqwestTransport {
 
     fn download<'a>(&'a self, token: &'a str, file_path: &'a str) -> BytesFuture<'a> {
         Box::pin(async move {
-            let url = format!("https://api.telegram.org/file/bot{token}/{file_path}");
+            let url = bot_file_url(&self.base_file_url, token, file_path);
+            let max_audio_bytes = self.max_audio_bytes;
             let mut response = self
                 .client
                 .get(url)
@@ -89,23 +126,23 @@ impl Transport for ReqwestTransport {
             }
             if response
                 .content_length()
-                .is_some_and(|size| size > MAX_AUDIO_BYTES as u64)
+                .is_some_and(|size| size > max_audio_bytes as u64)
             {
-                bail!("Telegram voice message exceeds the 20 MB limit");
+                bail!("{}", audio_limit_message(max_audio_bytes));
             }
             let mut bytes = Vec::with_capacity(
                 response
                     .content_length()
                     .unwrap_or_default()
-                    .min(MAX_AUDIO_BYTES as u64) as usize,
+                    .min(max_audio_bytes as u64) as usize,
             );
             while let Some(chunk) = response
                 .chunk()
                 .await
                 .context("read Telegram voice message")?
             {
-                if bytes.len().saturating_add(chunk.len()) > MAX_AUDIO_BYTES {
-                    bail!("Telegram voice message exceeds the 20 MB limit");
+                if bytes.len().saturating_add(chunk.len()) > max_audio_bytes {
+                    bail!("{}", audio_limit_message(max_audio_bytes));
                 }
                 bytes.extend_from_slice(&chunk);
             }
@@ -120,7 +157,7 @@ impl Transport for ReqwestTransport {
         clip: &'a AudioClip,
     ) -> TransportFuture<'a> {
         Box::pin(async move {
-            let url = format!("https://api.telegram.org/bot{token}/sendVoice");
+            let url = bot_method_url(&self.base_url, token, "sendVoice");
             let mut form = reqwest::multipart::Form::new();
             let object = payload
                 .as_object()
@@ -158,17 +195,27 @@ pub struct Telegram {
     token: Arc<str>,
     allow_user_ids: Arc<HashSet<i64>>,
     allow_chat_ids: Arc<HashSet<i64>>,
+    max_audio_bytes: usize,
     transport: Arc<dyn Transport>,
 }
 
 impl Telegram {
-    pub fn new(token: String, allow_user_ids: Vec<i64>, allow_chat_ids: Vec<i64>) -> Self {
+    pub fn new(
+        token: String,
+        allow_user_ids: Vec<i64>,
+        allow_chat_ids: Vec<i64>,
+        endpoints: TelegramEndpoints,
+    ) -> Self {
         Self {
             token: Arc::from(token),
             allow_user_ids: Arc::new(allow_user_ids.into_iter().collect()),
             allow_chat_ids: Arc::new(allow_chat_ids.into_iter().collect()),
+            max_audio_bytes: endpoints.max_audio_bytes,
             transport: Arc::new(ReqwestTransport {
                 client: reqwest::Client::new(),
+                base_url: endpoints.base_url,
+                base_file_url: endpoints.base_file_url,
+                max_audio_bytes: endpoints.max_audio_bytes,
             }),
         }
     }
@@ -180,10 +227,28 @@ impl Telegram {
         allow_chat_ids: Vec<i64>,
         transport: Arc<dyn Transport>,
     ) -> Self {
+        Self::with_transport_limit(
+            token,
+            allow_user_ids,
+            allow_chat_ids,
+            DEFAULT_TELEGRAM_MAX_AUDIO_BYTES,
+            transport,
+        )
+    }
+
+    #[cfg(test)]
+    fn with_transport_limit(
+        token: String,
+        allow_user_ids: Vec<i64>,
+        allow_chat_ids: Vec<i64>,
+        max_audio_bytes: usize,
+        transport: Arc<dyn Transport>,
+    ) -> Self {
         Self {
             token: Arc::from(token),
             allow_user_ids: Arc::new(allow_user_ids.into_iter().collect()),
             allow_chat_ids: Arc::new(allow_chat_ids.into_iter().collect()),
+            max_audio_bytes,
             transport,
         }
     }
@@ -306,8 +371,11 @@ impl Telegram {
     }
 
     pub async fn download_voice(&self, voice: &InboundVoice) -> Result<AudioClip> {
-        if voice.file_size.is_some_and(|size| size > MAX_AUDIO_BYTES) {
-            bail!("Telegram voice message exceeds the 20 MB limit");
+        if voice
+            .file_size
+            .is_some_and(|size| size > self.max_audio_bytes)
+        {
+            bail!("{}", audio_limit_message(self.max_audio_bytes));
         }
         let transport_response = self
             .transport
@@ -326,7 +394,19 @@ impl Telegram {
             .result
             .context("Telegram getFile omitted the file path")?
             .file_path;
-        let bytes = self.transport.download(&self.token, &file_path).await?;
+        // Local Bot API (--local) returns an absolute filesystem path and does not
+        // serve those files over /file/bot…; read them directly.
+        // ponytail: upgrade to a Transport::read_local hook if another channel needs it.
+        let path = std::path::Path::new(&file_path);
+        let bytes = if path.is_absolute() {
+            std::fs::read(path)
+                .with_context(|| format!("read local Telegram Bot API file {}", path.display()))?
+        } else {
+            self.transport.download(&self.token, &file_path).await?
+        };
+        if bytes.len() > self.max_audio_bytes {
+            bail!("{}", audio_limit_message(self.max_audio_bytes));
+        }
         Ok(AudioClip {
             bytes,
             filename: voice.filename.clone(),
@@ -463,6 +543,8 @@ impl Update {
                 thread_id: None,
             };
         };
+        let voice = inbound_audio_attachment(&message);
+        let text = message.text.or(message.caption).unwrap_or_default();
         RawMessage {
             row_id: self.update_id,
             provider_event_id: None,
@@ -473,19 +555,84 @@ impl Update {
                 .unwrap_or_default(),
             chat_identifier: message.chat.id.to_string(),
             is_group: message.chat.kind != "private",
-            text: message.text.unwrap_or_default(),
-            voice: message.voice.map(|voice| InboundVoice {
-                locator: voice.file_id,
-                file_size: voice.file_size,
-                mime_type: voice.mime_type.unwrap_or_else(|| "audio/ogg".to_string()),
-                filename: "voice.ogg".to_string(),
-                data: None,
-            }),
+            text,
+            voice,
             is_from_me: false,
             is_supported: true,
             thread_id: message.message_thread_id,
         }
     }
+}
+
+fn inbound_audio_attachment(message: &TelegramMessage) -> Option<InboundVoice> {
+    if let Some(voice) = &message.voice {
+        return Some(InboundVoice {
+            locator: voice.file_id.clone(),
+            file_size: voice.file_size,
+            mime_type: voice
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "audio/ogg".to_string()),
+            filename: "voice.ogg".to_string(),
+            data: None,
+            agent_handoff: false,
+        });
+    }
+    if let Some(audio) = &message.audio {
+        return Some(InboundVoice {
+            locator: audio.file_id.clone(),
+            file_size: audio.file_size,
+            mime_type: audio
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "audio/mpeg".to_string()),
+            filename: audio
+                .file_name
+                .clone()
+                .unwrap_or_else(|| "audio.mp3".to_string()),
+            data: None,
+            agent_handoff: true,
+        });
+    }
+    if let Some(document) = &message.document {
+        if is_audio_document(document) {
+            return Some(InboundVoice {
+                locator: document.file_id.clone(),
+                file_size: document.file_size,
+                mime_type: document
+                    .mime_type
+                    .clone()
+                    .unwrap_or_else(|| "application/octet-stream".to_string()),
+                filename: document
+                    .file_name
+                    .clone()
+                    .unwrap_or_else(|| "audio.bin".to_string()),
+                data: None,
+                agent_handoff: true,
+            });
+        }
+    }
+    None
+}
+
+fn is_audio_document(document: &TelegramDocument) -> bool {
+    if document
+        .mime_type
+        .as_deref()
+        .is_some_and(|mime| mime.starts_with("audio/"))
+    {
+        return true;
+    }
+    let name = document
+        .file_name
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    [
+        ".ogg", ".oga", ".mp3", ".m4a", ".wav", ".flac", ".aac", ".opus", ".wma",
+    ]
+    .iter()
+    .any(|ext| name.ends_with(ext))
 }
 
 #[derive(Deserialize)]
@@ -496,7 +643,13 @@ struct TelegramMessage {
     #[serde(default)]
     text: Option<String>,
     #[serde(default)]
+    caption: Option<String>,
+    #[serde(default)]
     voice: Option<TelegramVoice>,
+    #[serde(default)]
+    audio: Option<TelegramAudio>,
+    #[serde(default)]
+    document: Option<TelegramDocument>,
     #[serde(default)]
     message_thread_id: Option<i64>,
 }
@@ -508,6 +661,28 @@ struct TelegramVoice {
     file_size: Option<usize>,
     #[serde(default)]
     mime_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TelegramAudio {
+    file_id: String,
+    #[serde(default)]
+    file_size: Option<usize>,
+    #[serde(default)]
+    mime_type: Option<String>,
+    #[serde(default)]
+    file_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TelegramDocument {
+    file_id: String,
+    #[serde(default)]
+    file_size: Option<usize>,
+    #[serde(default)]
+    mime_type: Option<String>,
+    #[serde(default)]
+    file_name: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -734,7 +909,12 @@ mod tests {
 
     #[test]
     fn allowlist_accepts_user_or_chat_id() {
-        let telegram = Telegram::new("secret".to_string(), vec![7], vec![9]);
+        let telegram = Telegram::new(
+            "secret".to_string(),
+            vec![7],
+            vec![9],
+            TelegramEndpoints::default(),
+        );
         let mut message = Update {
             update_id: 1,
             message: Some(TelegramMessage {
@@ -744,7 +924,10 @@ mod tests {
                     kind: "private".to_string(),
                 },
                 text: Some("hi".to_string()),
+                caption: None,
                 voice: None,
+                audio: None,
+                document: None,
                 message_thread_id: None,
             }),
         }
@@ -768,11 +951,14 @@ mod tests {
                     kind: "private".to_string(),
                 },
                 text: None,
+                caption: None,
                 voice: Some(TelegramVoice {
                     file_id: "file-123".to_string(),
                     file_size: Some(42),
                     mime_type: Some("audio/ogg".to_string()),
                 }),
+                audio: None,
+                document: None,
                 message_thread_id: None,
             }),
         }
@@ -782,7 +968,87 @@ mod tests {
         let voice = message.voice.unwrap();
         assert_eq!(voice.locator, "file-123");
         assert_eq!(voice.file_size, Some(42));
+        assert!(!voice.agent_handoff);
         assert!(voice.data.is_none());
+    }
+
+    #[test]
+    fn parses_audio_and_audio_documents_as_agent_handoff() {
+        let audio = Update {
+            update_id: 3,
+            message: Some(TelegramMessage {
+                from: Some(User { id: 7 }),
+                chat: Chat {
+                    id: 7,
+                    kind: "private".to_string(),
+                },
+                text: None,
+                caption: Some("planning".to_string()),
+                voice: None,
+                audio: Some(TelegramAudio {
+                    file_id: "audio-1".to_string(),
+                    file_size: Some(99),
+                    mime_type: Some("audio/mp4".to_string()),
+                    file_name: Some("meeting.m4a".to_string()),
+                }),
+                document: None,
+                message_thread_id: None,
+            }),
+        }
+        .into_raw();
+        assert_eq!(audio.text, "planning");
+        let handoff = audio.voice.unwrap();
+        assert!(handoff.agent_handoff);
+        assert_eq!(handoff.locator, "audio-1");
+        assert_eq!(handoff.filename, "meeting.m4a");
+
+        let document = Update {
+            update_id: 4,
+            message: Some(TelegramMessage {
+                from: Some(User { id: 7 }),
+                chat: Chat {
+                    id: 7,
+                    kind: "private".to_string(),
+                },
+                text: None,
+                caption: None,
+                voice: None,
+                audio: None,
+                document: Some(TelegramDocument {
+                    file_id: "doc-1".to_string(),
+                    file_size: Some(12),
+                    mime_type: None,
+                    file_name: Some("Grabadora.mp3".to_string()),
+                }),
+                message_thread_id: None,
+            }),
+        }
+        .into_raw();
+        assert!(document.voice.unwrap().agent_handoff);
+
+        let pdf = Update {
+            update_id: 5,
+            message: Some(TelegramMessage {
+                from: Some(User { id: 7 }),
+                chat: Chat {
+                    id: 7,
+                    kind: "private".to_string(),
+                },
+                text: None,
+                caption: None,
+                voice: None,
+                audio: None,
+                document: Some(TelegramDocument {
+                    file_id: "doc-2".to_string(),
+                    file_size: Some(12),
+                    mime_type: Some("application/pdf".to_string()),
+                    file_name: Some("notes.pdf".to_string()),
+                }),
+                message_thread_id: None,
+            }),
+        }
+        .into_raw();
+        assert!(pdf.voice.is_none());
     }
 
     #[tokio::test]
@@ -800,6 +1066,7 @@ mod tests {
             mime_type: "audio/ogg".to_string(),
             filename: "voice.ogg".to_string(),
             data: None,
+            agent_handoff: false,
         };
 
         let clip = telegram.download_voice(&voice).await.unwrap();
@@ -811,6 +1078,32 @@ mod tests {
             fake.download_paths.lock().unwrap().as_slice(),
             ["voice/file.oga"]
         );
+    }
+
+    #[tokio::test]
+    async fn reads_absolute_local_bot_api_paths_from_disk() {
+        let file = crate::test_support::temp_path("local-bot-api-audio.bin");
+        std::fs::write(&file, b"local-bytes").unwrap();
+        let fake = Arc::new(FakeTransport::with_responses(vec![json!({
+            "ok": true,
+            "result": {"file_path": file.to_string_lossy()}
+        })]));
+        let telegram =
+            Telegram::with_transport("secret".to_string(), vec![7], vec![], fake.clone());
+        let voice = InboundVoice {
+            locator: "file-local".to_string(),
+            file_size: Some(11),
+            mime_type: "audio/mp4".to_string(),
+            filename: "meeting.m4a".to_string(),
+            data: None,
+            agent_handoff: true,
+        };
+
+        let clip = telegram.download_voice(&voice).await.unwrap();
+
+        assert_eq!(clip.bytes, b"local-bytes");
+        assert!(fake.download_paths.lock().unwrap().is_empty());
+        let _ = std::fs::remove_file(&file);
     }
 
     #[tokio::test]
@@ -1077,5 +1370,25 @@ mod tests {
         assert!(sent
             .iter()
             .all(|chunk| chunk.encode_utf16().count() <= TEXT_LIMIT));
+    }
+
+    #[test]
+    fn bot_urls_use_configured_bases() {
+        assert_eq!(
+            bot_method_url("https://api.telegram.org/bot", "tok", "getUpdates"),
+            "https://api.telegram.org/bottok/getUpdates"
+        );
+        assert_eq!(
+            bot_file_url("https://api.telegram.org/file/bot", "tok", "voice.oga"),
+            "https://api.telegram.org/file/bottok/voice.oga"
+        );
+        assert_eq!(
+            bot_method_url("http://127.0.0.1:8081/bot", "tok", "getUpdates"),
+            "http://127.0.0.1:8081/bottok/getUpdates"
+        );
+        assert_eq!(
+            bot_file_url("http://127.0.0.1:8081/file/bot", "tok", "path/file.bin"),
+            "http://127.0.0.1:8081/file/bottok/path/file.bin"
+        );
     }
 }
