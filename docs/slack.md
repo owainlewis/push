@@ -11,7 +11,7 @@ messages.
 1. Create a Slack app for one workspace and enable Socket Mode.
 2. Create an app-level token with `connections:write`. App tokens start with
    `xapp-`.
-3. Add the bot token scopes `im:history` and `chat:write`.
+3. Add the bot token scopes `im:history`, `chat:write`, and `files:read`.
 4. Under Event Subscriptions, subscribe to the bot event `message.im`.
 5. Install or reinstall the app and open its Messages tab.
 6. Copy your stable Slack member ID, such as `U012ABCDEF`, from your profile.
@@ -57,7 +57,19 @@ names are not accepted in the allowlist.
 
 Push validates the workspace, message shape, direct-message channel type,
 sender ID, and bot origin before an event can reach an agent. Ordinary text
-messages with no Slack message subtype are the supported first phase.
+messages and `file_share` messages are supported.
+
+Send up to four JPEG, PNG, or WebP images in one DM, with or without message
+text. Their combined size must be at most 6 MiB. Images work with Claude Code,
+Codex, and Pi. Push stores only Slack file IDs, sizes, and MIME type hints in
+the durable inbox before acknowledging the event. It never stores private
+download URLs or file bytes there. After the workspace, DM, and sender
+allowlist checks pass, Push resolves current file metadata with `files.info`,
+downloads the files using the bot token, validates the shared image limits and
+file signatures, and removes the private temporary files after the turn.
+Conversation history retains only the message text or an image placeholder.
+Review the configured model provider's image and data controls before using
+this feature.
 
 Each conversation uses the stable key
 `slack:dm:<workspace-id>:<dm-channel-id>`. Replies go to the Slack thread rooted
@@ -68,7 +80,8 @@ reply.
 
 Before acknowledging an accepted Socket Mode envelope, Push commits it to a
 private SQLite inbox beside `state_path`. Ignored envelopes retain only redacted
-rejection metadata, not message content, before they are acknowledged. Slack's globally unique Events API
+rejection metadata, not message text or attachment metadata, before they are
+acknowledged. Slack's globally unique Events API
 `event_id` is the durable deduplication key, while a local monotonic row ID
 drives ordered cursor recovery. A crash before acknowledgement causes Slack to
 redeliver the same event; a restart resumes committed rows above the saved cursor. Slack does
@@ -77,7 +90,9 @@ after Slack accepts a send can still produce an ambiguous delivery.
 
 Web API rate limits are retried once using Slack's `Retry-After` header, then
 the normal Push delivery retry path applies. Replies are split at 4,000 Unicode
-characters. Slack voice messages and replies are not supported.
+characters. If image metadata or download fails, Push sends a safe retry message
+without starting an agent. Sending generated images and Slack voice messages or
+replies is not supported.
 
 For scheduled delivery, use an allowlisted Slack user ID:
 
@@ -98,6 +113,6 @@ app's direct-message conversation.
 - If messages are ignored, confirm `message.im`, `im:history`, the exact member
   ID, and that the app was reinstalled after scope changes.
 - If Slack returns `missing_scope`, confirm `connections:write` is on the app
-  token and `im:history` plus `chat:write` are on the bot token.
+  token and `im:history`, `chat:write`, plus `files:read` are on the bot token.
 - Reconnect messages are expected because Slack refreshes Socket Mode
   connections periodically. Push's dedicated receiver reconnects automatically.

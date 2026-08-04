@@ -136,8 +136,8 @@ practical structure for identity, context, shared skills, jobs, and evals.
 === "Slack"
 
     Create a Slack app with Socket Mode, `connections:write`, `im:history`,
-    `chat:write`, and the `message.im` bot event. Set the two tokens in the
-    service environment, then edit `$PUSH_HOME/config.toml`:
+    `chat:write`, `files:read`, and the `message.im` bot event. Set the two
+    tokens in the service environment, then edit `$PUSH_HOME/config.toml`:
 
     ```toml
     channel = "slack"

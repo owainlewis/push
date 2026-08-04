@@ -707,12 +707,7 @@ impl ChannelContract for Slack {
     }
 
     async fn download_image(&self, image: &InboundImage) -> Result<DownloadedImage> {
-        let Some(bytes) = &image.data else {
-            bail!("Slack image attachments are not supported yet");
-        };
-        Ok(DownloadedImage {
-            bytes: bytes.clone(),
-        })
+        self.download_image(image).await
     }
 
     fn delivery_semantics(&self) -> DeliverySemantics {

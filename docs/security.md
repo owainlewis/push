@@ -83,11 +83,16 @@ variable or move the config outside. When `voice.openai_api_key` is configured,
 chmod 600 "${PUSH_HOME:-$HOME/.push}/config.toml"
 ```
 
-Accepted Telegram images are briefly written under `$PUSH_HOME/cache` with
-owner-only permissions, passed to the selected Codex model provider, and
+Accepted Telegram and Slack images are briefly written under `$PUSH_HOME/cache`
+with owner-only permissions, passed to the selected agent backend, and
 removed when the turn ends. Conversation history retains only the caption or an
 image placeholder. Protect the cache directory while Push is running and
 review the configured model provider's image data controls.
+
+Slack's recovery inbox persists file IDs and safe size and MIME type hints, but
+not private download URLs or file bytes. Push resolves and downloads a Slack
+file with the bot token only after workspace, direct-message, and sender
+allowlist checks pass. Rejected events retain no message or attachment content.
 
 Push rejects any overlap between `assistant_root` and `PUSH_HOME`, including
 overlap through symlinks or existing ancestors. Keep the runtime root private
