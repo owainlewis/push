@@ -116,8 +116,9 @@ practical structure for identity, context, shared skills, jobs, and evals.
 
 === "iMessage"
 
-    Give the terminal or service host Full Disk Access in macOS System
-    Settings, then edit `$PUSH_HOME/config.toml`:
+    Give the terminal or service host Full Disk Access to the Messages database
+    and attachment files in macOS System Settings, then edit
+    `$PUSH_HOME/config.toml`:
 
     ```toml
     channel = "imessage"

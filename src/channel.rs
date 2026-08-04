@@ -10,10 +10,12 @@ use crate::config::{ChannelKind, Config};
 use crate::image::DownloadedImage;
 use crate::imessage::{Poller as IMessagePoller, Sender as IMessageSender};
 use crate::slack::{parse_message_target, Slack};
+use crate::store::Store;
 use crate::telegram::Telegram;
 use crate::voice::AudioClip;
 
 pub(crate) const REPLY_MARKER: &str = "\n\n-- sent by push";
+const IMESSAGE_PENDING_FILENAME_POLL_LIMIT: u8 = 3;
 
 #[derive(Debug, Clone)]
 pub struct InboundVoice {
@@ -97,8 +99,14 @@ trait ChannelContract {
     fn id(&self) -> &'static str;
     fn primary_target(&self, configured: &str) -> Result<String>;
     async fn poll(&self, since: i64) -> Result<Vec<RawMessage>>;
+    fn poll_is_complete_snapshot(&self) -> bool {
+        false
+    }
     async fn latest_cursor(&self) -> Result<i64>;
     fn accept(&self, message: &RawMessage) -> Option<(String, String)>;
+    fn should_defer(&self, _message: &RawMessage, _store: &mut Store) -> Result<bool> {
+        Ok(false)
+    }
     fn reject_reason(&self, message: &RawMessage) -> &'static str;
     fn approval_origin(&self, message: &RawMessage, thread: &str) -> AnswerOrigin;
     fn route_thread_groups(&self, thread: &str) -> Vec<Vec<String>>;
@@ -222,12 +230,28 @@ impl Channel {
         }
     }
 
+    pub fn poll_is_complete_snapshot(&self) -> bool {
+        match self {
+            Self::IMessage(channel) => ChannelContract::poll_is_complete_snapshot(channel),
+            Self::Telegram(channel) => ChannelContract::poll_is_complete_snapshot(channel),
+            Self::Slack(channel) => ChannelContract::poll_is_complete_snapshot(channel),
+        }
+    }
+
     /// Returns `(thread_key, reply_target)` for an accepted message.
     pub fn accept(&self, message: &RawMessage) -> Option<(String, String)> {
         match self {
             Self::IMessage(channel) => ChannelContract::accept(channel, message),
             Self::Telegram(channel) => ChannelContract::accept(channel, message),
             Self::Slack(channel) => ChannelContract::accept(channel, message),
+        }
+    }
+
+    pub fn should_defer(&self, message: &RawMessage, store: &mut Store) -> Result<bool> {
+        match self {
+            Self::IMessage(channel) => ChannelContract::should_defer(channel, message, store),
+            Self::Telegram(channel) => ChannelContract::should_defer(channel, message, store),
+            Self::Slack(channel) => ChannelContract::should_defer(channel, message, store),
         }
     }
 
@@ -379,7 +403,23 @@ impl ChannelContract for IMessageChannel {
                 is_group: message.is_group,
                 text: message.text,
                 voice: None,
-                images: Vec::new(),
+                images: message
+                    .attachments
+                    .into_iter()
+                    .map(|attachment| InboundImage {
+                        locator: attachment.locator.clone(),
+                        file_size: if crate::imessage::needs_conversion(
+                            &attachment.locator,
+                            attachment.mime_type.as_deref(),
+                        ) {
+                            None
+                        } else {
+                            attachment.file_size
+                        },
+                        mime_type: attachment.mime_type,
+                        data: None,
+                    })
+                    .collect(),
                 is_from_me: message.is_from_me,
                 is_supported: true,
                 thread_id: None,
@@ -390,6 +430,10 @@ impl ChannelContract for IMessageChannel {
     async fn latest_cursor(&self) -> Result<i64> {
         let poller = self.poller.clone();
         tokio::task::spawn_blocking(move || poller.max_row_id()).await?
+    }
+
+    fn poll_is_complete_snapshot(&self) -> bool {
+        true
     }
 
     fn accept(&self, message: &RawMessage) -> Option<(String, String)> {
@@ -412,6 +456,23 @@ impl ChannelContract for IMessageChannel {
             }
         }
         None
+    }
+
+    fn should_defer(&self, message: &RawMessage, store: &mut Store) -> Result<bool> {
+        let pending = message
+            .images
+            .iter()
+            .any(|image| image.locator.trim().is_empty());
+        if pending {
+            store.should_defer_pending_filename(
+                self.id(),
+                message.row_id,
+                IMESSAGE_PENDING_FILENAME_POLL_LIMIT,
+            )
+        } else {
+            store.clear_pending_filename(self.id(), message.row_id)?;
+            Ok(false)
+        }
     }
 
     fn reject_reason(&self, message: &RawMessage) -> &'static str {
@@ -476,12 +537,7 @@ impl ChannelContract for IMessageChannel {
     }
 
     async fn download_image(&self, image: &InboundImage) -> Result<DownloadedImage> {
-        let Some(bytes) = &image.data else {
-            bail!("iMessage image attachments are not supported yet");
-        };
-        Ok(DownloadedImage {
-            bytes: bytes.clone(),
-        })
+        self.poller.download_image(image).await
     }
 }
 

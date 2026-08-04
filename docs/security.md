@@ -83,11 +83,17 @@ variable or move the config outside. When `voice.openai_api_key` is configured,
 chmod 600 "${PUSH_HOME:-$HOME/.push}/config.toml"
 ```
 
-Accepted Telegram and Slack images are briefly written under `$PUSH_HOME/cache`
-with owner-only permissions, passed to the selected agent backend, and
-removed when the turn ends. Conversation history retains only the caption or an
-image placeholder. Protect the cache directory while Push is running and
-review the configured model provider's image data controls.
+Accepted iMessage, Telegram, and Slack images are briefly written under
+`$PUSH_HOME/cache` with owner-only permissions, passed to the selected agent
+backend, and removed when the turn ends. Conversation history retains only the
+message text or an image placeholder. Protect the cache directory while Push
+is running and review the configured model provider's image data controls.
+
+iMessage polling stores only attachment paths and safe metadata in memory. It
+opens files only after conversation and sender acceptance, and only when their
+canonical paths remain under the Messages attachment directory. HEIC and HEIF
+conversion uses macOS `sips` in a separate owner-only temporary directory that
+is removed immediately after conversion.
 
 Slack's recovery inbox persists file IDs and safe size and MIME type hints, but
 not private download URLs or file bytes. Push resolves and downloads a Slack

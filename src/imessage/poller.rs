@@ -1,9 +1,12 @@
 //! Reads new messages directly from the macOS Messages SQLite database.
 
+use std::path::{Path, PathBuf};
+
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags};
 
 use super::attributed_body;
+use super::Attachment;
 
 /// One inbound iMessage row relevant to the gateway.
 #[derive(Debug, Clone)]
@@ -17,12 +20,14 @@ pub struct Message {
     pub is_group: bool,
     pub text: String,
     pub is_from_me: bool,
+    pub attachments: Vec<Attachment>,
 }
 
 /// Poller reads `chat.db` read-only via rusqlite.
 #[derive(Clone)]
 pub struct Poller {
     db_path: String,
+    attachment_root: PathBuf,
 }
 
 // Only real text messages: exclude tapbacks/reactions (associated_message_type)
@@ -38,9 +43,27 @@ LEFT JOIN chat c ON c.ROWID = cmj.chat_id \
 WHERE m.ROWID > ?1 AND m.associated_message_type = 0 AND m.item_type = 0 \
 ORDER BY m.ROWID ASC";
 
+const SELECT_ATTACHMENTS: &str = "\
+SELECT a.filename, a.total_bytes, a.mime_type \
+FROM message_attachment_join maj \
+JOIN attachment a ON a.ROWID = maj.attachment_id \
+WHERE maj.message_id = ?1 \
+  AND COALESCE(a.is_sticker, 0) = 0 \
+  AND COALESCE(a.hide_attachment, 0) = 0 \
+  AND COALESCE(a.mime_type, '') NOT LIKE 'video/%' \
+  AND COALESCE(a.uti, '') NOT IN ('public.movie', 'com.apple.quicktime-movie') \
+ORDER BY maj.ROWID ASC, a.ROWID ASC";
+
 impl Poller {
     pub fn new(db_path: String) -> Self {
-        Self { db_path }
+        let attachment_root = Path::new(&db_path)
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("Attachments");
+        Self {
+            db_path,
+            attachment_root,
+        }
     }
 
     fn open(&self) -> Result<Connection> {
@@ -69,11 +92,32 @@ impl Poller {
                 chat_identifier: row.get(5)?,
                 is_group: participant_count > 1,
                 is_from_me: is_from_me == 1,
+                attachments: Vec::new(),
             })
         })?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
+        }
+        let mut attachments = conn.prepare(SELECT_ATTACHMENTS)?;
+        for message in &mut out {
+            let rows = attachments.query_map([message.row_id], |row| {
+                let locator: Option<String> = row.get(0)?;
+                let bytes: Option<i64> = row.get(1)?;
+                let mime_type: Option<String> = row.get(2)?;
+                Ok((locator, bytes, mime_type))
+            })?;
+            let mut message_attachments = Vec::new();
+            for row in rows {
+                let (locator, bytes, mime_type) = row?;
+                let locator = locator.unwrap_or_default();
+                message_attachments.push(Attachment {
+                    locator,
+                    file_size: bytes.and_then(|value| usize::try_from(value).ok()),
+                    mime_type,
+                });
+            }
+            message.attachments = message_attachments;
         }
         Ok(out)
     }
@@ -87,12 +131,19 @@ impl Poller {
         })?;
         Ok(v)
     }
+
+    pub async fn download_image(
+        &self,
+        image: &crate::channel::InboundImage,
+    ) -> Result<crate::image::DownloadedImage> {
+        super::download_image(&self.attachment_root, image).await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::temp_path;
+    use crate::test_support::{temp_dir, temp_path};
     use rusqlite::Connection;
 
     #[test]
@@ -157,6 +208,126 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[test]
+    fn poll_joins_ordered_attachment_metadata_without_opening_files() {
+        let root = temp_dir("chat-db-attachments");
+        let path = root.join("chat.db");
+        let conn = Connection::open(&path).unwrap();
+        create_schema(&conn);
+        insert_handle(&conn, 1, "+15551234567");
+        insert_chat(&conn, 1, "+15551234567");
+        insert_chat_handle(&conn, 1, 1);
+        insert_message(&conn, 1, Some(""), None, 0, 0, 0, 1, 1);
+        insert_attachment(
+            &conn,
+            1,
+            1,
+            "missing-first.png",
+            Some("image/png"),
+            Some(12),
+        );
+        insert_attachment(
+            &conn,
+            2,
+            1,
+            "missing-second.heic",
+            Some("image/heic"),
+            Some(24),
+        );
+        conn.execute(
+            "INSERT INTO attachment (
+                ROWID, filename, uti, mime_type, total_bytes, is_sticker
+             ) VALUES (3, 'sticker.png', 'public.png', 'image/png', 10, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message_attachment_join (message_id, attachment_id) VALUES (1, 3)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO attachment (
+                ROWID, filename, uti, mime_type, total_bytes
+             ) VALUES (4, 'live.mov', 'com.apple.quicktime-movie', 'video/quicktime', 10)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message_attachment_join (message_id, attachment_id) VALUES (1, 4)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let got = Poller::new(path.to_string_lossy().to_string())
+            .poll(0)
+            .unwrap();
+
+        assert_eq!(got.len(), 1);
+        assert!(got[0].text.is_empty());
+        assert_eq!(
+            got[0].attachments,
+            vec![
+                Attachment {
+                    locator: "missing-first.png".to_string(),
+                    file_size: Some(12),
+                    mime_type: Some("image/png".to_string()),
+                },
+                Attachment {
+                    locator: "missing-second.heic".to_string(),
+                    file_size: Some(24),
+                    mime_type: Some("image/heic".to_string()),
+                },
+            ]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn poll_observes_when_attachment_filename_becomes_ready() {
+        let root = temp_dir("chat-db-pending-attachment");
+        let path = root.join("chat.db");
+        let conn = Connection::open(&path).unwrap();
+        create_schema(&conn);
+        insert_handle(&conn, 1, "+15551234567");
+        insert_chat(&conn, 1, "+15551234567");
+        insert_chat_handle(&conn, 1, 1);
+        insert_message(&conn, 1, Some("photo"), None, 0, 0, 0, 1, 1);
+        insert_message(&conn, 2, Some("later"), None, 0, 0, 0, 1, 1);
+        conn.execute(
+            "INSERT INTO attachment (ROWID, filename, mime_type, total_bytes)
+             VALUES (1, NULL, 'image/heic', 24)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message_attachment_join (message_id, attachment_id) VALUES (1, 1)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let poller = Poller::new(path.to_string_lossy().to_string());
+        let pending = poller.poll(0).unwrap();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].attachments[0].locator, "");
+
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE attachment SET filename = 'missing-photo.heic' WHERE ROWID = 1",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let ready = poller.poll(0).unwrap();
+        assert_eq!(ready.len(), 2);
+        assert_eq!(ready[0].row_id, 1);
+        assert_eq!(ready[0].attachments[0].locator, "missing-photo.heic");
+        assert_eq!(ready[1].row_id, 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     fn create_schema(conn: &Connection) {
         conn.execute_batch(
             "
@@ -173,6 +344,19 @@ mod tests {
             CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, chat_identifier TEXT NOT NULL);
             CREATE TABLE chat_message_join (message_id INTEGER NOT NULL, chat_id INTEGER NOT NULL);
             CREATE TABLE chat_handle_join (chat_id INTEGER NOT NULL, handle_id INTEGER NOT NULL);
+            CREATE TABLE attachment (
+                ROWID INTEGER PRIMARY KEY,
+                filename TEXT,
+                uti TEXT,
+                mime_type TEXT,
+                total_bytes INTEGER,
+                is_sticker INTEGER DEFAULT 0,
+                hide_attachment INTEGER DEFAULT 0
+            );
+            CREATE TABLE message_attachment_join (
+                message_id INTEGER NOT NULL,
+                attachment_id INTEGER NOT NULL
+            );
             ",
         )
         .unwrap();
@@ -198,6 +382,27 @@ mod tests {
         conn.execute(
             "INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (?1, ?2)",
             (chat_id, handle_id),
+        )
+        .unwrap();
+    }
+
+    fn insert_attachment(
+        conn: &Connection,
+        row_id: i64,
+        message_id: i64,
+        filename: &str,
+        mime_type: Option<&str>,
+        total_bytes: Option<i64>,
+    ) {
+        conn.execute(
+            "INSERT INTO attachment (ROWID, filename, mime_type, total_bytes)
+             VALUES (?1, ?2, ?3, ?4)",
+            (row_id, filename, mime_type, total_bytes),
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message_attachment_join (message_id, attachment_id) VALUES (?1, ?2)",
+            (message_id, row_id),
         )
         .unwrap();
     }

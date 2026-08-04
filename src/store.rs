@@ -44,6 +44,8 @@ pub struct Store {
     #[cfg(test)]
     cursor_save_failures_remaining: usize,
     #[cfg(test)]
+    completed_row_save_failures_remaining: usize,
+    #[cfg(test)]
     session_save_failures_remaining: usize,
 }
 
@@ -92,6 +94,8 @@ impl Store {
             conn,
             #[cfg(test)]
             cursor_save_failures_remaining: 0,
+            #[cfg(test)]
+            completed_row_save_failures_remaining: 0,
             #[cfg(test)]
             session_save_failures_remaining: 0,
         };
@@ -145,19 +149,177 @@ impl Store {
             self.cursor_save_failures_remaining -= 1;
             return Err(anyhow::anyhow!("injected cursor save failure"));
         }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .with_context(|| {
+                format!(
+                    "begin {channel} cursor transaction in {}",
+                    self.database_path.display()
+                )
+            })?;
+        insert_monotonic_cursor(&tx, channel, id).with_context(|| {
+            format!(
+                "advance {channel} cursor transactionally in {}",
+                self.database_path.display()
+            )
+        })?;
+        tx.execute(
+            "DELETE FROM channel_completed_rows
+             WHERE channel = ?1
+               AND row_id <= COALESCE(
+                   (SELECT cursor FROM channel_cursors WHERE channel = ?1),
+                   0
+               )",
+            [channel],
+        )
+        .with_context(|| {
+            format!(
+                "prune {channel} completed rows in {}",
+                self.database_path.display()
+            )
+        })?;
+        tx.execute(
+            "DELETE FROM channel_pending_filename_polls
+             WHERE channel = ?1
+               AND row_id <= COALESCE(
+                   (SELECT cursor FROM channel_cursors WHERE channel = ?1),
+                   0
+               )",
+            [channel],
+        )
+        .with_context(|| {
+            format!(
+                "prune {channel} pending filename rows in {}",
+                self.database_path.display()
+            )
+        })?;
+        tx.commit().with_context(|| {
+            format!(
+                "commit {channel} cursor transaction in {}",
+                self.database_path.display()
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn mark_row_completed(&mut self, channel: &str, row_id: i64) -> Result<()> {
+        validate_channel(channel)?;
+        #[cfg(test)]
+        if self.completed_row_save_failures_remaining > 0 {
+            self.completed_row_save_failures_remaining -= 1;
+            return Err(anyhow::anyhow!("injected completed row save failure"));
+        }
         self.conn
             .execute(
-                "INSERT INTO channel_cursors (channel, cursor)
-                 VALUES (?1, ?2)
-                 ON CONFLICT(channel) DO UPDATE SET
-                     cursor = excluded.cursor,
-                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                 WHERE excluded.cursor > channel_cursors.cursor",
-                params![channel, id],
+                "INSERT OR IGNORE INTO channel_completed_rows (channel, row_id)
+                 VALUES (?1, ?2)",
+                params![channel, row_id],
             )
             .with_context(|| {
                 format!(
-                    "advance {channel} cursor transactionally in {}",
+                    "persist {channel} completed row {row_id} in {}",
+                    self.database_path.display()
+                )
+            })?;
+        Ok(())
+    }
+
+    pub fn completed_rows_after(&self, channel: &str, cursor: i64) -> Result<Vec<i64>> {
+        validate_channel(channel)?;
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT row_id FROM channel_completed_rows
+                 WHERE channel = ?1 AND row_id > ?2
+                 ORDER BY row_id",
+            )
+            .with_context(|| {
+                format!(
+                    "prepare {channel} completed row read from {}",
+                    self.database_path.display()
+                )
+            })?;
+        let rows = statement
+            .query_map(params![channel, cursor], |row| row.get(0))
+            .with_context(|| {
+                format!(
+                    "read {channel} completed rows from {}",
+                    self.database_path.display()
+                )
+            })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().with_context(|| {
+            format!(
+                "decode {channel} completed rows from {}",
+                self.database_path.display()
+            )
+        })
+    }
+
+    pub fn should_defer_pending_filename(
+        &mut self,
+        channel: &str,
+        row_id: i64,
+        poll_limit: u8,
+    ) -> Result<bool> {
+        validate_channel(channel)?;
+        let exhausted = i64::from(poll_limit) + 1;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .with_context(|| {
+                format!(
+                    "begin {channel} pending filename transaction in {}",
+                    self.database_path.display()
+                )
+            })?;
+        tx.execute(
+            "INSERT INTO channel_pending_filename_polls (channel, row_id, polls)
+             VALUES (?1, ?2, 1)
+             ON CONFLICT(channel, row_id) DO UPDATE SET
+                 polls = MIN(channel_pending_filename_polls.polls + 1, ?3),
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+            params![channel, row_id, exhausted],
+        )
+        .with_context(|| {
+            format!(
+                "advance {channel} pending filename row {row_id} in {}",
+                self.database_path.display()
+            )
+        })?;
+        let polls: i64 = tx
+            .query_row(
+                "SELECT polls FROM channel_pending_filename_polls
+                 WHERE channel = ?1 AND row_id = ?2",
+                params![channel, row_id],
+                |row| row.get(0),
+            )
+            .with_context(|| {
+                format!(
+                    "read {channel} pending filename row {row_id} from {}",
+                    self.database_path.display()
+                )
+            })?;
+        tx.commit().with_context(|| {
+            format!(
+                "commit {channel} pending filename transaction in {}",
+                self.database_path.display()
+            )
+        })?;
+        Ok(polls <= i64::from(poll_limit))
+    }
+
+    pub fn clear_pending_filename(&mut self, channel: &str, row_id: i64) -> Result<()> {
+        validate_channel(channel)?;
+        self.conn
+            .execute(
+                "DELETE FROM channel_pending_filename_polls
+                 WHERE channel = ?1 AND row_id = ?2",
+                params![channel, row_id],
+            )
+            .with_context(|| {
+                format!(
+                    "clear {channel} pending filename row {row_id} from {}",
                     self.database_path.display()
                 )
             })?;
@@ -409,6 +571,11 @@ impl Store {
     #[cfg(test)]
     pub fn fail_next_cursor_save_for_test(&mut self) {
         self.cursor_save_failures_remaining += 1;
+    }
+
+    #[cfg(test)]
+    pub fn fail_next_completed_row_save_for_test(&mut self) {
+        self.completed_row_save_failures_remaining += 1;
     }
 
     #[cfg(test)]
@@ -701,6 +868,79 @@ mod tests {
                 .unwrap(),
             ("new".into(), true)
         );
+        cleanup(&database_path, &state_path);
+    }
+
+    #[test]
+    fn completed_rows_survive_reopen_and_are_pruned_by_cursor() {
+        let (database_path, state_path) = temp_paths();
+        let mut store = open(&database_path, &state_path);
+        store.mark_row_completed("imessage", 12).unwrap();
+        store.mark_row_completed("imessage", 14).unwrap();
+        store.mark_row_completed("telegram", 13).unwrap();
+        drop(store);
+
+        let mut reopened = open(&database_path, &state_path);
+        assert_eq!(
+            reopened.completed_rows_after("imessage", 0).unwrap(),
+            vec![12, 14]
+        );
+        assert_eq!(
+            reopened.completed_rows_after("telegram", 0).unwrap(),
+            vec![13]
+        );
+
+        reopened.set_cursor("imessage", 12).unwrap();
+        assert_eq!(
+            reopened.completed_rows_after("imessage", 0).unwrap(),
+            vec![14]
+        );
+        reopened.set_cursor("imessage", 14).unwrap();
+        assert!(reopened
+            .completed_rows_after("imessage", 0)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            reopened.completed_rows_after("telegram", 0).unwrap(),
+            vec![13]
+        );
+        cleanup(&database_path, &state_path);
+    }
+
+    #[test]
+    fn pending_filename_grace_survives_reopen_and_clears() {
+        let (database_path, state_path) = temp_paths();
+        let mut store = open(&database_path, &state_path);
+        assert!(store
+            .should_defer_pending_filename("imessage", 12, 3)
+            .unwrap());
+        drop(store);
+
+        let mut reopened = open(&database_path, &state_path);
+        assert!(reopened
+            .should_defer_pending_filename("imessage", 12, 3)
+            .unwrap());
+        drop(reopened);
+
+        let mut reopened = open(&database_path, &state_path);
+        assert!(reopened
+            .should_defer_pending_filename("imessage", 12, 3)
+            .unwrap());
+        assert!(!reopened
+            .should_defer_pending_filename("imessage", 12, 3)
+            .unwrap());
+        assert!(!reopened
+            .should_defer_pending_filename("imessage", 12, 3)
+            .unwrap());
+
+        reopened.clear_pending_filename("imessage", 12).unwrap();
+        assert!(reopened
+            .should_defer_pending_filename("imessage", 12, 3)
+            .unwrap());
+        reopened.set_cursor("imessage", 12).unwrap();
+        assert!(reopened
+            .should_defer_pending_filename("imessage", 12, 3)
+            .unwrap());
         cleanup(&database_path, &state_path);
     }
 

@@ -425,7 +425,11 @@ Files: [`src/imessage/`](src/imessage/)
 - Uses local row IDs as the monotonic cursor.
 - Sends through `osascript`.
 - Keeps legacy unprefixed route and session aliases for migration.
-- Supports text only.
+- Joins ordered attachment metadata during polling without opening files.
+- Opens images only after acceptance, confines canonical paths to the Messages
+  attachment directory, and converts HEIC or HEIF locally with `sips`.
+- Applies provider-neutral image limits and temporary-file cleanup before
+  passing images to Claude Code, Codex, or Pi.
 
 ### Telegram
 

@@ -10,7 +10,7 @@ use crate::approval::{parse_answer, AnswerOrigin, AnswerOutcome, NormalizedAnswe
 #[cfg(test)]
 use crate::approval::{DeliveryStatus as ApprovalDeliveryStatus, Question, QuestionState};
 
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 14;
 const RETIRED_JOB_APPROVAL_ERROR: &str = "job approval was removed; request direct job creation";
 const MAX_HISTORY_READ_BYTES: usize = 8 * 1024;
 const READ_TRUNCATED: &str = "\n[truncated by push while reading history]";
@@ -938,6 +938,31 @@ fn migrate(conn: &Connection) -> Result<()> {
             }],
         )?;
         conn.execute_batch("PRAGMA user_version = 12;")?;
+    }
+    if version <= 12 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS channel_completed_rows (
+                 channel TEXT NOT NULL,
+                 row_id INTEGER NOT NULL,
+                 completed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                 PRIMARY KEY(channel, row_id),
+                 CHECK(length(trim(channel)) > 0)
+             );
+             PRAGMA user_version = 13;",
+        )?;
+    }
+    if version <= 13 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS channel_pending_filename_polls (
+                 channel TEXT NOT NULL,
+                 row_id INTEGER NOT NULL,
+                 polls INTEGER NOT NULL CHECK(polls > 0),
+                 updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                 PRIMARY KEY(channel, row_id),
+                 CHECK(length(trim(channel)) > 0)
+             );
+             PRAGMA user_version = 14;",
+        )?;
     }
     conn.execute_batch("COMMIT;")?;
     Ok(())

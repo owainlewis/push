@@ -8,8 +8,9 @@ iMessage API or expose a network service.
 
 - macOS with Messages signed in
 - Full Disk Access for the terminal or service process running Push
-- access to `~/Library/Messages/chat.db`
+- access to `~/Library/Messages/chat.db` and `~/Library/Messages/Attachments`
 - `osascript` on `PATH`
+- `/usr/bin/sips` for HEIC and HEIF image conversion
 
 Run `push doctor` from the same user and environment as the long-running
 service. A successful interactive check does not prove that a separate service
@@ -46,11 +47,42 @@ sensitivity.
 Treat every allowed handle as an operator of the configured backend. A sender
 can ask the agent to use any capability allowed by that agent's configuration.
 
+## Image messages
+
+Send up to four JPEG, PNG, WebP, HEIC, or HEIF images in one accepted
+conversation, with or without message text. Their combined prepared size must
+be at most 6 MiB. Each HEIC or HEIF source must be at most 32 MiB before local
+conversion. Images work with Claude Code, Codex, and Pi.
+
+Polling reads attachment paths, byte-size hints, and MIME type hints from
+`chat.db`; it does not open the attachment files. After the direct-message,
+sender, reply-marker, and message checks pass, an accepted attachment with no
+filename gets a three-poll grace period. Push leaves that row unacknowledged so
+the cursor cannot skip the image, while rejected and later ready messages can
+continue. If the filename is still blank after the grace period, the worker
+treats it as missing and sends the safe fallback. The worker canonicalizes each
+ready path and requires it to remain under `~/Library/Messages/Attachments` (or
+the `Attachments` directory beside a custom `imessage.db_path`). Missing files,
+directories, escaping symlinks, and unsupported documents are rejected with a
+safe retry reply before an agent starts.
+
+JPEG, PNG, and WebP files go through the shared byte limit and signature
+validation directly. Push converts HEIC and HEIF locally with macOS `sips` in
+an owner-only temporary directory, validates the resulting JPEG against the
+same shared limit, and removes the conversion file immediately. The prepared
+agent handoff files are also owner-only and are removed after the turn.
+Conversation history retains only the message text or an image placeholder,
+not image bytes or local attachment paths. Review the configured backend's
+image and data controls before using this feature.
+
+Sending generated images back through iMessage is not supported.
+
 ## What Push ignores
 
 - group chats
 - tapbacks and Messages system rows
-- blank messages
+- blank messages without an image attachment
+- stickers, videos, and Live Photo video components
 - messages from handles outside the allowlist
 - Push's own replies containing the built-in Push reply marker
 
@@ -97,6 +129,10 @@ process, and rerun:
 ```sh
 push doctor
 ```
+
+Image messages also require that the same process can read
+`~/Library/Messages/Attachments`. Recheck Full Disk Access if text works but
+images fail.
 
 ### Messages are ignored
 
