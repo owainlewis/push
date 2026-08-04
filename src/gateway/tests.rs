@@ -8,6 +8,8 @@ use crate::imessage::{Poller, Sender};
 use crate::voice::{AudioClip, VoiceFuture, VoiceProvider};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use uuid::Uuid;
 
 struct FakeVoice;
@@ -1805,6 +1807,140 @@ async fn telegram_image_is_available_to_the_agent_and_removed_after_the_turn() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn slack_images_reach_every_agent_backend_and_are_removed_after_each_turn() {
+    for (backend, name) in [
+        (AgentBackend::Claude, "claude"),
+        (AgentBackend::Codex, "codex"),
+        (AgentBackend::Pi, "pi"),
+    ] {
+        let state_path = temp_state_path();
+        let sessions_dir = temp_path(&format!("slack-{name}-image-sessions"));
+        let assistant_dir = temp_path(&format!("slack-{name}-image-assistant"));
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        let calls = Arc::new(Mutex::new(Vec::<FakeRunCall>::new()));
+        let mut cfg = test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        );
+        cfg.channel = "slack".to_string();
+        cfg.agent = name.to_string();
+        cfg.slack_app_token = Some("xapp-test".to_string());
+        cfg.slack_bot_token = Some("xoxb-test".to_string());
+        cfg.slack_allow_user_ids = vec!["U1".to_string()];
+        let mut gateway = Gateway::new(cfg).unwrap();
+        gateway.ctx.runners = Arc::new(HashMap::from([(
+            backend,
+            Runner::Fake(FakeRunner {
+                backend,
+                session_id: "fake-session".to_string(),
+                calls: calls.clone(),
+                before_return: None,
+                wait_for_release: None,
+                failure: None,
+                resume_missing_once: None,
+            }),
+        )]));
+
+        run_messages(
+            &mut gateway,
+            vec![slack_image_message(1, "U1", "", Some(valid_png()))],
+        )
+        .await;
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "{name}");
+        assert_eq!(
+            crate::prompt::current_message(&calls[0].prompt).as_deref(),
+            Some("[Image attachment]"),
+            "{name}"
+        );
+        assert_eq!(calls[0].images.len(), 1, "{name}");
+        assert!(!calls[0].images[0].exists(), "{name}");
+        drop(calls);
+
+        let _ = std::fs::remove_file(&state_path);
+        let _ = std::fs::remove_file(format!("{state_path}.db"));
+        let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+        let _ = std::fs::remove_file(format!("{state_path}.slack-inbox.db"));
+        let _ = std::fs::remove_dir_all(format!("{state_path}.cache"));
+        let _ = std::fs::remove_dir_all(sessions_dir);
+        let _ = std::fs::remove_dir_all(assistant_dir);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn slack_download_failure_replies_without_running_an_agent() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 2048];
+        let read = stream.read(&mut request).await.unwrap();
+        let request = String::from_utf8_lossy(&request[..read]);
+        assert!(request.starts_with("POST /files.info HTTP/1.1"));
+        assert!(request.contains("authorization: Bearer xoxb-test"));
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 37\r\nconnection: close\r\n\r\n{\"ok\":false,\"error\":\"file_not_found\"}",
+            )
+            .await
+            .unwrap();
+    });
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("slack-download-failure-sessions");
+    let assistant_dir = temp_path("slack-download-failure-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::<FakeRunCall>::new()));
+    let mut cfg = test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    );
+    cfg.channel = "slack".to_string();
+    cfg.slack_app_token = Some("xapp-test".to_string());
+    cfg.slack_bot_token = Some("xoxb-test".to_string());
+    cfg.slack_allow_user_ids = vec!["U1".to_string()];
+    let inbox_path = cfg.paths.inbox.clone();
+    let mut gateway = Gateway::new(cfg).unwrap();
+    gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+    let channel = Channel::Slack(
+        crate::slack::Slack::with_api_base(
+            "xapp-test".to_string(),
+            "xoxb-test".to_string(),
+            vec!["U1".to_string()],
+            &inbox_path,
+            format!("http://{address}"),
+        )
+        .unwrap(),
+    );
+    gateway.channel = channel.clone();
+    gateway.ctx.channel = channel;
+
+    run_messages(
+        &mut gateway,
+        vec![slack_image_message(1, "U1", "inspect", None)],
+    )
+    .await;
+
+    assert!(calls.lock().unwrap().is_empty());
+    assert_eq!(gateway.ctx.sent_replies.lock().unwrap().len(), 1);
+    assert!(gateway.ctx.sent_replies.lock().unwrap()[0]
+        .1
+        .contains("JPEG, PNG, or WebP"));
+    assert_eq!(gateway.store.lock().unwrap().cursor("slack").unwrap(), 1);
+    server.await.unwrap();
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_file(inbox_path);
+    let _ = std::fs::remove_dir_all(format!("{state_path}.cache"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn telegram_image_only_and_captioned_messages_reach_pi() {
     let state_path = temp_state_path();
     let sessions_dir = temp_path("pi-image-sessions");
@@ -3496,4 +3632,35 @@ fn telegram_image_message(row_id: i64, user_id: i64, chat_id: i64, caption: &str
         data: Some(b"\x89PNG\r\n\x1a\nbody".to_vec()),
     });
     message
+}
+
+fn valid_png() -> Vec<u8> {
+    b"\x89PNG\r\n\x1a\nbody".to_vec()
+}
+
+fn slack_image_message(
+    row_id: i64,
+    user_id: &str,
+    text: &str,
+    data: Option<Vec<u8>>,
+) -> RawMessage {
+    RawMessage {
+        row_id,
+        provider_event_id: Some(format!("Ev{row_id}")),
+        channel: "slack",
+        handle: user_id.to_string(),
+        chat_identifier: "T1|D1|1.2".to_string(),
+        text: text.to_string(),
+        voice: None,
+        images: vec![InboundImage {
+            locator: "F1".to_string(),
+            file_size: Some(12),
+            mime_type: Some("image/png".to_string()),
+            data,
+        }],
+        is_from_me: false,
+        is_group: false,
+        is_supported: true,
+        thread_id: None,
+    }
 }

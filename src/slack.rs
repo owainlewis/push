@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, StatusCode, Url};
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
@@ -17,7 +17,8 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-use crate::channel::RawMessage;
+use crate::channel::{InboundImage, RawMessage};
+use crate::image::{DownloadedImage, MAX_IMAGE_BYTES};
 
 const API_BASE: &str = "https://slack.com/api";
 pub(crate) const MAX_TEXT_CHARS: usize = 4_000;
@@ -69,6 +70,14 @@ struct Event {
     is_group: bool,
     is_from_me: bool,
     is_supported: bool,
+    files: Vec<SlackFile>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+struct SlackFile {
+    id: String,
+    size: Option<usize>,
+    mimetype: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -87,6 +96,16 @@ struct ApiResponse {
     url: Option<String>,
     team_id: Option<String>,
     user_id: Option<String>,
+    file: Option<ApiFile>,
+}
+
+#[derive(Deserialize)]
+struct ApiFile {
+    id: String,
+    size: Option<usize>,
+    mimetype: Option<String>,
+    url_private: Option<String>,
+    url_private_download: Option<String>,
 }
 
 impl Drop for ReceiverTask {
@@ -113,7 +132,7 @@ impl Slack {
         )
     }
 
-    fn with_api_base(
+    pub(crate) fn with_api_base(
         app_token: String,
         bot_token: String,
         allow_user_ids: Vec<String>,
@@ -131,6 +150,7 @@ impl Slack {
                 inbox: Mutex::new(Inbox::open(inbox_path)?),
                 client: Client::builder()
                     .timeout(Duration::from_secs(25))
+                    .redirect(reqwest::redirect::Policy::none())
                     .build()
                     .context("build Slack HTTP client")?,
                 api_base,
@@ -197,6 +217,72 @@ impl Slack {
             )
             .await?;
         Ok(())
+    }
+
+    pub async fn download_image(&self, image: &InboundImage) -> Result<DownloadedImage> {
+        if let Some(bytes) = &image.data {
+            return Ok(DownloadedImage {
+                bytes: bytes.clone(),
+            });
+        }
+        let response = self
+            .state
+            .api(
+                "files.info",
+                &self.state.bot_token,
+                json!({"file": image.locator}),
+            )
+            .await?;
+        let file = response.file.context("Slack files.info omitted file")?;
+        if file.id != image.locator {
+            bail!("Slack files.info returned a different file");
+        }
+        if !matches!(
+            file.mimetype.as_deref(),
+            Some("image/jpeg" | "image/png" | "image/webp")
+        ) {
+            bail!("Slack file is not a supported JPEG, PNG, or WebP image");
+        }
+        if file.size.is_some_and(|size| size > MAX_IMAGE_BYTES) {
+            bail!("Slack image exceeds the 6 MiB limit");
+        }
+        let private_url = file
+            .url_private_download
+            .or(file.url_private)
+            .context("Slack files.info omitted a private download URL")?;
+        let private_url = validated_private_url(&self.state.api_base, &private_url)?;
+        let mut response = self
+            .state
+            .client
+            .get(private_url)
+            .bearer_auth(&self.state.bot_token)
+            .send()
+            .await
+            .map_err(|_| anyhow::anyhow!("download Slack image failed"))?;
+        if !response.status().is_success() {
+            bail!(
+                "Slack image download failed with status {}",
+                response.status()
+            );
+        }
+        if response
+            .content_length()
+            .is_some_and(|size| size > MAX_IMAGE_BYTES as u64)
+        {
+            bail!("Slack image exceeds the 6 MiB limit");
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| anyhow::anyhow!("read Slack image download failed"))?
+        {
+            if bytes.len().saturating_add(chunk.len()) > MAX_IMAGE_BYTES {
+                bail!("Slack image exceeds the 6 MiB limit");
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(DownloadedImage { bytes })
     }
 
     fn resolve_target(&self, target: &str) -> Result<(String, Option<String>)> {
@@ -357,6 +443,7 @@ impl State {
                 && self.allow_user_ids.contains(&event.user);
             if !accepted {
                 event.text.clear();
+                event.files.clear();
             }
             self.inbox.lock().unwrap().insert(&event)?;
             true
@@ -378,6 +465,30 @@ impl State {
             .await
             .context("acknowledge Slack Socket Mode envelope")
     }
+}
+
+fn validated_private_url(api_base: &str, value: &str) -> Result<Url> {
+    let url = Url::parse(value).context("Slack returned an invalid private download URL")?;
+    let base = Url::parse(api_base).context("invalid Slack API base URL")?;
+    let host = url
+        .host_str()
+        .context("Slack private download URL omitted a host")?;
+    let is_production = base.host_str() == Some("slack.com") && base.scheme() == "https";
+    let allowed = if is_production {
+        url.scheme() == "https"
+            && (host == "slack.com"
+                || host.ends_with(".slack.com")
+                || host == "slack-files.com"
+                || host.ends_with(".slack-files.com"))
+    } else {
+        url.scheme() == base.scheme()
+            && url.host_str() == base.host_str()
+            && url.port_or_known_default() == base.port_or_known_default()
+    };
+    if !allowed {
+        bail!("Slack returned a private download URL outside its trusted origin");
+    }
+    Ok(url)
 }
 
 fn retry_after(headers: &reqwest::header::HeaderMap) -> Duration {
@@ -432,9 +543,22 @@ impl Inbox {
                 root_ts TEXT NOT NULL,
                 is_group INTEGER NOT NULL,
                 is_from_me INTEGER NOT NULL,
-                is_supported INTEGER NOT NULL
+                is_supported INTEGER NOT NULL,
+                files_json TEXT NOT NULL DEFAULT '[]'
             );",
         )?;
+        let has_files_json = connection
+            .prepare("PRAGMA table_info(slack_events)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .iter()
+            .any(|column| column == "files_json");
+        if !has_files_json {
+            connection.execute(
+                "ALTER TABLE slack_events ADD COLUMN files_json TEXT NOT NULL DEFAULT '[]'",
+                [],
+            )?;
+        }
         Ok(Self {
             connection,
             path: path.to_string_lossy().to_string(),
@@ -442,11 +566,13 @@ impl Inbox {
     }
 
     fn insert(&mut self, event: &Event) -> Result<i64> {
+        let files_json =
+            serde_json::to_string(&event.files).context("encode Slack file metadata")?;
         self.connection.execute(
             "INSERT INTO slack_events (
                 event_id, team_id, channel_id, user_id, text, root_ts,
-                is_group, is_from_me, is_supported
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                is_group, is_from_me, is_supported, files_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(event_id) DO NOTHING",
             params![
                 event.event_id,
@@ -458,6 +584,7 @@ impl Inbox {
                 event.is_group,
                 event.is_from_me,
                 event.is_supported,
+                files_json,
             ],
         )?;
         self.connection
@@ -480,7 +607,7 @@ impl Inbox {
     fn after(&self, since: i64) -> Result<Vec<RawMessage>> {
         let mut statement = self.connection.prepare(
             "SELECT id, event_id, team_id, channel_id, user_id, text, root_ts,
-                    is_group, is_from_me, is_supported
+                    is_group, is_from_me, is_supported, files_json
              FROM slack_events WHERE id > ?1 ORDER BY id",
         )?;
         let rows = statement
@@ -488,6 +615,14 @@ impl Inbox {
                 let team: String = row.get(2)?;
                 let channel: String = row.get(3)?;
                 let root: String = row.get(6)?;
+                let files_json: String = row.get(10)?;
+                let files: Vec<SlackFile> = serde_json::from_str(&files_json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        10,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
                 Ok(RawMessage {
                     row_id: row.get(0)?,
                     provider_event_id: Some(row.get(1)?),
@@ -497,7 +632,15 @@ impl Inbox {
                     is_group: row.get(7)?,
                     text: row.get(5)?,
                     voice: None,
-                    images: Vec::new(),
+                    images: files
+                        .into_iter()
+                        .map(|file| InboundImage {
+                            locator: file.id,
+                            file_size: file.size,
+                            mime_type: file.mimetype,
+                            data: None,
+                        })
+                        .collect(),
                     is_from_me: row.get(8)?,
                     is_supported: row.get(9)?,
                     thread_id: None,
@@ -546,6 +689,26 @@ fn parse_event(payload: &Value, identity: &Identity) -> Option<Event> {
         .unwrap_or(ts)
         .to_string();
     let subtype = event.get("subtype").and_then(Value::as_str);
+    let files = event
+        .get("files")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|file| {
+            let id = file.get("id")?.as_str()?.to_string();
+            (!id.is_empty()).then(|| SlackFile {
+                id,
+                size: file
+                    .get("size")
+                    .and_then(Value::as_u64)
+                    .and_then(|size| usize::try_from(size).ok()),
+                mimetype: file
+                    .get("mimetype")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            })
+        })
+        .collect::<Vec<_>>();
     let is_from_me = event.get("bot_id").is_some()
         || event.get("bot_profile").is_some()
         || subtype == Some("bot_message")
@@ -553,10 +716,10 @@ fn parse_event(payload: &Value, identity: &Identity) -> Option<Event> {
     let is_group = channel_type != "im";
     let is_supported = team_id == identity.team_id
         && event_type == "message"
-        && subtype.is_none()
+        && (subtype.is_none() || subtype == Some("file_share"))
         && !channel.is_empty()
         && !user.is_empty()
-        && !text.trim().is_empty()
+        && (!text.trim().is_empty() || !files.is_empty())
         && !root_ts.is_empty();
     Some(Event {
         event_id,
@@ -568,6 +731,7 @@ fn parse_event(payload: &Value, identity: &Identity) -> Option<Event> {
         is_group,
         is_from_me,
         is_supported,
+        files,
     })
 }
 
@@ -850,7 +1014,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_only_plain_workspace_dm_messages() {
+    fn parses_text_and_file_share_workspace_dm_messages() {
         let accepted = parse_event(
             &payload(json!({
                 "type": "message", "channel_type": "im", "channel": "D1",
@@ -862,6 +1026,44 @@ mod tests {
         assert!(accepted.is_supported);
         assert!(!accepted.is_group);
         assert!(!accepted.is_from_me);
+        assert!(accepted.files.is_empty());
+
+        let image_only = parse_event(
+            &payload(json!({
+                "type": "message", "subtype": "file_share", "channel_type": "im",
+                "channel": "D1", "user": "U1", "text": "", "ts": "1.3",
+                "files": [{
+                    "id": "F1", "size": 12, "mimetype": "image/png",
+                    "url_private": "https://files.slack.com/private-secret"
+                }]
+            })),
+            &identity(),
+        )
+        .unwrap();
+        assert!(image_only.is_supported);
+        assert_eq!(
+            image_only.files,
+            vec![SlackFile {
+                id: "F1".to_string(),
+                size: Some(12),
+                mimetype: Some("image/png".to_string()),
+            }]
+        );
+
+        let text_and_images = parse_event(
+            &payload(json!({
+                "type": "message", "channel_type": "im", "channel": "D1",
+                "user": "U1", "text": "compare", "ts": "1.4",
+                "files": [
+                    {"id": "F1", "size": 12, "mimetype": "image/png"},
+                    {"id": "F2", "size": 20, "mimetype": "image/jpeg"}
+                ]
+            })),
+            &identity(),
+        )
+        .unwrap();
+        assert!(text_and_images.is_supported);
+        assert_eq!(text_and_images.files.len(), 2);
 
         for event in [
             json!({"type":"message","channel_type":"channel","channel":"C1","user":"U1","text":"no","ts":"1"}),
@@ -882,7 +1084,11 @@ mod tests {
         let event = parse_event(
             &payload(json!({
                 "type": "message", "channel_type": "im", "channel": "D1",
-                "user": "U1", "text": "hello", "ts": "1.2"
+                "user": "U1", "text": "hello", "ts": "1.2",
+                "files": [{
+                    "id": "F1", "size": 12, "mimetype": "image/png",
+                    "url_private_download": "https://files.slack.com/private-secret"
+                }]
             })),
             &identity(),
         )
@@ -895,7 +1101,162 @@ mod tests {
         let rows = inbox.after(0).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].event_id(), "slack:Ev1");
+        assert_eq!(rows[0].images.len(), 1);
+        assert_eq!(rows[0].images[0].locator, "F1");
+        assert_eq!(rows[0].images[0].file_size, Some(12));
+        assert_eq!(rows[0].images[0].mime_type.as_deref(), Some("image/png"));
+        assert!(rows[0].images[0].data.is_none());
+        let files_json: String = inbox
+            .connection
+            .query_row("SELECT files_json FROM slack_events", [], |row| row.get(0))
+            .unwrap();
+        assert!(!files_json.contains("private"));
         assert_eq!(inbox.latest_cursor().unwrap(), 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn inbox_migrates_legacy_rows_without_losing_queued_events() {
+        let path = temp_path("slack-legacy-inbox");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE slack_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id TEXT NOT NULL UNIQUE,
+                    team_id TEXT NOT NULL,
+                    channel_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    root_ts TEXT NOT NULL,
+                    is_group INTEGER NOT NULL,
+                    is_from_me INTEGER NOT NULL,
+                    is_supported INTEGER NOT NULL
+                );
+                INSERT INTO slack_events (
+                    event_id, team_id, channel_id, user_id, text, root_ts,
+                    is_group, is_from_me, is_supported
+                ) VALUES ('EvLegacy', 'T1', 'D1', 'U1', 'queued', '1.2', 0, 0, 1);",
+            )
+            .unwrap();
+        drop(connection);
+
+        let inbox = Inbox::open(&path).unwrap();
+        let rows = inbox.after(0).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_id(), "slack:EvLegacy");
+        assert_eq!(rows[0].text, "queued");
+        assert!(rows[0].images.is_empty());
+        let columns = inbox
+            .connection
+            .prepare("PRAGMA table_info(slack_events)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "files_json"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn downloads_private_images_with_the_bot_token_after_metadata_resolution() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let image = b"\x89PNG\r\n\x1a\nbody";
+        let server = tokio::spawn(async move {
+            let (mut info_stream, _) = listener.accept().await.unwrap();
+            let info_request = read_http_request(&mut info_stream).await;
+            write_json_response(
+                &mut info_stream,
+                &format!(
+                    r#"{{"ok":true,"file":{{"id":"F1","size":{},"mimetype":"image/png","url_private_download":"http://{address}/private/F1"}}}}"#,
+                    image.len()
+                ),
+            )
+            .await;
+
+            let (mut download_stream, _) = listener.accept().await.unwrap();
+            let download_request = read_http_request(&mut download_stream).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: image/png\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                image.len()
+            );
+            download_stream
+                .write_all(response.as_bytes())
+                .await
+                .unwrap();
+            download_stream.write_all(image).await.unwrap();
+            (info_request, download_request)
+        });
+        let path = temp_path("slack-image-download");
+        let slack = Slack::with_api_base(
+            "xapp-test".to_string(),
+            "xoxb-secret".to_string(),
+            vec!["U1".to_string()],
+            &path,
+            format!("http://{address}"),
+        )
+        .unwrap();
+
+        let downloaded = slack
+            .download_image(&InboundImage {
+                locator: "F1".to_string(),
+                file_size: Some(image.len()),
+                mime_type: Some("image/png".to_string()),
+                data: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(downloaded.bytes, image);
+        let (info_request, download_request) = server.await.unwrap();
+        assert!(info_request.starts_with("POST /files.info HTTP/1.1"));
+        assert!(info_request.contains("authorization: Bearer xoxb-secret"));
+        assert!(info_request.contains(r#"{"file":"F1"}"#));
+        assert!(download_request.starts_with("GET /private/F1 HTTP/1.1"));
+        assert!(download_request.contains("authorization: Bearer xoxb-secret"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn rejects_untrusted_private_urls_without_exposing_urls_or_tokens() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_http_request(&mut stream).await;
+            write_json_response(
+                &mut stream,
+                r#"{"ok":true,"file":{"id":"F1","size":12,"mimetype":"image/png","url_private_download":"https://evil.example/private-secret"}}"#,
+            )
+            .await;
+        });
+        let path = temp_path("slack-untrusted-image");
+        let slack = Slack::with_api_base(
+            "xapp-test".to_string(),
+            "xoxb-secret".to_string(),
+            vec!["U1".to_string()],
+            &path,
+            format!("http://{address}"),
+        )
+        .unwrap();
+
+        let error = slack
+            .download_image(&InboundImage {
+                locator: "F1".to_string(),
+                file_size: Some(12),
+                mime_type: Some("image/png".to_string()),
+                data: None,
+            })
+            .await
+            .unwrap_err();
+
+        let detail = format!("{error:#}");
+        assert!(!detail.contains("evil.example"));
+        assert!(!detail.contains("private-secret"));
+        assert!(!detail.contains("xoxb-secret"));
+        server.await.unwrap();
         let _ = std::fs::remove_file(path);
     }
 
@@ -1069,8 +1430,12 @@ mod tests {
             "type": "events_api",
             "envelope_id": "env-1",
             "payload": payload(json!({
-                "type": "message", "channel_type": "im", "channel": "D1",
-                "user": "U1", "text": "hello", "ts": "1.2"
+                "type": "message", "subtype": "file_share", "channel_type": "im",
+                "channel": "D1", "user": "U1", "text": "", "ts": "1.2",
+                "files": [{
+                    "id": "F1", "size": 12, "mimetype": "image/png",
+                    "url_private_download": "https://files.slack.com/private-secret"
+                }]
             }))
         })
         .to_string();
@@ -1103,6 +1468,9 @@ mod tests {
         let first = slack.poll(0).await.unwrap();
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].event_id(), "slack:Ev1");
+        assert_eq!(first[0].images.len(), 1);
+        assert_eq!(first[0].images[0].locator, "F1");
+        assert_eq!(first[0].images[0].file_size, Some(12));
         assert!(slack.poll(1).await.is_err());
         let (first_ack, second_ack) = server.await.unwrap();
         assert_eq!(first_ack, r#"{"envelope_id":"env-1"}"#);
@@ -1223,6 +1591,12 @@ mod tests {
                     "type":"message", "channel_type":channel_type, "channel":"D1",
                     "user":user, "text":"message", "ts":"1.2"
                 });
+                if envelope_id == "env-unauthorized" {
+                    event["files"] = json!([{
+                        "id": "FSECRET", "size": 12, "mimetype": "image/png",
+                        "url_private_download": "https://files.slack.com/private-secret"
+                    }]);
+                }
                 if let Some(subtype) = subtype {
                     event["subtype"] = Value::String(subtype.to_string());
                     event["bot_id"] = Value::String("B1".to_string());
@@ -1273,12 +1647,18 @@ mod tests {
         let channel = crate::channel::Channel::Slack(slack.clone());
         for row in &rows[..3] {
             assert!(row.text.is_empty());
+            assert!(row.images.is_empty());
             assert!(channel.accept(row).is_none());
         }
         assert_eq!(rows[3].event_id(), "slack:EvV");
         assert_eq!(rows[3].handle, "U1");
         assert_eq!(rows[3].text, "message");
         assert!(channel.accept(&rows[3]).is_some());
+        let database = std::fs::read(&path).unwrap();
+        assert!(!database.windows(7).any(|window| window == b"FSECRET"));
+        assert!(!database
+            .windows(14)
+            .any(|window| window == b"private-secret"));
 
         let requests = http_server.await.unwrap();
         assert!(requests[0].starts_with("POST /auth.test HTTP/1.1"));

@@ -452,6 +452,10 @@ File: [`src/slack.rs`](src/slack.rs)
   message thread.
 - Commits accepted envelopes to a dedicated SQLite inbox before acknowledging
   them to Slack.
+- Persists only file IDs and safe size and MIME type hints, then resolves and
+  downloads supported images with the bot token after allowlist acceptance.
+- Applies the provider-neutral image count, byte, and signature checks before
+  passing private temporary paths to Claude Code, Codex, or Pi.
 - Continues receiving while the gateway processes earlier messages.
 - Deduplicates stable Slack `event_id` values.
 
@@ -630,7 +634,9 @@ crash, and the scheduler still revalidates the exact revision before planning.
 The Slack receiver stores accepted events in `<state_path>.slack-inbox.db`
 before acknowledging Socket Mode envelopes. Its local row ID becomes the
 gateway cursor. Ignored envelopes keep redacted rejection metadata rather than
-message content.
+message or attachment content. Accepted image events persist only file IDs and
+safe size and MIME type hints. Private download URLs and file bytes are never
+stored.
 
 ### Audit Log
 
