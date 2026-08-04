@@ -1,5 +1,6 @@
 //! Runs the Pi coding agent headlessly for a single message.
 
+use std::ffi::OsString;
 use std::time::Duration;
 use std::{io, process::Stdio};
 
@@ -142,6 +143,11 @@ impl Runner {
         }
         if !req.is_new {
             cmd.arg("--session").arg(req.session_id);
+        }
+        for image in req.images {
+            let mut attachment = OsString::from("@");
+            attachment.push(image);
+            cmd.arg(attachment);
         }
         cmd.current_dir(req.work_dir);
         cmd.kill_on_drop(true);
@@ -397,6 +403,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn attaches_images_in_order_for_new_and_resumed_sessions() {
+        for (is_new, expected_session) in [(true, None), (false, Some("existing-session"))] {
+            let args_path = temp_path("pi-image-args");
+            let work_dir = temp_dir("pi-image-work");
+            let first = temp_path("pi-first.png");
+            let second = temp_path("pi-second.webp");
+            let cli = FakeCli::new("pi", &success_script(&args_path, "pi-session", "seen"));
+            let runner = Runner { bin: cli.bin() };
+
+            let output = runner
+                .run(
+                    Request {
+                        session_id: if is_new { "" } else { "existing-session" },
+                        is_new,
+                        work_dir: work_dir.to_str().unwrap(),
+                        instructions: "",
+                        prompt: "inspect these pixels",
+                        images: &[first.clone(), second.clone()],
+                    },
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(output.reply, "seen");
+            let args = read_args(&args_path);
+            let attachments = args
+                .iter()
+                .filter(|arg| arg.starts_with('@'))
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                attachments,
+                [
+                    format!("@{}", first.display()),
+                    format!("@{}", second.display())
+                ]
+            );
+            assert_eq!(read_prompt(&args_path), "inspect these pixels");
+            assert!(!args.iter().any(|arg| arg == "inspect these pixels"));
+            assert_eq!(
+                args.windows(2)
+                    .find(|pair| pair[0] == "--session")
+                    .map(|pair| pair[1].as_str()),
+                expected_session
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn missing_resume_is_typed_for_rehydration() {
         let work_dir = temp_dir("pi-missing-work");
         let cli = FakeCli::new(
@@ -511,6 +567,41 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
             .unwrap();
 
         assert_eq!(output.reply, "recovered");
+    }
+
+    #[tokio::test]
+    async fn image_model_rejection_is_not_retried_without_the_image() {
+        let work_dir = temp_dir("pi-image-rejection-work");
+        let args_path = temp_path("pi-image-rejection-args");
+        let calls_path = temp_path("pi-image-rejection-calls");
+        let image = temp_path("pi-rejected.png");
+        let script = format!(
+            "#!/bin/sh\nprintf x >> {}\nprintf '%s\\n' \"$@\" > {}\ncat > {}.stdin\nprintf '%s\\n' '{{\"type\":\"session\",\"id\":\"rejected-session\"}}'\nprintf '%s\\n' '{{\"type\":\"message_end\",\"message\":{{\"role\":\"assistant\",\"content\":[],\"stopReason\":\"error\"}}}}'\n",
+            sh_arg(&calls_path),
+            sh_arg(&args_path),
+            sh_arg(&args_path),
+        );
+        let cli = FakeCli::new("pi", &script);
+        let runner = Runner { bin: cli.bin() };
+
+        let error = runner
+            .run(
+                Request {
+                    prompt: "inspect",
+                    images: std::slice::from_ref(&image),
+                    ..request(work_dir.to_str().unwrap(), true)
+                },
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(failed_message(error).contains("Pi assistant request failed"));
+        assert_eq!(std::fs::read_to_string(calls_path).unwrap(), "x");
+        assert!(read_args(&args_path)
+            .iter()
+            .any(|arg| arg == &format!("@{}", image.display())));
+        assert_eq!(read_prompt(&args_path), "inspect");
     }
 
     #[tokio::test]

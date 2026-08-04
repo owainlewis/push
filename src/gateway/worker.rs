@@ -145,8 +145,7 @@ where
     };
 
     if !job.image_attachments.is_empty() && !runner.supports_images() {
-        let reply =
-            "Image messages are currently supported only when this conversation routes to Codex.";
+        let reply = "Image messages are currently supported only when this conversation routes to Codex or Pi.";
         let delivery = record_and_deliver(ctx, &job, OutboundOrigin::Gateway, reply).await;
         report_delivery(
             ctx,
