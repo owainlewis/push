@@ -480,11 +480,15 @@ File: [`src/claude.rs`](src/claude.rs)
 | New chat | `claude -p --session-id <uuid>` |
 | Resumed chat | `claude -p --resume <uuid>` |
 | Instructions | `--append-system-prompt <composed system sections>` |
+| Images | base64 content blocks over `--input-format stream-json` stdin |
 | Unattended job | `--permission-mode bypassPermissions` |
 | Evaluator | safe mode, no tools, no MCP, no Chrome, no session persistence |
 
 Push chooses Claude's initial session ID and marks it started before execution
-so a partial create failure is not retried as another create.
+so a partial create failure is not retried as another create. Text-only turns
+keep the single-result JSON command contract. Image turns use one streaming JSON
+user message and parse the final result event without putting image data in
+process arguments.
 
 ### Codex
 

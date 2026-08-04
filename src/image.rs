@@ -90,17 +90,26 @@ impl Drop for PreparedImages {
     }
 }
 
-fn image_extension(bytes: &[u8]) -> Result<&'static str> {
+pub(crate) fn media_type(bytes: &[u8]) -> Result<&'static str> {
     if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-        return Ok("jpg");
+        return Ok("image/jpeg");
     }
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        return Ok("png");
+        return Ok("image/png");
     }
     if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-        return Ok("webp");
+        return Ok("image/webp");
     }
     bail!("image attachment is not a supported JPEG, PNG, or WebP file")
+}
+
+fn image_extension(bytes: &[u8]) -> Result<&'static str> {
+    match media_type(bytes)? {
+        "image/jpeg" => Ok("jpg"),
+        "image/png" => Ok("png"),
+        "image/webp" => Ok("webp"),
+        _ => unreachable!("media_type returns only supported image types"),
+    }
 }
 
 #[cfg(test)]
