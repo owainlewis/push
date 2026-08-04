@@ -250,15 +250,35 @@ impl Slack {
             .url_private_download
             .or(file.url_private)
             .context("Slack files.info omitted a private download URL")?;
-        let private_url = validated_private_url(&self.state.api_base, &private_url)?;
-        let mut response = self
-            .state
-            .client
-            .get(private_url)
-            .bearer_auth(&self.state.bot_token)
-            .send()
-            .await
-            .map_err(|_| anyhow::anyhow!("download Slack image failed"))?;
+        let mut private_url = validated_private_url(&self.state.api_base, &private_url)?;
+        let mut redirects = 0;
+        let mut response = loop {
+            let response = self
+                .state
+                .client
+                .get(private_url.clone())
+                .bearer_auth(&self.state.bot_token)
+                .send()
+                .await
+                .map_err(|_| anyhow::anyhow!("download Slack image failed"))?;
+            if !response.status().is_redirection() {
+                break response;
+            }
+            if redirects == 3 {
+                bail!("Slack image download exceeded the redirect limit");
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .context("Slack image redirect omitted a destination")?
+                .to_str()
+                .map_err(|_| anyhow::anyhow!("Slack image redirect was invalid"))?;
+            let next = private_url
+                .join(location)
+                .map_err(|_| anyhow::anyhow!("Slack image redirect was invalid"))?;
+            private_url = validated_private_url(&self.state.api_base, next.as_str())?;
+            redirects += 1;
+        };
         if !response.status().is_success() {
             bail!(
                 "Slack image download failed with status {}",
@@ -1176,6 +1196,16 @@ mod tests {
             )
             .await;
 
+            let (mut redirect_stream, _) = listener.accept().await.unwrap();
+            let redirect_request = read_http_request(&mut redirect_stream).await;
+            let redirect = format!(
+                "HTTP/1.1 302 Found\r\nlocation: http://{address}/files-origin/F1\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+            );
+            redirect_stream
+                .write_all(redirect.as_bytes())
+                .await
+                .unwrap();
+
             let (mut download_stream, _) = listener.accept().await.unwrap();
             let download_request = read_http_request(&mut download_stream).await;
             let response = format!(
@@ -1187,7 +1217,7 @@ mod tests {
                 .await
                 .unwrap();
             download_stream.write_all(image).await.unwrap();
-            (info_request, download_request)
+            (info_request, redirect_request, download_request)
         });
         let path = temp_path("slack-image-download");
         let slack = Slack::with_api_base(
@@ -1210,11 +1240,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(downloaded.bytes, image);
-        let (info_request, download_request) = server.await.unwrap();
+        let (info_request, redirect_request, download_request) = server.await.unwrap();
         assert!(info_request.starts_with("POST /files.info HTTP/1.1"));
         assert!(info_request.contains("authorization: Bearer xoxb-secret"));
         assert!(info_request.contains(r#"{"file":"F1"}"#));
-        assert!(download_request.starts_with("GET /private/F1 HTTP/1.1"));
+        assert!(redirect_request.starts_with("GET /private/F1 HTTP/1.1"));
+        assert!(redirect_request.contains("authorization: Bearer xoxb-secret"));
+        assert!(download_request.starts_with("GET /files-origin/F1 HTTP/1.1"));
         assert!(download_request.contains("authorization: Bearer xoxb-secret"));
         let _ = std::fs::remove_file(path);
     }
@@ -1233,6 +1265,59 @@ mod tests {
             .await;
         });
         let path = temp_path("slack-untrusted-image");
+        let slack = Slack::with_api_base(
+            "xapp-test".to_string(),
+            "xoxb-secret".to_string(),
+            vec!["U1".to_string()],
+            &path,
+            format!("http://{address}"),
+        )
+        .unwrap();
+
+        let error = slack
+            .download_image(&InboundImage {
+                locator: "F1".to_string(),
+                file_size: Some(12),
+                mime_type: Some("image/png".to_string()),
+                data: None,
+            })
+            .await
+            .unwrap_err();
+
+        let detail = format!("{error:#}");
+        assert!(!detail.contains("evil.example"));
+        assert!(!detail.contains("private-secret"));
+        assert!(!detail.contains("xoxb-secret"));
+        server.await.unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn rejects_untrusted_redirects_before_forwarding_the_bot_token() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut info_stream, _) = listener.accept().await.unwrap();
+            let _ = read_http_request(&mut info_stream).await;
+            write_json_response(
+                &mut info_stream,
+                &format!(
+                    r#"{{"ok":true,"file":{{"id":"F1","size":12,"mimetype":"image/png","url_private_download":"http://{address}/private/F1"}}}}"#
+                ),
+            )
+            .await;
+
+            let (mut redirect_stream, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut redirect_stream).await;
+            assert!(request.contains("authorization: Bearer xoxb-secret"));
+            redirect_stream
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nlocation: https://evil.example/private-secret\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let path = temp_path("slack-untrusted-redirect");
         let slack = Slack::with_api_base(
             "xapp-test".to_string(),
             "xoxb-secret".to_string(),
