@@ -179,6 +179,21 @@ impl Store {
                 self.database_path.display()
             )
         })?;
+        tx.execute(
+            "DELETE FROM channel_pending_filename_polls
+             WHERE channel = ?1
+               AND row_id <= COALESCE(
+                   (SELECT cursor FROM channel_cursors WHERE channel = ?1),
+                   0
+               )",
+            [channel],
+        )
+        .with_context(|| {
+            format!(
+                "prune {channel} pending filename rows in {}",
+                self.database_path.display()
+            )
+        })?;
         tx.commit().with_context(|| {
             format!(
                 "commit {channel} cursor transaction in {}",
@@ -239,6 +254,76 @@ impl Store {
                 self.database_path.display()
             )
         })
+    }
+
+    pub fn should_defer_pending_filename(
+        &mut self,
+        channel: &str,
+        row_id: i64,
+        poll_limit: u8,
+    ) -> Result<bool> {
+        validate_channel(channel)?;
+        let exhausted = i64::from(poll_limit) + 1;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .with_context(|| {
+                format!(
+                    "begin {channel} pending filename transaction in {}",
+                    self.database_path.display()
+                )
+            })?;
+        tx.execute(
+            "INSERT INTO channel_pending_filename_polls (channel, row_id, polls)
+             VALUES (?1, ?2, 1)
+             ON CONFLICT(channel, row_id) DO UPDATE SET
+                 polls = MIN(channel_pending_filename_polls.polls + 1, ?3),
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+            params![channel, row_id, exhausted],
+        )
+        .with_context(|| {
+            format!(
+                "advance {channel} pending filename row {row_id} in {}",
+                self.database_path.display()
+            )
+        })?;
+        let polls: i64 = tx
+            .query_row(
+                "SELECT polls FROM channel_pending_filename_polls
+                 WHERE channel = ?1 AND row_id = ?2",
+                params![channel, row_id],
+                |row| row.get(0),
+            )
+            .with_context(|| {
+                format!(
+                    "read {channel} pending filename row {row_id} from {}",
+                    self.database_path.display()
+                )
+            })?;
+        tx.commit().with_context(|| {
+            format!(
+                "commit {channel} pending filename transaction in {}",
+                self.database_path.display()
+            )
+        })?;
+        Ok(polls <= i64::from(poll_limit))
+    }
+
+    pub fn clear_pending_filename(&mut self, channel: &str, row_id: i64) -> Result<()> {
+        validate_channel(channel)?;
+        self.conn
+            .execute(
+                "DELETE FROM channel_pending_filename_polls
+                 WHERE channel = ?1 AND row_id = ?2",
+                params![channel, row_id],
+            )
+            .with_context(|| {
+                format!(
+                    "clear {channel} pending filename row {row_id} from {}",
+                    self.database_path.display()
+                )
+            })?;
+        Ok(())
     }
 
     /// Returns the agent session id for a thread, creating one if needed. The
@@ -819,6 +904,43 @@ mod tests {
             reopened.completed_rows_after("telegram", 0).unwrap(),
             vec![13]
         );
+        cleanup(&database_path, &state_path);
+    }
+
+    #[test]
+    fn pending_filename_grace_survives_reopen_and_clears() {
+        let (database_path, state_path) = temp_paths();
+        let mut store = open(&database_path, &state_path);
+        assert!(store
+            .should_defer_pending_filename("imessage", 12, 3)
+            .unwrap());
+        drop(store);
+
+        let mut reopened = open(&database_path, &state_path);
+        assert!(reopened
+            .should_defer_pending_filename("imessage", 12, 3)
+            .unwrap());
+        drop(reopened);
+
+        let mut reopened = open(&database_path, &state_path);
+        assert!(reopened
+            .should_defer_pending_filename("imessage", 12, 3)
+            .unwrap());
+        assert!(!reopened
+            .should_defer_pending_filename("imessage", 12, 3)
+            .unwrap());
+        assert!(!reopened
+            .should_defer_pending_filename("imessage", 12, 3)
+            .unwrap());
+
+        reopened.clear_pending_filename("imessage", 12).unwrap();
+        assert!(reopened
+            .should_defer_pending_filename("imessage", 12, 3)
+            .unwrap());
+        reopened.set_cursor("imessage", 12).unwrap();
+        assert!(reopened
+            .should_defer_pending_filename("imessage", 12, 3)
+            .unwrap());
         cleanup(&database_path, &state_path);
     }
 

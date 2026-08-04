@@ -10,10 +10,12 @@ use crate::config::{ChannelKind, Config};
 use crate::image::DownloadedImage;
 use crate::imessage::{Poller as IMessagePoller, Sender as IMessageSender};
 use crate::slack::{parse_message_target, Slack};
+use crate::store::Store;
 use crate::telegram::Telegram;
 use crate::voice::AudioClip;
 
 pub(crate) const REPLY_MARKER: &str = "\n\n-- sent by push";
+const IMESSAGE_PENDING_FILENAME_POLL_LIMIT: u8 = 3;
 
 #[derive(Debug, Clone)]
 pub struct InboundVoice {
@@ -102,7 +104,7 @@ trait ChannelContract {
     }
     async fn latest_cursor(&self) -> Result<i64>;
     fn accept(&self, message: &RawMessage) -> Option<(String, String)>;
-    fn should_defer(&self, _message: &RawMessage) -> Result<bool> {
+    fn should_defer(&self, _message: &RawMessage, _store: &mut Store) -> Result<bool> {
         Ok(false)
     }
     fn reject_reason(&self, message: &RawMessage) -> &'static str;
@@ -245,11 +247,11 @@ impl Channel {
         }
     }
 
-    pub fn should_defer(&self, message: &RawMessage) -> Result<bool> {
+    pub fn should_defer(&self, message: &RawMessage, store: &mut Store) -> Result<bool> {
         match self {
-            Self::IMessage(channel) => ChannelContract::should_defer(channel, message),
-            Self::Telegram(channel) => ChannelContract::should_defer(channel, message),
-            Self::Slack(channel) => ChannelContract::should_defer(channel, message),
+            Self::IMessage(channel) => ChannelContract::should_defer(channel, message, store),
+            Self::Telegram(channel) => ChannelContract::should_defer(channel, message, store),
+            Self::Slack(channel) => ChannelContract::should_defer(channel, message, store),
         }
     }
 
@@ -456,14 +458,21 @@ impl ChannelContract for IMessageChannel {
         None
     }
 
-    fn should_defer(&self, message: &RawMessage) -> Result<bool> {
-        self.poller.should_defer_pending_filename(
-            message.row_id,
-            message
-                .images
-                .iter()
-                .any(|image| image.locator.trim().is_empty()),
-        )
+    fn should_defer(&self, message: &RawMessage, store: &mut Store) -> Result<bool> {
+        let pending = message
+            .images
+            .iter()
+            .any(|image| image.locator.trim().is_empty());
+        if pending {
+            store.should_defer_pending_filename(
+                self.id(),
+                message.row_id,
+                IMESSAGE_PENDING_FILENAME_POLL_LIMIT,
+            )
+        } else {
+            store.clear_pending_filename(self.id(), message.row_id)?;
+            Ok(false)
+        }
     }
 
     fn reject_reason(&self, message: &RawMessage) -> &'static str {

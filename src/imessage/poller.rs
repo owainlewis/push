@@ -1,8 +1,6 @@
 //! Reads new messages directly from the macOS Messages SQLite database.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags};
@@ -30,10 +28,7 @@ pub struct Message {
 pub struct Poller {
     db_path: String,
     attachment_root: PathBuf,
-    pending_filename_polls: Arc<Mutex<HashMap<i64, u8>>>,
 }
-
-const PENDING_FILENAME_POLL_LIMIT: u8 = 3;
 
 // Only real text messages: exclude tapbacks/reactions (associated_message_type)
 // and system rows like group renames or joins (item_type).
@@ -68,7 +63,6 @@ impl Poller {
         Self {
             db_path,
             attachment_root,
-            pending_filename_polls: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -81,7 +75,6 @@ impl Poller {
     /// `attributedBody` when `text` is NULL. This is blocking; call it from a
     /// blocking context.
     pub fn poll(&self, since: i64) -> Result<Vec<Message>> {
-        self.clear_completed_pending_filenames(since)?;
         let conn = self.open()?;
         let mut stmt = conn.prepare(SELECT_NEW)?;
         let rows = stmt.query_map([since], |row| {
@@ -127,44 +120,6 @@ impl Poller {
             message.attachments = message_attachments;
         }
         Ok(out)
-    }
-
-    pub fn should_defer_pending_filename(&self, row_id: i64, pending: bool) -> Result<bool> {
-        if pending {
-            self.should_defer_filename(row_id)
-        } else {
-            self.clear_pending_filename(row_id)?;
-            Ok(false)
-        }
-    }
-
-    fn should_defer_filename(&self, row_id: i64) -> Result<bool> {
-        let mut pending = self
-            .pending_filename_polls
-            .lock()
-            .map_err(|_| anyhow::anyhow!("iMessage pending attachment state lock poisoned"))?;
-        let polls = pending.entry(row_id).or_default();
-        if *polls < PENDING_FILENAME_POLL_LIMIT {
-            *polls += 1;
-            return Ok(true);
-        }
-        Ok(false)
-    }
-
-    fn clear_completed_pending_filenames(&self, since: i64) -> Result<()> {
-        self.pending_filename_polls
-            .lock()
-            .map_err(|_| anyhow::anyhow!("iMessage pending attachment state lock poisoned"))?
-            .retain(|row_id, _| *row_id > since);
-        Ok(())
-    }
-
-    fn clear_pending_filename(&self, row_id: i64) -> Result<()> {
-        self.pending_filename_polls
-            .lock()
-            .map_err(|_| anyhow::anyhow!("iMessage pending attachment state lock poisoned"))?
-            .remove(&row_id);
-        Ok(())
     }
 
     /// Highest message ROWID in the database, or 0 when empty. Used to skip
@@ -330,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_filename_deferral_ends_when_attachment_filename_is_ready() {
+    fn poll_observes_when_attachment_filename_becomes_ready() {
         let root = temp_dir("chat-db-pending-attachment");
         let path = root.join("chat.db");
         let conn = Connection::open(&path).unwrap();
@@ -357,9 +312,6 @@ mod tests {
         let pending = poller.poll(0).unwrap();
         assert_eq!(pending.len(), 2);
         assert_eq!(pending[0].attachments[0].locator, "");
-        assert!(poller
-            .should_defer_pending_filename(pending[0].row_id, true)
-            .unwrap());
 
         let conn = Connection::open(&path).unwrap();
         conn.execute(
@@ -372,53 +324,7 @@ mod tests {
         assert_eq!(ready.len(), 2);
         assert_eq!(ready[0].row_id, 1);
         assert_eq!(ready[0].attachments[0].locator, "missing-photo.heic");
-        assert!(!poller
-            .should_defer_pending_filename(ready[0].row_id, false)
-            .unwrap());
         assert_eq!(ready[1].row_id, 2);
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn pending_filename_deferral_is_bounded_and_stable_until_cursor_progress() {
-        let root = temp_dir("chat-db-abandoned-attachment");
-        let path = root.join("chat.db");
-        let conn = Connection::open(&path).unwrap();
-        create_schema(&conn);
-        insert_handle(&conn, 1, "+15551234567");
-        insert_chat(&conn, 1, "+15551234567");
-        insert_chat_handle(&conn, 1, 1);
-        insert_message(&conn, 1, Some("failed photo"), None, 0, 0, 0, 1, 1);
-        insert_message(&conn, 2, Some("later"), None, 0, 0, 0, 1, 1);
-        conn.execute(
-            "INSERT INTO attachment (ROWID, filename, mime_type, total_bytes)
-             VALUES (1, NULL, 'image/heic', 24)",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO message_attachment_join (message_id, attachment_id) VALUES (1, 1)",
-            [],
-        )
-        .unwrap();
-        drop(conn);
-
-        let poller = Poller::new(path.to_string_lossy().to_string());
-        let messages = poller.poll(0).unwrap();
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].attachments[0].locator, "");
-        for _ in 0..PENDING_FILENAME_POLL_LIMIT {
-            assert!(poller
-                .should_defer_pending_filename(messages[0].row_id, true)
-                .unwrap());
-        }
-        assert!(!poller
-            .should_defer_pending_filename(messages[0].row_id, true)
-            .unwrap());
-        assert!(!poller
-            .should_defer_pending_filename(messages[0].row_id, true)
-            .unwrap());
-        assert_eq!(poller.poll(1).unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(root);
     }
 

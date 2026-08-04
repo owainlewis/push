@@ -2227,9 +2227,9 @@ async fn imessage_completed_row_after_deferred_barrier_is_not_rerun_after_restar
     );
     drop(first);
 
-    let mut restarted = Gateway::new(cfg).unwrap();
+    let mut restarted = Gateway::new(cfg.clone()).unwrap();
     restarted.ctx.runners = Arc::new(fake_runners(calls.clone()));
-    run_complete_snapshot(&mut restarted, batch).await;
+    run_complete_snapshot(&mut restarted, batch.clone()).await;
 
     assert_eq!(calls.lock().unwrap().len(), 1);
     assert_eq!(
@@ -2238,6 +2238,45 @@ async fn imessage_completed_row_after_deferred_barrier_is_not_rerun_after_restar
     );
     assert!(restarted.ack.lock().unwrap().deferred.contains(&1));
     assert!(restarted.ack.lock().unwrap().completed.contains(&2));
+    drop(restarted);
+
+    let mut restarted_again = Gateway::new(cfg.clone()).unwrap();
+    restarted_again.ctx.runners = Arc::new(fake_runners(calls.clone()));
+    run_complete_snapshot(&mut restarted_again, batch.clone()).await;
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(
+        restarted_again
+            .store
+            .lock()
+            .unwrap()
+            .cursor("imessage")
+            .unwrap(),
+        0
+    );
+    drop(restarted_again);
+
+    let mut final_restart = Gateway::new(cfg).unwrap();
+    final_restart.ctx.runners = Arc::new(fake_runners(calls.clone()));
+    run_complete_snapshot(&mut final_restart, batch).await;
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(
+        final_restart
+            .store
+            .lock()
+            .unwrap()
+            .cursor("imessage")
+            .unwrap(),
+        2
+    );
+    assert!(final_restart
+        .ctx
+        .sent_replies
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .1
+        .contains("JPEG, PNG, or WebP"));
 
     let _ = std::fs::remove_file(&state_path);
     let _ = std::fs::remove_file(format!("{state_path}.db"));

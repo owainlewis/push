@@ -672,7 +672,11 @@ impl Gateway {
                 continue;
             }
             if let Some((thread, target)) = self.channel.accept(m) {
-                let deferred = match self.channel.should_defer(m) {
+                let deferred = {
+                    let mut store = self.store.lock().unwrap();
+                    self.channel.should_defer(m, &mut store)
+                };
+                let deferred = match deferred {
                     Ok(deferred) => deferred,
                     Err(error) => {
                         error!("[{thread}] attachment readiness check failed: {error:#}");
