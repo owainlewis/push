@@ -100,6 +100,7 @@ pub struct PrimaryDestination {
 struct AckState {
     in_flight: BTreeSet<i64>,
     deferred: BTreeSet<i64>,
+    persisting: BTreeSet<i64>,
     completed: BTreeSet<i64>,
 }
 
@@ -587,6 +588,7 @@ impl Gateway {
 
     async fn process_messages(&mut self, msgs: Vec<RawMessage>, complete_snapshot: bool) {
         self.recover_closed_workers();
+        retry_completion_persistence(&self.store, &self.ack, self.channel.id());
         persist_cursor(&self.store, &self.ack, self.channel.id());
         let mut since = match self.store.lock().unwrap().cursor(self.channel.id()) {
             Ok(cursor) => cursor,
@@ -638,8 +640,32 @@ impl Gateway {
                 };
             }
         }
+        let durable_completed = if complete_snapshot {
+            match self
+                .store
+                .lock()
+                .unwrap()
+                .completed_rows_after(self.channel.id(), since)
+            {
+                Ok(rows) => rows.into_iter().collect::<BTreeSet<_>>(),
+                Err(error) => {
+                    error!(
+                        "{} completed row read error; polling paused: {error:#}",
+                        self.channel.id()
+                    );
+                    return;
+                }
+            }
+        } else {
+            BTreeSet::new()
+        };
         for m in &msgs {
             if m.row_id <= since {
+                continue;
+            }
+            if durable_completed.contains(&m.row_id) {
+                self.ack.lock().unwrap().completed.insert(m.row_id);
+                persist_cursor(&self.store, &self.ack, self.channel.id());
                 continue;
             }
             if self.ack.lock().unwrap().is_known(m.row_id) {
@@ -1299,13 +1325,50 @@ async fn send_scheduled_chunk(
 }
 
 fn complete_row(store: &Arc<Mutex<Store>>, ack: &Arc<Mutex<AckState>>, channel: &str, row_id: i64) {
+    let persisted = match store.lock().unwrap().mark_row_completed(channel, row_id) {
+        Ok(()) => true,
+        Err(error) => {
+            error!("persist {channel} completed row {row_id}: {error:#}");
+            false
+        }
+    };
     {
         let mut ack = ack.lock().unwrap();
         ack.in_flight.remove(&row_id);
         ack.deferred.remove(&row_id);
-        ack.completed.insert(row_id);
+        if persisted {
+            ack.persisting.remove(&row_id);
+            ack.completed.insert(row_id);
+        } else {
+            ack.persisting.insert(row_id);
+        }
     }
     persist_cursor(store, ack, channel);
+}
+
+fn retry_completion_persistence(
+    store: &Arc<Mutex<Store>>,
+    ack: &Arc<Mutex<AckState>>,
+    channel: &str,
+) {
+    let pending = ack
+        .lock()
+        .unwrap()
+        .persisting
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    for row_id in pending {
+        let persisted = store.lock().unwrap().mark_row_completed(channel, row_id);
+        match persisted {
+            Ok(()) => {
+                let mut ack = ack.lock().unwrap();
+                ack.persisting.remove(&row_id);
+                ack.completed.insert(row_id);
+            }
+            Err(error) => error!("retry {channel} completed row {row_id}: {error:#}"),
+        }
+    }
 }
 
 fn persist_cursor(store: &Arc<Mutex<Store>>, ack: &Arc<Mutex<AckState>>, channel: &str) {
@@ -1328,7 +1391,9 @@ fn runners(cfg: &Config) -> HashMap<AgentBackend, Runner> {
 
 impl AckState {
     fn is_known(&self, row_id: i64) -> bool {
-        self.in_flight.contains(&row_id) || self.completed.contains(&row_id)
+        self.in_flight.contains(&row_id)
+            || self.persisting.contains(&row_id)
+            || self.completed.contains(&row_id)
     }
 
     fn next_cursor(&self) -> Option<i64> {
@@ -1337,6 +1402,7 @@ impl AckState {
             .first()
             .into_iter()
             .chain(self.deferred.first())
+            .chain(self.persisting.first())
             .copied()
             .min()
             .unwrap_or(i64::MAX);

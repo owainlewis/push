@@ -543,6 +543,51 @@ fn setup_failure_completion_unblocks_later_completed_rows() {
     let _ = std::fs::remove_file(path);
 }
 
+#[test]
+fn completed_row_marker_failure_keeps_a_retryable_cursor_barrier() {
+    let path = temp_state_path();
+    let store = Arc::new(Mutex::new(
+        Store::open_at(format!("{path}.db"), &path).unwrap(),
+    ));
+    store
+        .lock()
+        .unwrap()
+        .fail_next_completed_row_save_for_test();
+    let ack = Arc::new(Mutex::new(AckState::default()));
+    {
+        let mut ack = ack.lock().unwrap();
+        ack.in_flight.insert(10);
+        ack.completed.insert(11);
+    }
+
+    complete_row(&store, &ack, "imessage", 10);
+
+    assert_eq!(store.lock().unwrap().last_row(), 0);
+    assert!(store
+        .lock()
+        .unwrap()
+        .completed_rows_after("imessage", 0)
+        .unwrap()
+        .is_empty());
+    {
+        let ack = ack.lock().unwrap();
+        assert!(!ack.in_flight.contains(&10));
+        assert!(ack.persisting.contains(&10));
+        assert!(!ack.completed.contains(&10));
+        assert!(ack.completed.contains(&11));
+    }
+
+    retry_completion_persistence(&store, &ack, "imessage");
+    persist_cursor(&store, &ack, "imessage");
+
+    assert_eq!(store.lock().unwrap().last_row(), 11);
+    let ack = ack.lock().unwrap();
+    assert!(ack.persisting.is_empty());
+    assert!(ack.completed.is_empty());
+
+    let _ = std::fs::remove_file(path);
+}
+
 #[tokio::test]
 async fn session_lookup_failure_completes_in_flight_row() {
     let state_path = temp_state_path();
@@ -2134,6 +2179,65 @@ async fn imessage_pending_filename_defers_only_accepted_rows_and_cannot_block_fo
         .unwrap()
         .1
         .contains("JPEG, PNG, or WebP"));
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(format!("{state_path}.cache"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn imessage_completed_row_after_deferred_barrier_is_not_rerun_after_restart() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("imessage-deferred-restart-sessions");
+    let assistant_dir = temp_path("imessage-deferred-restart-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let cfg = test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    );
+    let calls = Arc::new(Mutex::new(Vec::<FakeRunCall>::new()));
+
+    let mut pending = message(1, "+15551234567", "+15551234567", false, "photo");
+    pending.images.push(InboundImage {
+        locator: String::new(),
+        file_size: Some(24),
+        mime_type: Some("image/heic".to_string()),
+        data: None,
+    });
+    let later = message(2, "+15551234567", "+15551234567", false, "later");
+    let batch = vec![pending, later];
+
+    let mut first = Gateway::new(cfg.clone()).unwrap();
+    first.ctx.runners = Arc::new(fake_runners(calls.clone()));
+    run_complete_snapshot(&mut first, batch.clone()).await;
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(first.store.lock().unwrap().cursor("imessage").unwrap(), 0);
+    assert_eq!(
+        first
+            .store
+            .lock()
+            .unwrap()
+            .completed_rows_after("imessage", 0)
+            .unwrap(),
+        vec![2]
+    );
+    drop(first);
+
+    let mut restarted = Gateway::new(cfg).unwrap();
+    restarted.ctx.runners = Arc::new(fake_runners(calls.clone()));
+    run_complete_snapshot(&mut restarted, batch).await;
+
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(
+        restarted.store.lock().unwrap().cursor("imessage").unwrap(),
+        0
+    );
+    assert!(restarted.ack.lock().unwrap().deferred.contains(&1));
+    assert!(restarted.ack.lock().unwrap().completed.contains(&2));
 
     let _ = std::fs::remove_file(&state_path);
     let _ = std::fs::remove_file(format!("{state_path}.db"));

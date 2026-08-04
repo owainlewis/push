@@ -44,6 +44,8 @@ pub struct Store {
     #[cfg(test)]
     cursor_save_failures_remaining: usize,
     #[cfg(test)]
+    completed_row_save_failures_remaining: usize,
+    #[cfg(test)]
     session_save_failures_remaining: usize,
 }
 
@@ -92,6 +94,8 @@ impl Store {
             conn,
             #[cfg(test)]
             cursor_save_failures_remaining: 0,
+            #[cfg(test)]
+            completed_row_save_failures_remaining: 0,
             #[cfg(test)]
             session_save_failures_remaining: 0,
         };
@@ -145,23 +149,96 @@ impl Store {
             self.cursor_save_failures_remaining -= 1;
             return Err(anyhow::anyhow!("injected cursor save failure"));
         }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .with_context(|| {
+                format!(
+                    "begin {channel} cursor transaction in {}",
+                    self.database_path.display()
+                )
+            })?;
+        insert_monotonic_cursor(&tx, channel, id).with_context(|| {
+            format!(
+                "advance {channel} cursor transactionally in {}",
+                self.database_path.display()
+            )
+        })?;
+        tx.execute(
+            "DELETE FROM channel_completed_rows
+             WHERE channel = ?1
+               AND row_id <= COALESCE(
+                   (SELECT cursor FROM channel_cursors WHERE channel = ?1),
+                   0
+               )",
+            [channel],
+        )
+        .with_context(|| {
+            format!(
+                "prune {channel} completed rows in {}",
+                self.database_path.display()
+            )
+        })?;
+        tx.commit().with_context(|| {
+            format!(
+                "commit {channel} cursor transaction in {}",
+                self.database_path.display()
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn mark_row_completed(&mut self, channel: &str, row_id: i64) -> Result<()> {
+        validate_channel(channel)?;
+        #[cfg(test)]
+        if self.completed_row_save_failures_remaining > 0 {
+            self.completed_row_save_failures_remaining -= 1;
+            return Err(anyhow::anyhow!("injected completed row save failure"));
+        }
         self.conn
             .execute(
-                "INSERT INTO channel_cursors (channel, cursor)
-                 VALUES (?1, ?2)
-                 ON CONFLICT(channel) DO UPDATE SET
-                     cursor = excluded.cursor,
-                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                 WHERE excluded.cursor > channel_cursors.cursor",
-                params![channel, id],
+                "INSERT OR IGNORE INTO channel_completed_rows (channel, row_id)
+                 VALUES (?1, ?2)",
+                params![channel, row_id],
             )
             .with_context(|| {
                 format!(
-                    "advance {channel} cursor transactionally in {}",
+                    "persist {channel} completed row {row_id} in {}",
                     self.database_path.display()
                 )
             })?;
         Ok(())
+    }
+
+    pub fn completed_rows_after(&self, channel: &str, cursor: i64) -> Result<Vec<i64>> {
+        validate_channel(channel)?;
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT row_id FROM channel_completed_rows
+                 WHERE channel = ?1 AND row_id > ?2
+                 ORDER BY row_id",
+            )
+            .with_context(|| {
+                format!(
+                    "prepare {channel} completed row read from {}",
+                    self.database_path.display()
+                )
+            })?;
+        let rows = statement
+            .query_map(params![channel, cursor], |row| row.get(0))
+            .with_context(|| {
+                format!(
+                    "read {channel} completed rows from {}",
+                    self.database_path.display()
+                )
+            })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().with_context(|| {
+            format!(
+                "decode {channel} completed rows from {}",
+                self.database_path.display()
+            )
+        })
     }
 
     /// Returns the agent session id for a thread, creating one if needed. The
@@ -409,6 +486,11 @@ impl Store {
     #[cfg(test)]
     pub fn fail_next_cursor_save_for_test(&mut self) {
         self.cursor_save_failures_remaining += 1;
+    }
+
+    #[cfg(test)]
+    pub fn fail_next_completed_row_save_for_test(&mut self) {
+        self.completed_row_save_failures_remaining += 1;
     }
 
     #[cfg(test)]
@@ -700,6 +782,42 @@ mod tests {
                 .session_for("telegram:dm:7", "claude", "unused".into())
                 .unwrap(),
             ("new".into(), true)
+        );
+        cleanup(&database_path, &state_path);
+    }
+
+    #[test]
+    fn completed_rows_survive_reopen_and_are_pruned_by_cursor() {
+        let (database_path, state_path) = temp_paths();
+        let mut store = open(&database_path, &state_path);
+        store.mark_row_completed("imessage", 12).unwrap();
+        store.mark_row_completed("imessage", 14).unwrap();
+        store.mark_row_completed("telegram", 13).unwrap();
+        drop(store);
+
+        let mut reopened = open(&database_path, &state_path);
+        assert_eq!(
+            reopened.completed_rows_after("imessage", 0).unwrap(),
+            vec![12, 14]
+        );
+        assert_eq!(
+            reopened.completed_rows_after("telegram", 0).unwrap(),
+            vec![13]
+        );
+
+        reopened.set_cursor("imessage", 12).unwrap();
+        assert_eq!(
+            reopened.completed_rows_after("imessage", 0).unwrap(),
+            vec![14]
+        );
+        reopened.set_cursor("imessage", 14).unwrap();
+        assert!(reopened
+            .completed_rows_after("imessage", 0)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            reopened.completed_rows_after("telegram", 0).unwrap(),
+            vec![13]
         );
         cleanup(&database_path, &state_path);
     }
