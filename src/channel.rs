@@ -97,8 +97,14 @@ trait ChannelContract {
     fn id(&self) -> &'static str;
     fn primary_target(&self, configured: &str) -> Result<String>;
     async fn poll(&self, since: i64) -> Result<Vec<RawMessage>>;
+    fn poll_is_complete_snapshot(&self) -> bool {
+        false
+    }
     async fn latest_cursor(&self) -> Result<i64>;
     fn accept(&self, message: &RawMessage) -> Option<(String, String)>;
+    fn should_defer(&self, _message: &RawMessage) -> Result<bool> {
+        Ok(false)
+    }
     fn reject_reason(&self, message: &RawMessage) -> &'static str;
     fn approval_origin(&self, message: &RawMessage, thread: &str) -> AnswerOrigin;
     fn route_thread_groups(&self, thread: &str) -> Vec<Vec<String>>;
@@ -222,12 +228,28 @@ impl Channel {
         }
     }
 
+    pub fn poll_is_complete_snapshot(&self) -> bool {
+        match self {
+            Self::IMessage(channel) => ChannelContract::poll_is_complete_snapshot(channel),
+            Self::Telegram(channel) => ChannelContract::poll_is_complete_snapshot(channel),
+            Self::Slack(channel) => ChannelContract::poll_is_complete_snapshot(channel),
+        }
+    }
+
     /// Returns `(thread_key, reply_target)` for an accepted message.
     pub fn accept(&self, message: &RawMessage) -> Option<(String, String)> {
         match self {
             Self::IMessage(channel) => ChannelContract::accept(channel, message),
             Self::Telegram(channel) => ChannelContract::accept(channel, message),
             Self::Slack(channel) => ChannelContract::accept(channel, message),
+        }
+    }
+
+    pub fn should_defer(&self, message: &RawMessage) -> Result<bool> {
+        match self {
+            Self::IMessage(channel) => ChannelContract::should_defer(channel, message),
+            Self::Telegram(channel) => ChannelContract::should_defer(channel, message),
+            Self::Slack(channel) => ChannelContract::should_defer(channel, message),
         }
     }
 
@@ -408,6 +430,10 @@ impl ChannelContract for IMessageChannel {
         tokio::task::spawn_blocking(move || poller.max_row_id()).await?
     }
 
+    fn poll_is_complete_snapshot(&self) -> bool {
+        true
+    }
+
     fn accept(&self, message: &RawMessage) -> Option<(String, String)> {
         if common_reject_reason(message).is_some()
             || (!self.reply_marker.is_empty() && message.text.contains(&self.reply_marker))
@@ -428,6 +454,16 @@ impl ChannelContract for IMessageChannel {
             }
         }
         None
+    }
+
+    fn should_defer(&self, message: &RawMessage) -> Result<bool> {
+        self.poller.should_defer_pending_filename(
+            message.row_id,
+            message
+                .images
+                .iter()
+                .any(|image| image.locator.trim().is_empty()),
+        )
     }
 
     fn reject_reason(&self, message: &RawMessage) -> &'static str {

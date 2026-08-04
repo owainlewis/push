@@ -107,8 +107,7 @@ impl Poller {
             out.push(r?);
         }
         let mut attachments = conn.prepare(SELECT_ATTACHMENTS)?;
-        let mut ready_count = out.len();
-        for (index, message) in out.iter_mut().enumerate() {
+        for message in &mut out {
             let rows = attachments.query_map([message.row_id], |row| {
                 let locator: Option<String> = row.get(0)?;
                 let bytes: Option<i64> = row.get(1)?;
@@ -116,29 +115,27 @@ impl Poller {
                 Ok((locator, bytes, mime_type))
             })?;
             let mut message_attachments = Vec::new();
-            let mut has_pending_filename = false;
             for row in rows {
                 let (locator, bytes, mime_type) = row?;
                 let locator = locator.unwrap_or_default();
-                has_pending_filename |= locator.trim().is_empty();
                 message_attachments.push(Attachment {
                     locator,
                     file_size: bytes.and_then(|value| usize::try_from(value).ok()),
                     mime_type,
                 });
             }
-            if has_pending_filename {
-                if self.should_defer_filename(message.row_id)? {
-                    ready_count = index;
-                    break;
-                }
-            } else {
-                self.clear_pending_filename(message.row_id)?;
-            }
             message.attachments = message_attachments;
         }
-        out.truncate(ready_count);
         Ok(out)
+    }
+
+    pub fn should_defer_pending_filename(&self, row_id: i64, pending: bool) -> Result<bool> {
+        if pending {
+            self.should_defer_filename(row_id)
+        } else {
+            self.clear_pending_filename(row_id)?;
+            Ok(false)
+        }
     }
 
     fn should_defer_filename(&self, row_id: i64) -> Result<bool> {
@@ -333,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn poll_defers_a_message_and_later_rows_until_attachment_filename_is_ready() {
+    fn pending_filename_deferral_ends_when_attachment_filename_is_ready() {
         let root = temp_dir("chat-db-pending-attachment");
         let path = root.join("chat.db");
         let conn = Connection::open(&path).unwrap();
@@ -357,7 +354,12 @@ mod tests {
         drop(conn);
 
         let poller = Poller::new(path.to_string_lossy().to_string());
-        assert!(poller.poll(0).unwrap().is_empty());
+        let pending = poller.poll(0).unwrap();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].attachments[0].locator, "");
+        assert!(poller
+            .should_defer_pending_filename(pending[0].row_id, true)
+            .unwrap());
 
         let conn = Connection::open(&path).unwrap();
         conn.execute(
@@ -370,12 +372,15 @@ mod tests {
         assert_eq!(ready.len(), 2);
         assert_eq!(ready[0].row_id, 1);
         assert_eq!(ready[0].attachments[0].locator, "missing-photo.heic");
+        assert!(!poller
+            .should_defer_pending_filename(ready[0].row_id, false)
+            .unwrap());
         assert_eq!(ready[1].row_id, 2);
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn poll_bounds_pending_filename_deferral_so_later_rows_can_progress() {
+    fn pending_filename_deferral_is_bounded_and_stable_until_cursor_progress() {
         let root = temp_dir("chat-db-abandoned-attachment");
         let path = root.join("chat.db");
         let conn = Connection::open(&path).unwrap();
@@ -399,18 +404,21 @@ mod tests {
         drop(conn);
 
         let poller = Poller::new(path.to_string_lossy().to_string());
+        let messages = poller.poll(0).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].attachments[0].locator, "");
         for _ in 0..PENDING_FILENAME_POLL_LIMIT {
-            assert!(poller.poll(0).unwrap().is_empty());
+            assert!(poller
+                .should_defer_pending_filename(messages[0].row_id, true)
+                .unwrap());
         }
-        let ready = poller.poll(0).unwrap();
-        assert_eq!(ready.len(), 2);
-        assert_eq!(ready[0].row_id, 1);
-        assert_eq!(ready[0].attachments[0].locator, "");
-        assert_eq!(ready[1].row_id, 2);
-        assert_eq!(poller.poll(0).unwrap().len(), 2);
-        let after_failed = poller.poll(1).unwrap();
-        assert_eq!(after_failed.len(), 1);
-        assert_eq!(after_failed[0].row_id, 2);
+        assert!(!poller
+            .should_defer_pending_filename(messages[0].row_id, true)
+            .unwrap());
+        assert!(!poller
+            .should_defer_pending_filename(messages[0].row_id, true)
+            .unwrap());
+        assert_eq!(poller.poll(1).unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(root);
     }
 

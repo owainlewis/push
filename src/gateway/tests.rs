@@ -2069,6 +2069,170 @@ async fn rejected_imessage_sender_does_not_open_local_attachments() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn imessage_pending_filename_defers_only_accepted_rows_and_cannot_block_forever() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("imessage-pending-filename-sessions");
+    let assistant_dir = temp_path("imessage-pending-filename-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::<FakeRunCall>::new()));
+    let mut gateway = Gateway::new(test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    ))
+    .unwrap();
+    gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+
+    let mut rejected = message(1, "+15550000000", "+15550000000", false, "ignored");
+    rejected.images.push(InboundImage {
+        locator: String::new(),
+        file_size: Some(24),
+        mime_type: Some("image/heic".to_string()),
+        data: None,
+    });
+    let accepted = message(
+        2,
+        "+15551234567",
+        "+15551234567",
+        false,
+        "continues immediately",
+    );
+    run_messages(&mut gateway, vec![rejected, accepted]).await;
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(gateway.store.lock().unwrap().cursor("imessage").unwrap(), 2);
+
+    let mut pending = message(3, "+15551234567", "+15551234567", false, "photo");
+    pending.images.push(InboundImage {
+        locator: String::new(),
+        file_size: Some(24),
+        mime_type: Some("image/heic".to_string()),
+        data: None,
+    });
+    let later = message(
+        4,
+        "+15551234567",
+        "+15551234567",
+        false,
+        "runs while photo waits",
+    );
+    let batch = vec![pending, later];
+    for _ in 0..3 {
+        run_messages(&mut gateway, batch.clone()).await;
+    }
+    assert_eq!(calls.lock().unwrap().len(), 2);
+    assert_eq!(gateway.store.lock().unwrap().cursor("imessage").unwrap(), 2);
+
+    run_messages(&mut gateway, batch).await;
+    assert_eq!(calls.lock().unwrap().len(), 2);
+    assert_eq!(gateway.store.lock().unwrap().cursor("imessage").unwrap(), 4);
+    assert!(gateway
+        .ctx
+        .sent_replies
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .1
+        .contains("JPEG, PNG, or WebP"));
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(format!("{state_path}.cache"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn imessage_deferred_barrier_survives_preworker_failure() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("imessage-deferred-failure-sessions");
+    let assistant_dir = temp_path("imessage-deferred-failure-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::<FakeRunCall>::new()));
+    let mut gateway = Gateway::new(test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    ))
+    .unwrap();
+    gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+
+    let mut pending = message(1, "+15551234567", "+15551234567", false, "photo");
+    pending.images.push(InboundImage {
+        locator: String::new(),
+        file_size: Some(24),
+        mime_type: Some("image/heic".to_string()),
+        data: None,
+    });
+    let later = message(2, "+15551234567", "+15551234567", false, "later");
+    let batch = vec![pending, later];
+    for _ in 0..3 {
+        run_messages(&mut gateway, batch.clone()).await;
+    }
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(gateway.store.lock().unwrap().cursor("imessage").unwrap(), 0);
+
+    gateway
+        .ctx
+        .history
+        .lock()
+        .unwrap()
+        .execute_batch_for_test("DROP TABLE messages");
+    run_messages(&mut gateway, batch).await;
+
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(gateway.store.lock().unwrap().cursor("imessage").unwrap(), 0);
+    assert!(gateway.ack.lock().unwrap().deferred.contains(&1));
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn imessage_complete_poll_reconciles_a_deleted_deferred_row() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("imessage-deferred-deleted-sessions");
+    let assistant_dir = temp_path("imessage-deferred-deleted-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::<FakeRunCall>::new()));
+    let mut gateway = Gateway::new(test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    ))
+    .unwrap();
+    gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+
+    let mut pending = message(1, "+15551234567", "+15551234567", false, "photo");
+    pending.images.push(InboundImage {
+        locator: String::new(),
+        file_size: Some(24),
+        mime_type: Some("image/heic".to_string()),
+        data: None,
+    });
+    let later = message(2, "+15551234567", "+15551234567", false, "later");
+    run_complete_snapshot(&mut gateway, vec![pending, later.clone()]).await;
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(gateway.store.lock().unwrap().cursor("imessage").unwrap(), 0);
+
+    run_complete_snapshot(&mut gateway, vec![later]).await;
+
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(gateway.store.lock().unwrap().cursor("imessage").unwrap(), 2);
+    assert!(gateway.ack.lock().unwrap().deferred.is_empty());
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn slack_download_failure_replies_without_running_an_agent() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -2512,7 +2676,7 @@ async fn closed_worker_queue_is_recovered_without_another_message() {
         },
     );
 
-    gateway.process_messages(Vec::new()).await;
+    gateway.process_messages(Vec::new(), false).await;
     gateway.queues.clear();
     gateway.drain_workers().await;
 
@@ -3735,6 +3899,12 @@ fn fake_runners_with_hook(
 
 async fn run_messages(gateway: &mut Gateway, messages: Vec<RawMessage>) {
     gateway.tick_fake(messages).await;
+    gateway.queues.clear();
+    gateway.drain_workers().await;
+}
+
+async fn run_complete_snapshot(gateway: &mut Gateway, messages: Vec<RawMessage>) {
+    gateway.tick_fake_complete(messages).await;
     gateway.queues.clear();
     gateway.drain_workers().await;
 }
