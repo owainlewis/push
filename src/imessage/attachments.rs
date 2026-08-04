@@ -17,6 +17,8 @@ use uuid::Uuid;
 use crate::channel::InboundImage;
 use crate::image::{DownloadedImage, MAX_IMAGE_BYTES};
 
+const MAX_HEIC_INPUT_BYTES: u64 = 32 * 1024 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attachment {
     pub locator: String,
@@ -208,7 +210,7 @@ fn read_bounded(file: File) -> Result<DownloadedImage> {
     Ok(DownloadedImage { bytes })
 }
 
-async fn convert_heic(mut source: File, converter: &Path) -> Result<DownloadedImage> {
+async fn convert_heic(source: File, converter: &Path) -> Result<DownloadedImage> {
     let directory = std::env::temp_dir().join(format!("push-heic-{}", Uuid::new_v4()));
     DirBuilder::new()
         .mode(0o700)
@@ -227,8 +229,14 @@ async fn convert_heic(mut source: File, converter: &Path) -> Result<DownloadedIm
         .open(&input)
         .context("create a private HEIC conversion input")?;
     cleanup.input = Some(input.clone());
-    std::io::copy(&mut source, &mut private_source)
-        .context("copy the HEIC image into the private conversion directory")?;
+    let copied = std::io::copy(
+        &mut source.take(MAX_HEIC_INPUT_BYTES + 1),
+        &mut private_source,
+    )
+    .context("copy the HEIC image into the private conversion directory")?;
+    if copied > MAX_HEIC_INPUT_BYTES {
+        bail!("HEIC or HEIF image exceeds the 32 MiB conversion input limit");
+    }
     private_source
         .flush()
         .context("finish the private HEIC conversion input")?;
@@ -436,6 +444,30 @@ mod tests {
         assert!(!paths[0].exists());
         assert!(!paths[1].exists());
         assert!(!paths[0].parent().unwrap().exists());
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(marker_dir);
+    }
+
+    #[tokio::test]
+    async fn bounds_heic_input_before_starting_conversion() {
+        let root = temp_dir("imessage-large-heic");
+        let source = root.join("large.heic");
+        let source_file = File::create(&source).unwrap();
+        source_file.set_len(MAX_HEIC_INPUT_BYTES + 1).unwrap();
+        let marker_dir = temp_dir("imessage-large-heic-marker");
+        let marker = marker_dir.join("converter-ran");
+        let converter = FakeCli::new("sips", &format!("#!/bin/sh\ntouch {}\n", sh_arg(&marker)));
+
+        let error = download_with_converter(
+            &root,
+            &image(&source, "image/heic"),
+            Path::new(&converter.bin()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("32 MiB"));
+        assert!(!marker.exists());
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(marker_dir);
     }

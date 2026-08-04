@@ -51,7 +51,8 @@ can ask the agent to use any capability allowed by that agent's configuration.
 
 Send up to four JPEG, PNG, WebP, HEIC, or HEIF images in one accepted
 conversation, with or without message text. Their combined prepared size must
-be at most 6 MiB. Images work with Claude Code, Codex, and Pi.
+be at most 6 MiB. Each HEIC or HEIF source must be at most 32 MiB before local
+conversion. Images work with Claude Code, Codex, and Pi.
 
 Polling reads attachment paths, byte-size hints, and MIME type hints from
 `chat.db`; it does not open the attachment files. After the direct-message,
