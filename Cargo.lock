@@ -800,6 +800,7 @@ name = "push"
 version = "0.10.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "chrono-tz",
  "futures-util",

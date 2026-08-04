@@ -124,17 +124,6 @@ impl Runner {
         matches!(self, Runner::Claude(_))
     }
 
-    pub fn supports_images(&self) -> bool {
-        if matches!(self, Runner::Codex(_) | Runner::Pi(_)) {
-            return true;
-        }
-        #[cfg(test)]
-        if let Self::Fake(runner) = self {
-            return matches!(runner.backend, AgentBackend::Codex | AgentBackend::Pi);
-        }
-        false
-    }
-
     pub async fn run(&self, req: Request<'_>, timeout: Duration) -> Result<RunOutput, RunError> {
         match self {
             Runner::Claude(r) => r.run(req, timeout).await,

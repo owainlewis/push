@@ -144,20 +144,6 @@ where
         return;
     };
 
-    if !job.image_attachments.is_empty() && !runner.supports_images() {
-        let reply = "Image messages are currently supported only when this conversation routes to Codex or Pi.";
-        let delivery = record_and_deliver(ctx, &job, OutboundOrigin::Gateway, reply).await;
-        report_delivery(
-            ctx,
-            &job,
-            delivery,
-            reply,
-            "image_backend_unsupported",
-            "deliver image backend fallback",
-        );
-        return;
-    }
-
     let session_result = {
         let initial_session_id = runner.initial_session_id();
         ctx.store.lock().unwrap().session_for(

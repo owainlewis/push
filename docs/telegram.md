@@ -52,10 +52,10 @@ Telegram-only preflight does not open `chat.db` and does not require macOS or
 
 ## Image Messages
 
-With Codex or Pi selected for the conversation, send the bot a Telegram photo
-or an image document. Push accepts JPEG, PNG, and WebP files. A caption becomes
-the message text; an image without a caption is still accepted. Telegram media
-groups are processed as separate messages.
+Send the bot a Telegram photo or an image document with Claude Code, Codex, or
+Pi selected for the conversation. Push accepts JPEG, PNG, and WebP files. A
+caption becomes the message text; an image without a caption is still accepted.
+Telegram media groups are processed as separate messages.
 
 Push downloads an image only after the private-chat and sender allowlist checks
 pass. The declared and downloaded size must fit within the 6 MiB per-message
@@ -67,13 +67,12 @@ Validated bytes are written to an owner-only temporary directory under
 `$PUSH_HOME/cache`, attached to the agent turn, and removed after success,
 failure, timeout, interruption, or session recovery. Push stores the caption or
 an `[Image attachment]` placeholder in conversation history, not the image
-bytes. The image is sent through the configured Codex or Pi model provider, so
-review that provider's image and data controls before using this feature. Pi
-receives images using its native `@image-path` arguments while message text
-continues through standard input.
+bytes. The image is sent through the configured model provider, so review that
+provider's image and data controls before using this feature. Claude Code
+receives base64 content blocks through streaming JSON input. Pi receives native
+`@image-path` arguments while message text continues through standard input.
 
-Image input for Claude Code, and sending generated images back through Telegram,
-are not supported yet.
+Sending generated images back through Telegram is not supported yet.
 
 ## Voice Messages
 

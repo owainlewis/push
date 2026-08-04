@@ -1965,10 +1965,10 @@ async fn invalid_and_oversized_telegram_images_fall_back_without_running_the_age
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn telegram_image_on_unsupported_backend_falls_back_without_downloading() {
+async fn telegram_image_reaches_claude_and_is_removed_after_the_turn() {
     let state_path = temp_state_path();
-    let sessions_dir = temp_path("unsupported-image-sessions");
-    let assistant_dir = temp_path("unsupported-image-assistant");
+    let sessions_dir = temp_path("claude-image-sessions");
+    let assistant_dir = temp_path("claude-image-assistant");
     std::fs::create_dir_all(&assistant_dir).unwrap();
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mut cfg = test_config(
@@ -1993,16 +1993,20 @@ async fn telegram_image_on_unsupported_backend_falls_back_without_downloading() 
             resume_missing_once: None,
         }),
     )]));
-    let mut message = telegram_image_message(1, 7, 7, "inspect");
-    message.images[0].data = Some(b"not an image".to_vec());
+    run_messages(
+        &mut gateway,
+        vec![telegram_image_message(1, 7, 7, "inspect")],
+    )
+    .await;
 
-    run_messages(&mut gateway, vec![message]).await;
-
-    assert!(calls.lock().unwrap().is_empty());
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
     assert_eq!(
-        gateway.ctx.sent_replies.lock().unwrap()[0].1,
-        "Image messages are currently supported only when this conversation routes to Codex or Pi."
+        crate::prompt::current_message(&calls[0].prompt).as_deref(),
+        Some("inspect")
     );
+    assert_eq!(calls[0].images.len(), 1);
+    assert!(!calls[0].images[0].exists());
 
     let _ = std::fs::remove_file(&state_path);
     let _ = std::fs::remove_file(format!("{state_path}.db"));
