@@ -14,6 +14,7 @@ mod config;
 mod doctor;
 mod gateway;
 mod history;
+mod image;
 mod imessage;
 mod jobs;
 mod markdown;

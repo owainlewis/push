@@ -2,15 +2,17 @@
 //! outcome in canonical history, and delivers the reply.
 
 use std::future::{pending, Future};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
 use crate::agent::{Request, RunError};
 use crate::history::{DeliveryStatus, OutboundMessage, OutboundOrigin};
+use crate::image::{PreparedImages, MAX_IMAGE_BYTES, MAX_IMAGE_COUNT};
 use crate::prompt::{ComposedPrompt, Composer};
 use crate::voice::MAX_AUDIO_BYTES;
 
@@ -100,24 +102,26 @@ where
         }
     }
 
-    if let Some(reply) = command(ctx, &job) {
-        let delivery = record_and_deliver(ctx, &job, OutboundOrigin::Gateway, &reply).await;
-        if delivery.is_ok() {
-            info!(
-                "[{}] command reply sent via {}",
-                job.thread,
-                ctx.channel.id()
+    if job.image_attachments.is_empty() {
+        if let Some(reply) = command(ctx, &job) {
+            let delivery = record_and_deliver(ctx, &job, OutboundOrigin::Gateway, &reply).await;
+            if delivery.is_ok() {
+                info!(
+                    "[{}] command reply sent via {}",
+                    job.thread,
+                    ctx.channel.id()
+                );
+            }
+            report_delivery(
+                ctx,
+                &job,
+                delivery,
+                &reply,
+                "command",
+                "record command reply",
             );
+            return;
         }
-        report_delivery(
-            ctx,
-            &job,
-            delivery,
-            &reply,
-            "command",
-            "record command reply",
-        );
-        return;
     }
 
     let Some(runner) = ctx.runners.get(&job.backend) else {
@@ -139,6 +143,21 @@ where
         complete_job(ctx, &job, "missing_runner");
         return;
     };
+
+    if !job.image_attachments.is_empty() && !runner.supports_images() {
+        let reply =
+            "Image messages are currently supported only when this conversation routes to Codex.";
+        let delivery = record_and_deliver(ctx, &job, OutboundOrigin::Gateway, reply).await;
+        report_delivery(
+            ctx,
+            &job,
+            delivery,
+            reply,
+            "image_backend_unsupported",
+            "deliver image backend fallback",
+        );
+        return;
+    }
 
     let session_result = {
         let initial_session_id = runner.initial_session_id();
@@ -220,6 +239,41 @@ where
         }
     };
 
+    let prepared_images = if job.image_attachments.is_empty() {
+        None
+    } else {
+        match prepare_images(ctx, &job).await {
+            Ok(images) => Some(images),
+            Err(error) => {
+                warn!("[{}] {error:#}", job.thread);
+                audit(
+                    ctx,
+                    ctx.audit.failed(
+                        "image_preparation_failed",
+                        job.row_id,
+                        &job.thread,
+                        Some(job.backend),
+                        error.to_string(),
+                    ),
+                );
+                let reply = "I could not use that image. Send up to 4 JPEG, PNG, or WebP images with a combined size under 6 MiB, then try again.";
+                let delivery = record_and_deliver(ctx, &job, OutboundOrigin::Gateway, reply).await;
+                report_delivery(
+                    ctx,
+                    &job,
+                    delivery,
+                    reply,
+                    "image_preparation_failed",
+                    "deliver image fallback",
+                );
+                return;
+            }
+        }
+    };
+    let image_paths = prepared_images
+        .as_ref()
+        .map_or_else(Vec::new, |images| images.paths().to_vec());
+
     let run = async {
         let mut session_id = session_id;
         let mut prompt = match conversation_prompt(ctx, &job, &composer, is_new) {
@@ -254,7 +308,7 @@ where
         );
         let mut result = runner
             .run(
-                backend_request(&session_id, is_new, &work_dir, &prompt),
+                backend_request(&session_id, is_new, &work_dir, &prompt, &image_paths),
                 ctx.run_timeout,
             )
             .await;
@@ -269,7 +323,7 @@ where
                     })?;
                     result = runner
                         .run(
-                            backend_request(&session_id, false, &work_dir, &prompt),
+                            backend_request(&session_id, false, &work_dir, &prompt, &image_paths),
                             ctx.run_timeout,
                         )
                         .await;
@@ -323,7 +377,7 @@ where
             );
             result = runner
                 .run(
-                    backend_request(&session_id, true, &work_dir, &prompt),
+                    backend_request(&session_id, true, &work_dir, &prompt, &image_paths),
                     ctx.run_timeout,
                 )
                 .await;
@@ -351,12 +405,14 @@ where
             run.await
         }
     };
-    tokio::pin!(run);
+    let mut run = Box::pin(run);
     tokio::pin!(interrupt);
     let result = tokio::select! {
         result = &mut run => Some(result),
         _ = &mut interrupt => None,
     };
+    drop(run);
+    drop(prepared_images);
 
     match result {
         Some(Ok(out)) => {
@@ -619,6 +675,35 @@ async fn prepare_voice(ctx: &Ctx, job: &Job) -> std::result::Result<String, Voic
         .replace_inbound_content(job.inbound_id, &transcript)
         .map_err(VoicePreparationError::History)?;
     Ok(transcript)
+}
+
+async fn prepare_images(ctx: &Ctx, job: &Job) -> Result<PreparedImages> {
+    if job.image_attachments.len() > MAX_IMAGE_COUNT {
+        anyhow::bail!("image message has more than {MAX_IMAGE_COUNT} attachments");
+    }
+    let declared_total = job
+        .image_attachments
+        .iter()
+        .filter_map(|image| image.file_size)
+        .try_fold(0usize, |total, size| total.checked_add(size))
+        .context("image message size overflow")?;
+    if declared_total > MAX_IMAGE_BYTES {
+        anyhow::bail!("image message exceeds the 6 MiB limit");
+    }
+
+    let mut downloaded = Vec::with_capacity(job.image_attachments.len());
+    let mut actual_total = 0usize;
+    for attachment in &job.image_attachments {
+        let image = ctx.channel.download_image(attachment).await?;
+        actual_total = actual_total
+            .checked_add(image.bytes.len())
+            .context("image message size overflow")?;
+        if actual_total > MAX_IMAGE_BYTES {
+            anyhow::bail!("image message exceeds the 6 MiB limit");
+        }
+        downloaded.push(image);
+    }
+    PreparedImages::create(&ctx.cfg.paths.cache, downloaded)
 }
 
 /// Error and completion labels for one gateway-authored reply flow.
@@ -1003,6 +1088,7 @@ fn backend_request<'a>(
     is_new: bool,
     work_dir: &'a str,
     prompt: &'a ComposedPrompt,
+    images: &'a [PathBuf],
 ) -> Request<'a> {
     Request {
         session_id,
@@ -1010,5 +1096,6 @@ fn backend_request<'a>(
         work_dir,
         instructions: &prompt.instructions,
         prompt: &prompt.content,
+        images,
     }
 }

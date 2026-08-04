@@ -392,6 +392,7 @@ mod tests {
             is_group: false,
             text: "secret request".to_string(),
             voice: None,
+            images: Vec::new(),
             is_from_me: false,
             is_supported: true,
             thread_id: None,

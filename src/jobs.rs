@@ -2967,6 +2967,7 @@ failure precisely. End with exactly one final line: VERDICT: PASS or VERDICT: FA
         work_dir: &workdir,
         instructions,
         prompt: &prompt,
+        images: &[],
     };
     match runner.run_evaluator(request, job.timeout).await {
         Ok(output) => evaluation_from_reply(output.reply),
@@ -3037,6 +3038,7 @@ async fn execute(cfg: &Config, job: &Job) -> std::result::Result<String, Executi
         work_dir: &workdir,
         instructions: &prompt.instructions,
         prompt: &prompt.content,
+        images: &[],
     };
     tracing::info!(
         "job {} starting: backend={} workdir={} timeout={}",

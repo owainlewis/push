@@ -309,7 +309,7 @@ The main pipeline lives in [`src/gateway/mod.rs`](src/gateway/mod.rs) and
  5. HISTORY INSERT       persist accepted inbound message in push.db
  6. ROUTE                select backend by exact thread, parent, channel, default
  7. ENQUEUE              place message on its per-thread bounded queue
- 8. PREPARE              resolve session, workspace, identity, optional voice
+ 8. PREPARE              resolve session, workspace, identity, voice, and images
  9. COMPOSE              frame system sections and untrusted fresh context
 10. RUN BACKEND          invoke the selected agent CLI with a timeout
 11. HISTORY INSERT       persist generated outbound response
@@ -437,6 +437,8 @@ File: [`src/telegram.rs`](src/telegram.rs)
 - Splits rich Markdown within Telegram's 4,096-character limit.
 - Refreshes typing activity during long runs.
 - Downloads voice notes only after allowlist acceptance.
+- Downloads supported images only after allowlist acceptance, validates their
+  signatures, and removes private handoff files after the Codex turn.
 - Sends text and optional generated voice replies.
 
 ### Slack
@@ -493,6 +495,7 @@ File: [`src/codex.rs`](src/codex.rs)
 | New chat | `codex exec --json` |
 | Resumed chat | `codex exec resume <thread-id> --json` |
 | Instructions | `-c developer_instructions=<composed system sections>` |
+| Images | repeated `--image <private-temporary-path>` on new and resumed chats |
 | Unattended job | full access with approval prompts disabled |
 | Evaluator | read-only, ephemeral, tools and project instructions disabled |
 
@@ -877,6 +880,7 @@ result before proactive delivery.
 | [`src/pi.rs`](src/pi.rs) | Pi CLI adapter |
 | [`src/store.rs`](src/store.rs) | transactional SQLite cursor/session state and legacy JSON migration |
 | [`src/history.rs`](src/history.rs) | SQLite schema, conversation history, delivery, and migrations |
+| [`src/image.rs`](src/image.rs) | image limits, signature validation, and private temporary-file cleanup |
 | [`src/jobs.rs`](src/jobs.rs) | runbook validation, execution, evaluation, scheduler, and ledger |
 | [`src/audit.rs`](src/audit.rs) | redacted JSONL audit log |
 | [`src/prompt.rs`](src/prompt.rs) | system-section and untrusted prompt-content composition |

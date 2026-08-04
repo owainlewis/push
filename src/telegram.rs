@@ -10,7 +10,8 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::channel::{InboundVoice, RawMessage};
+use crate::channel::{InboundImage, InboundVoice, RawMessage};
+use crate::image::{DownloadedImage, MAX_IMAGE_BYTES};
 use crate::voice::{AudioClip, MAX_AUDIO_BYTES};
 
 pub const TEXT_LIMIT: usize = 4096;
@@ -29,7 +30,13 @@ trait Transport: Send + Sync {
     fn post<'a>(&'a self, token: &'a str, method: &'static str, body: Value)
         -> TransportFuture<'a>;
 
-    fn download<'a>(&'a self, _token: &'a str, _file_path: &'a str) -> BytesFuture<'a> {
+    fn download<'a>(
+        &'a self,
+        _token: &'a str,
+        _file_path: &'a str,
+        _max_bytes: usize,
+        _kind: &'static str,
+    ) -> BytesFuture<'a> {
         Box::pin(async { bail!("Telegram file download is not available") })
     }
 
@@ -73,7 +80,13 @@ impl Transport for ReqwestTransport {
         })
     }
 
-    fn download<'a>(&'a self, token: &'a str, file_path: &'a str) -> BytesFuture<'a> {
+    fn download<'a>(
+        &'a self,
+        token: &'a str,
+        file_path: &'a str,
+        max_bytes: usize,
+        kind: &'static str,
+    ) -> BytesFuture<'a> {
         Box::pin(async move {
             let url = format!("https://api.telegram.org/file/bot{token}/{file_path}");
             let mut response = self
@@ -82,30 +95,30 @@ impl Transport for ReqwestTransport {
                 .timeout(Duration::from_secs(HTTP_TIMEOUT_SECONDS))
                 .send()
                 .await
-                .map_err(|_| anyhow::anyhow!("Telegram voice download failed"))?;
+                .map_err(|_| anyhow::anyhow!("Telegram {kind} download failed"))?;
             let status = response.status();
             if !status.is_success() {
-                bail!("Telegram voice download returned HTTP {}", status.as_u16());
+                bail!("Telegram {kind} download returned HTTP {}", status.as_u16());
             }
             if response
                 .content_length()
-                .is_some_and(|size| size > MAX_AUDIO_BYTES as u64)
+                .is_some_and(|size| size > max_bytes as u64)
             {
-                bail!("Telegram voice message exceeds the 20 MB limit");
+                bail!("Telegram {kind} exceeds the configured size limit");
             }
             let mut bytes = Vec::with_capacity(
                 response
                     .content_length()
                     .unwrap_or_default()
-                    .min(MAX_AUDIO_BYTES as u64) as usize,
+                    .min(max_bytes as u64) as usize,
             );
             while let Some(chunk) = response
                 .chunk()
                 .await
-                .context("read Telegram voice message")?
+                .with_context(|| format!("read Telegram {kind}"))?
             {
-                if bytes.len().saturating_add(chunk.len()) > MAX_AUDIO_BYTES {
-                    bail!("Telegram voice message exceeds the 20 MB limit");
+                if bytes.len().saturating_add(chunk.len()) > max_bytes {
+                    bail!("Telegram {kind} exceeds the configured size limit");
                 }
                 bytes.extend_from_slice(&chunk);
             }
@@ -326,12 +339,54 @@ impl Telegram {
             .result
             .context("Telegram getFile omitted the file path")?
             .file_path;
-        let bytes = self.transport.download(&self.token, &file_path).await?;
+        let bytes = self
+            .transport
+            .download(&self.token, &file_path, MAX_AUDIO_BYTES, "voice message")
+            .await?;
         Ok(AudioClip {
             bytes,
             filename: voice.filename.clone(),
             mime_type: voice.mime_type.clone(),
         })
+    }
+
+    pub async fn download_image(&self, image: &InboundImage) -> Result<DownloadedImage> {
+        if let Some(bytes) = &image.data {
+            return Ok(DownloadedImage {
+                bytes: bytes.clone(),
+            });
+        }
+        if image.file_size.is_some_and(|size| size > MAX_IMAGE_BYTES) {
+            bail!("Telegram image exceeds the 6 MiB limit");
+        }
+        if !matches!(
+            image.mime_type.as_deref(),
+            Some("image/jpeg" | "image/png" | "image/webp")
+        ) {
+            bail!("Telegram image is not a supported JPEG, PNG, or WebP file");
+        }
+        let transport_response = self
+            .transport
+            .post(&self.token, "getFile", json!({"file_id": image.locator}))
+            .await?;
+        let response: ApiResponse<TelegramFile> =
+            serde_json::from_value(transport_response.body)
+                .map_err(|_| anyhow::anyhow!("Telegram getFile returned an invalid response"))?;
+        if !response.ok {
+            bail!(
+                "Telegram getFile returned HTTP {}",
+                transport_response.status
+            );
+        }
+        let file_path = response
+            .result
+            .context("Telegram getFile omitted the image path")?
+            .file_path;
+        let bytes = self
+            .transport
+            .download(&self.token, &file_path, MAX_IMAGE_BYTES, "image")
+            .await?;
+        Ok(DownloadedImage { bytes })
     }
 
     #[cfg_attr(test, allow(dead_code))]
@@ -458,11 +513,43 @@ impl Update {
                 is_group: false,
                 text: String::new(),
                 voice: None,
+                images: Vec::new(),
                 is_from_me: false,
                 is_supported: false,
                 thread_id: None,
             };
         };
+        let images = message
+            .photo
+            .into_iter()
+            .max_by_key(|photo| {
+                (
+                    photo.width.saturating_mul(photo.height),
+                    photo.file_size.unwrap_or_default(),
+                )
+            })
+            .map(|photo| InboundImage {
+                locator: photo.file_id,
+                file_size: photo.file_size,
+                mime_type: Some("image/jpeg".to_string()),
+                data: None,
+            })
+            .or_else(|| {
+                message.document.and_then(|document| {
+                    document
+                        .mime_type
+                        .as_deref()
+                        .is_some_and(|mime| mime.starts_with("image/"))
+                        .then_some(InboundImage {
+                            locator: document.file_id,
+                            file_size: document.file_size,
+                            mime_type: document.mime_type,
+                            data: None,
+                        })
+                })
+            })
+            .into_iter()
+            .collect();
         RawMessage {
             row_id: self.update_id,
             provider_event_id: None,
@@ -473,7 +560,7 @@ impl Update {
                 .unwrap_or_default(),
             chat_identifier: message.chat.id.to_string(),
             is_group: message.chat.kind != "private",
-            text: message.text.unwrap_or_default(),
+            text: message.text.or(message.caption).unwrap_or_default(),
             voice: message.voice.map(|voice| InboundVoice {
                 locator: voice.file_id,
                 file_size: voice.file_size,
@@ -481,6 +568,7 @@ impl Update {
                 filename: "voice.ogg".to_string(),
                 data: None,
             }),
+            images,
             is_from_me: false,
             is_supported: true,
             thread_id: message.message_thread_id,
@@ -496,6 +584,12 @@ struct TelegramMessage {
     #[serde(default)]
     text: Option<String>,
     #[serde(default)]
+    caption: Option<String>,
+    #[serde(default)]
+    photo: Vec<TelegramPhoto>,
+    #[serde(default)]
+    document: Option<TelegramDocument>,
+    #[serde(default)]
     voice: Option<TelegramVoice>,
     #[serde(default)]
     message_thread_id: Option<i64>,
@@ -508,6 +602,24 @@ struct TelegramVoice {
     file_size: Option<usize>,
     #[serde(default)]
     mime_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TelegramPhoto {
+    file_id: String,
+    width: usize,
+    height: usize,
+    #[serde(default)]
+    file_size: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct TelegramDocument {
+    file_id: String,
+    #[serde(default)]
+    mime_type: Option<String>,
+    #[serde(default)]
+    file_size: Option<usize>,
 }
 
 #[derive(Default, Deserialize)]
@@ -613,7 +725,13 @@ mod tests {
             })
         }
 
-        fn download<'a>(&'a self, _token: &'a str, file_path: &'a str) -> BytesFuture<'a> {
+        fn download<'a>(
+            &'a self,
+            _token: &'a str,
+            file_path: &'a str,
+            _max_bytes: usize,
+            _kind: &'static str,
+        ) -> BytesFuture<'a> {
             Box::pin(async move {
                 self.download_paths
                     .lock()
@@ -744,6 +862,9 @@ mod tests {
                     kind: "private".to_string(),
                 },
                 text: Some("hi".to_string()),
+                caption: None,
+                photo: Vec::new(),
+                document: None,
                 voice: None,
                 message_thread_id: None,
             }),
@@ -768,6 +889,9 @@ mod tests {
                     kind: "private".to_string(),
                 },
                 text: None,
+                caption: None,
+                photo: Vec::new(),
+                document: None,
                 voice: Some(TelegramVoice {
                     file_id: "file-123".to_string(),
                     file_size: Some(42),
@@ -783,6 +907,57 @@ mod tests {
         assert_eq!(voice.locator, "file-123");
         assert_eq!(voice.file_size, Some(42));
         assert!(voice.data.is_none());
+    }
+
+    #[test]
+    fn parses_caption_and_selects_the_largest_photo_without_downloading() {
+        let update: Update = serde_json::from_value(json!({
+            "update_id": 3,
+            "message": {
+                "from": {"id": 7},
+                "chat": {"id": 7, "type": "private"},
+                "caption": "inspect this",
+                "photo": [
+                    {"file_id": "small", "width": 90, "height": 90, "file_size": 42},
+                    {"file_id": "large", "width": 320, "height": 240}
+                ]
+            }
+        }))
+        .unwrap();
+
+        let message = update.into_raw();
+
+        assert_eq!(message.text, "inspect this");
+        assert_eq!(message.images.len(), 1);
+        assert_eq!(message.images[0].locator, "large");
+        assert_eq!(message.images[0].file_size, None);
+        assert_eq!(message.images[0].mime_type.as_deref(), Some("image/jpeg"));
+        assert!(message.images[0].data.is_none());
+    }
+
+    #[test]
+    fn parses_image_document_metadata_without_downloading() {
+        let update: Update = serde_json::from_value(json!({
+            "update_id": 4,
+            "message": {
+                "from": {"id": 7},
+                "chat": {"id": 7, "type": "private"},
+                "document": {
+                    "file_id": "document-image",
+                    "file_name": "diagram.png",
+                    "mime_type": "image/png",
+                    "file_size": 120
+                }
+            }
+        }))
+        .unwrap();
+
+        let message = update.into_raw();
+
+        assert_eq!(message.text, "");
+        assert_eq!(message.images.len(), 1);
+        assert_eq!(message.images[0].locator, "document-image");
+        assert_eq!(message.images[0].mime_type.as_deref(), Some("image/png"));
     }
 
     #[tokio::test]
@@ -811,6 +986,52 @@ mod tests {
             fake.download_paths.lock().unwrap().as_slice(),
             ["voice/file.oga"]
         );
+    }
+
+    #[tokio::test]
+    async fn downloads_image_by_file_id_after_metadata_parsing() {
+        let fake = Arc::new(FakeTransport::with_responses(vec![json!({
+            "ok": true,
+            "result": {"file_path": "photos/file.png"}
+        })]));
+        fake.downloads
+            .lock()
+            .unwrap()
+            .push_back(b"\x89PNG\r\n\x1a\nbody".to_vec());
+        let telegram =
+            Telegram::with_transport("secret".to_string(), vec![7], vec![], fake.clone());
+        let image = InboundImage {
+            locator: "image-123".to_string(),
+            file_size: Some(12),
+            mime_type: Some("image/png".to_string()),
+            data: None,
+        };
+
+        let downloaded = telegram.download_image(&image).await.unwrap();
+
+        assert!(downloaded.bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert_eq!(fake.calls.lock().unwrap()[0].0, "getFile");
+        assert_eq!(fake.calls.lock().unwrap()[0].1["file_id"], "image-123");
+        assert_eq!(
+            fake.download_paths.lock().unwrap().as_slice(),
+            ["photos/file.png"]
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_unsupported_declared_image_before_requesting_the_file() {
+        let fake = Arc::new(FakeTransport::default());
+        let telegram =
+            Telegram::with_transport("secret".to_string(), vec![7], vec![], fake.clone());
+        let image = InboundImage {
+            locator: "svg-123".to_string(),
+            file_size: Some(12),
+            mime_type: Some("image/svg+xml".to_string()),
+            data: None,
+        };
+
+        assert!(telegram.download_image(&image).await.is_err());
+        assert!(fake.calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

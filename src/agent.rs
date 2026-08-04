@@ -1,6 +1,7 @@
 //! Agent backend boundary. The gateway owns messaging and assistant context;
 //! concrete agent CLIs own reasoning, tools, and execution.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use uuid::Uuid;
@@ -15,6 +16,7 @@ pub struct Request<'a> {
     pub work_dir: &'a str,
     pub instructions: &'a str,
     pub prompt: &'a str,
+    pub images: &'a [PathBuf],
 }
 
 /// A completed agent turn.
@@ -122,6 +124,17 @@ impl Runner {
         matches!(self, Runner::Claude(_))
     }
 
+    pub fn supports_images(&self) -> bool {
+        if matches!(self, Runner::Codex(_)) {
+            return true;
+        }
+        #[cfg(test)]
+        if let Self::Fake(runner) = self {
+            return runner.backend == AgentBackend::Codex;
+        }
+        false
+    }
+
     pub async fn run(&self, req: Request<'_>, timeout: Duration) -> Result<RunOutput, RunError> {
         match self {
             Runner::Claude(r) => r.run(req, timeout).await,
@@ -185,6 +198,7 @@ pub struct FakeRunCall {
     pub work_dir: String,
     pub prompt: String,
     pub instructions: String,
+    pub images: Vec<PathBuf>,
 }
 
 #[cfg(test)]
@@ -196,6 +210,7 @@ impl FakeRunner {
             work_dir: req.work_dir.to_string(),
             prompt: req.prompt.to_string(),
             instructions: req.instructions.to_string(),
+            images: req.images.to_vec(),
         });
         if !req.is_new
             && self

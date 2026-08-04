@@ -83,6 +83,12 @@ variable or move the config outside. When `voice.openai_api_key` is configured,
 chmod 600 "${PUSH_HOME:-$HOME/.push}/config.toml"
 ```
 
+Accepted Telegram images are briefly written under `$PUSH_HOME/cache` with
+owner-only permissions, passed to the selected Codex model provider, and
+removed when the turn ends. Conversation history retains only the caption or an
+image placeholder. Protect the cache directory while Push is running and
+review the configured model provider's image data controls.
+
 Push rejects any overlap between `assistant_root` and `PUSH_HOME`, including
 overlap through symlinks or existing ancestors. Keep the runtime root private
 to Push and keep the assistant as a separate user-owned Git repository.
