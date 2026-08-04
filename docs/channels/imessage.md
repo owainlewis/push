@@ -55,7 +55,11 @@ be at most 6 MiB. Each HEIC or HEIF source must be at most 32 MiB before local
 conversion. Images work with Claude Code, Codex, and Pi.
 
 Polling reads attachment paths, byte-size hints, and MIME type hints from
-`chat.db`; it does not open the attachment files. After the direct-message,
+`chat.db`; it does not open the attachment files. If Messages has not populated
+an attachment filename yet, Push gives it a three-poll grace period and defers
+that message and later rows so the cursor cannot skip the image. If the filename
+is still blank after that grace period, the worker treats it as missing, sends
+the safe fallback, and lets later messages continue. After the direct-message,
 sender, reply-marker, and message checks pass, the worker canonicalizes each
 path and requires it to remain under `~/Library/Messages/Attachments` (or the
 `Attachments` directory beside a custom `imessage.db_path`). Missing files,
