@@ -387,6 +387,7 @@ fn check_bins_with(
         .is_ok_and(|channels| channels.contains(&config::ChannelKind::IMessage))
     {
         bins.push("osascript");
+        bins.push("/usr/bin/sips");
     }
     bins.sort_unstable();
     bins.dedup();
@@ -641,6 +642,9 @@ claude_tools = []
         assert!(checks.iter().any(|check| {
             check.name == "binary osascript" && matches!(check.status, CheckStatus::Fail)
         }));
+        assert!(checks.iter().any(|check| {
+            check.name == "binary /usr/bin/sips" && matches!(check.status, CheckStatus::Fail)
+        }));
     }
 
     #[test]
@@ -651,7 +655,8 @@ claude_tools = []
         let mut checks = Vec::new();
 
         check_bins_with(&cfg, &mut checks, |bin| {
-            (bin == "/custom/pi" || bin == "osascript").then(|| PathBuf::from(bin))
+            (bin == "/custom/pi" || bin == "osascript" || bin == "/usr/bin/sips")
+                .then(|| PathBuf::from(bin))
         });
 
         assert!(checks.iter().any(|check| {
@@ -680,7 +685,8 @@ claude_tools = []
         let mut checks = Vec::new();
 
         check_bins_with(&cfg, &mut checks, |bin| {
-            (bin == "codex" || bin == "osascript").then(|| PathBuf::from(bin))
+            (bin == "codex" || bin == "osascript" || bin == "/usr/bin/sips")
+                .then(|| PathBuf::from(bin))
         });
 
         assert!(checks.iter().any(|check| {
@@ -713,6 +719,7 @@ claude_tools = []
             .iter()
             .any(|check| check.name == "binary /fake/claude"));
         assert!(!checks.iter().any(|check| check.name.contains("osascript")));
+        assert!(!checks.iter().any(|check| check.name.contains("sips")));
     }
 
     #[test]

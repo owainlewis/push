@@ -379,7 +379,23 @@ impl ChannelContract for IMessageChannel {
                 is_group: message.is_group,
                 text: message.text,
                 voice: None,
-                images: Vec::new(),
+                images: message
+                    .attachments
+                    .into_iter()
+                    .map(|attachment| InboundImage {
+                        locator: attachment.locator.clone(),
+                        file_size: if crate::imessage::needs_conversion(
+                            &attachment.locator,
+                            attachment.mime_type.as_deref(),
+                        ) {
+                            None
+                        } else {
+                            attachment.file_size
+                        },
+                        mime_type: attachment.mime_type,
+                        data: None,
+                    })
+                    .collect(),
                 is_from_me: message.is_from_me,
                 is_supported: true,
                 thread_id: None,
@@ -476,12 +492,7 @@ impl ChannelContract for IMessageChannel {
     }
 
     async fn download_image(&self, image: &InboundImage) -> Result<DownloadedImage> {
-        let Some(bytes) = &image.data else {
-            bail!("iMessage image attachments are not supported yet");
-        };
-        Ok(DownloadedImage {
-            bytes: bytes.clone(),
-        })
+        self.poller.download_image(image).await
     }
 }
 

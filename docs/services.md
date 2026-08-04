@@ -3,9 +3,10 @@
 This guide covers running `push` continuously under a process manager.
 
 The iMessage channel is macOS-only because it reads
-`~/Library/Messages/chat.db` and sends replies with `osascript`. Telegram uses
-outbound HTTPS long polling. Slack uses outbound Socket Mode. Both can run
-under `systemd` on Linux or a VM.
+`~/Library/Messages/chat.db`, opens accepted files under
+`~/Library/Messages/Attachments`, and sends replies with `osascript`. Telegram
+uses outbound HTTPS long polling. Slack uses outbound Socket Mode. Both can
+run under `systemd` on Linux or a VM.
 
 ## Before Installing a Service
 
@@ -31,7 +32,7 @@ Set one absolute `PUSH_HOME` in the service definition. It defaults to
 - agent write access to `assistant_root/jobs/` when jobs should be created from chat
 - access to the selected `claude`, `codex`, or `pi` executable on `PATH`
 - backend login, tokens, settings, MCP config, and project credentials
-- for iMessage on macOS, Full Disk Access and `osascript`
+- for iMessage on macOS, Full Disk Access, `osascript`, and `sips`
 - for Telegram, a token in the private config and network access to
   `api.telegram.org`
 - for Slack, app and bot tokens in the private config or service environment,

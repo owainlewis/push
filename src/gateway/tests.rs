@@ -1870,6 +1870,205 @@ async fn slack_images_reach_every_agent_backend_and_are_removed_after_each_turn(
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn imessage_images_reach_every_agent_backend_and_are_removed_after_each_turn() {
+    for (backend, name) in [
+        (AgentBackend::Claude, "claude"),
+        (AgentBackend::Codex, "codex"),
+        (AgentBackend::Pi, "pi"),
+    ] {
+        let state_path = temp_state_path();
+        let sessions_dir = temp_path(&format!("imessage-{name}-image-sessions"));
+        let assistant_dir = temp_path(&format!("imessage-{name}-image-assistant"));
+        std::fs::create_dir_all(&assistant_dir).unwrap();
+        let calls = Arc::new(Mutex::new(Vec::<FakeRunCall>::new()));
+        let mut cfg = test_config(
+            &state_path,
+            sessions_dir.to_str().unwrap(),
+            assistant_dir.to_str().unwrap(),
+        );
+        cfg.agent = name.to_string();
+        let mut gateway = Gateway::new(cfg).unwrap();
+        gateway.ctx.runners = Arc::new(HashMap::from([(
+            backend,
+            Runner::Fake(FakeRunner {
+                backend,
+                session_id: "fake-session".to_string(),
+                calls: calls.clone(),
+                before_return: None,
+                wait_for_release: None,
+                failure: None,
+                resume_missing_once: None,
+            }),
+        )]));
+        let mut inbound = message(1, "+15551234567", "+15551234567", false, "");
+        inbound.images.push(InboundImage {
+            locator: "inline.png".to_string(),
+            file_size: Some(12),
+            mime_type: Some("image/png".to_string()),
+            data: Some(valid_png()),
+        });
+
+        run_messages(&mut gateway, vec![inbound]).await;
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "{name}");
+        assert_eq!(
+            crate::prompt::current_message(&calls[0].prompt).as_deref(),
+            Some("[Image attachment]"),
+            "{name}"
+        );
+        assert_eq!(calls[0].images.len(), 1, "{name}");
+        assert!(!calls[0].images[0].exists(), "{name}");
+        drop(calls);
+
+        let _ = std::fs::remove_file(&state_path);
+        let _ = std::fs::remove_file(format!("{state_path}.db"));
+        let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+        let _ = std::fs::remove_dir_all(format!("{state_path}.cache"));
+        let _ = std::fs::remove_dir_all(sessions_dir);
+        let _ = std::fs::remove_dir_all(assistant_dir);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn imessage_worker_reads_ordered_local_images_and_rejects_bad_attachments() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("imessage-local-image-sessions");
+    let assistant_dir = temp_path("imessage-local-image-assistant");
+    let messages_dir = temp_path("imessage-local-messages");
+    let attachments = messages_dir.join("Attachments");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    std::fs::create_dir_all(&attachments).unwrap();
+    let png = attachments.join("first.png");
+    let jpeg = attachments.join("second.jpg");
+    let webp = attachments.join("third.webp");
+    let pdf = attachments.join("document.pdf");
+    std::fs::write(&png, valid_png()).unwrap();
+    std::fs::write(&jpeg, b"\xff\xd8\xffbody").unwrap();
+    std::fs::write(&webp, b"RIFF\x04\x00\x00\x00WEBPbody").unwrap();
+    std::fs::write(&pdf, b"%PDF").unwrap();
+    let calls = Arc::new(Mutex::new(Vec::<FakeRunCall>::new()));
+    let mut cfg = test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    );
+    cfg.db_path = messages_dir.join("chat.db").to_string_lossy().to_string();
+    let mut gateway = Gateway::new(cfg).unwrap();
+    gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+    let mut valid = message(1, "+15551234567", "+15551234567", false, "compare these");
+    valid.images = vec![
+        InboundImage {
+            locator: "~/Library/Messages/Attachments/first.png".to_string(),
+            file_size: Some(valid_png().len()),
+            mime_type: Some("image/png".to_string()),
+            data: None,
+        },
+        InboundImage {
+            locator: jpeg.to_string_lossy().to_string(),
+            file_size: Some(7),
+            mime_type: Some("image/jpeg".to_string()),
+            data: None,
+        },
+        InboundImage {
+            locator: "third.webp".to_string(),
+            file_size: Some(16),
+            mime_type: Some("image/webp".to_string()),
+            data: None,
+        },
+    ];
+    let mut missing = message(2, "+15551234567", "+15551234567", false, "missing");
+    missing.images.push(InboundImage {
+        locator: "missing.png".to_string(),
+        file_size: None,
+        mime_type: Some("image/png".to_string()),
+        data: None,
+    });
+    let mut unsupported = message(3, "+15551234567", "+15551234567", false, "unsupported");
+    unsupported.images.push(InboundImage {
+        locator: pdf.to_string_lossy().to_string(),
+        file_size: Some(4),
+        mime_type: Some("application/pdf".to_string()),
+        data: None,
+    });
+
+    run_messages(&mut gateway, vec![valid, missing, unsupported]).await;
+
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].images.len(), 3);
+    assert_eq!(calls[0].images[0].extension().unwrap(), "png");
+    assert_eq!(calls[0].images[1].extension().unwrap(), "jpg");
+    assert_eq!(calls[0].images[2].extension().unwrap(), "webp");
+    assert!(calls[0].images.iter().all(|path| !path.exists()));
+    drop(calls);
+    let replies = gateway.ctx.sent_replies.lock().unwrap();
+    assert_eq!(replies.len(), 3);
+    assert!(replies[1].1.contains("JPEG, PNG, or WebP"));
+    assert!(replies[2].1.contains("JPEG, PNG, or WebP"));
+    drop(replies);
+    assert_eq!(gateway.store.lock().unwrap().cursor("imessage").unwrap(), 3);
+    let audit = std::fs::read_to_string(format!("{state_path}.audit.jsonl")).unwrap();
+    assert!(!audit.contains(messages_dir.to_string_lossy().as_ref()));
+    assert!(!audit.contains("missing.png"));
+    assert!(!audit.contains("document.pdf"));
+    let history = gateway
+        .ctx
+        .history
+        .lock()
+        .unwrap()
+        .recent_messages_before("imessage", "imessage:dm:+15551234567", i64::MAX, 10)
+        .unwrap();
+    assert!(history.iter().all(|message| {
+        !message.content.contains("Attachments")
+            && !message.content.contains("missing.png")
+            && !message.content.contains("document.pdf")
+    }));
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(format!("{state_path}.cache"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+    let _ = std::fs::remove_dir_all(messages_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rejected_imessage_sender_does_not_open_local_attachments() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("imessage-rejected-image-sessions");
+    let assistant_dir = temp_path("imessage-rejected-image-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::<FakeRunCall>::new()));
+    let mut gateway = Gateway::new(test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    ))
+    .unwrap();
+    gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+    let mut inbound = message(1, "+15550000000", "+15550000000", false, "inspect");
+    inbound.images.push(InboundImage {
+        locator: "/private/outside/missing.png".to_string(),
+        file_size: None,
+        mime_type: Some("image/png".to_string()),
+        data: None,
+    });
+
+    run_messages(&mut gateway, vec![inbound]).await;
+
+    assert!(calls.lock().unwrap().is_empty());
+    assert!(gateway.ctx.sent_replies.lock().unwrap().is_empty());
+    assert_eq!(gateway.store.lock().unwrap().cursor("imessage").unwrap(), 1);
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn slack_download_failure_replies_without_running_an_agent() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
