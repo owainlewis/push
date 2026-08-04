@@ -511,6 +511,7 @@ File: [`src/pi.rs`](src/pi.rs)
 | New chat | `pi --print --mode json` |
 | Resumed chat | `pi --print --mode json --session <session-id>` |
 | Instructions | `--append-system-prompt <composed system sections>` |
+| Images | repeated `@<private-temporary-path>` arguments on new and resumed chats |
 | Unattended job | `--approve` only when the project resources are trusted |
 | Evaluator | no approval, tools, extensions, skills, templates, context, or session |
 

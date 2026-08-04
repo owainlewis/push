@@ -125,12 +125,12 @@ impl Runner {
     }
 
     pub fn supports_images(&self) -> bool {
-        if matches!(self, Runner::Codex(_)) {
+        if matches!(self, Runner::Codex(_) | Runner::Pi(_)) {
             return true;
         }
         #[cfg(test)]
         if let Self::Fake(runner) = self {
-            return runner.backend == AgentBackend::Codex;
+            return matches!(runner.backend, AgentBackend::Codex | AgentBackend::Pi);
         }
         false
     }

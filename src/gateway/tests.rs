@@ -1805,6 +1805,68 @@ async fn telegram_image_is_available_to_the_agent_and_removed_after_the_turn() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn telegram_image_only_and_captioned_messages_reach_pi() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("pi-image-sessions");
+    let assistant_dir = temp_path("pi-image-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::<FakeRunCall>::new()));
+    let mut cfg = test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    );
+    cfg.channel = "telegram".to_string();
+    cfg.agent = "pi".to_string();
+    cfg.telegram_bot_token = Some("secret".to_string());
+    cfg.telegram_allow_user_ids = vec![7];
+    let mut gateway = Gateway::new(cfg).unwrap();
+    gateway.ctx.runners = Arc::new(HashMap::from([(
+        AgentBackend::Pi,
+        Runner::Fake(FakeRunner {
+            backend: AgentBackend::Pi,
+            session_id: "fake-session".to_string(),
+            calls: calls.clone(),
+            before_return: None,
+            wait_for_release: None,
+            failure: None,
+            resume_missing_once: None,
+        }),
+    )]));
+
+    run_messages(
+        &mut gateway,
+        vec![
+            telegram_image_message(1, 7, 7, ""),
+            telegram_image_message(2, 7, 7, "inspect this"),
+        ],
+    )
+    .await;
+
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        crate::prompt::current_message(&calls[0].prompt).as_deref(),
+        Some("[Image attachment]")
+    );
+    assert_eq!(
+        crate::prompt::current_message(&calls[1].prompt).as_deref(),
+        Some("inspect this")
+    );
+    assert!(calls.iter().all(|call| call.images.len() == 1));
+    assert!(calls.iter().all(|call| !call.images[0].exists()));
+    drop(calls);
+    assert_eq!(gateway.store.lock().unwrap().cursor("telegram").unwrap(), 2);
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(format!("{state_path}.cache"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn telegram_image_is_removed_before_reply_delivery_finishes() {
     let state_path = temp_state_path();
     let sessions_dir = temp_path("image-delivery-sessions");
@@ -1915,14 +1977,14 @@ async fn telegram_image_on_unsupported_backend_falls_back_without_downloading() 
         assistant_dir.to_str().unwrap(),
     );
     cfg.channel = "telegram".to_string();
-    cfg.agent = "pi".to_string();
+    cfg.agent = "claude".to_string();
     cfg.telegram_bot_token = Some("secret".to_string());
     cfg.telegram_allow_user_ids = vec![7];
     let mut gateway = Gateway::new(cfg).unwrap();
     gateway.ctx.runners = Arc::new(HashMap::from([(
-        AgentBackend::Pi,
+        AgentBackend::Claude,
         Runner::Fake(FakeRunner {
-            backend: AgentBackend::Pi,
+            backend: AgentBackend::Claude,
             session_id: "fake-session".to_string(),
             calls: calls.clone(),
             before_return: None,
@@ -1939,7 +2001,7 @@ async fn telegram_image_on_unsupported_backend_falls_back_without_downloading() 
     assert!(calls.lock().unwrap().is_empty());
     assert_eq!(
         gateway.ctx.sent_replies.lock().unwrap()[0].1,
-        "Image messages are currently supported only when this conversation routes to Codex."
+        "Image messages are currently supported only when this conversation routes to Codex or Pi."
     );
 
     let _ = std::fs::remove_file(&state_path);
