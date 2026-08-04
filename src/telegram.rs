@@ -522,7 +522,12 @@ impl Update {
         let images = message
             .photo
             .into_iter()
-            .max_by_key(|photo| photo.file_size.unwrap_or_default())
+            .max_by_key(|photo| {
+                (
+                    photo.width.saturating_mul(photo.height),
+                    photo.file_size.unwrap_or_default(),
+                )
+            })
             .map(|photo| InboundImage {
                 locator: photo.file_id,
                 file_size: photo.file_size,
@@ -602,6 +607,8 @@ struct TelegramVoice {
 #[derive(Deserialize)]
 struct TelegramPhoto {
     file_id: String,
+    width: usize,
+    height: usize,
     #[serde(default)]
     file_size: Option<usize>,
 }
@@ -911,8 +918,8 @@ mod tests {
                 "chat": {"id": 7, "type": "private"},
                 "caption": "inspect this",
                 "photo": [
-                    {"file_id": "small", "file_size": 10},
-                    {"file_id": "large", "file_size": 42}
+                    {"file_id": "small", "width": 90, "height": 90, "file_size": 42},
+                    {"file_id": "large", "width": 320, "height": 240}
                 ]
             }
         }))
@@ -923,7 +930,7 @@ mod tests {
         assert_eq!(message.text, "inspect this");
         assert_eq!(message.images.len(), 1);
         assert_eq!(message.images[0].locator, "large");
-        assert_eq!(message.images[0].file_size, Some(42));
+        assert_eq!(message.images[0].file_size, None);
         assert_eq!(message.images[0].mime_type.as_deref(), Some("image/jpeg"));
         assert!(message.images[0].data.is_none());
     }
