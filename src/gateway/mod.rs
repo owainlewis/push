@@ -19,7 +19,7 @@ use tracing::{error, info, warn};
 use crate::agent::Runner;
 use crate::approval::{AnswerOrigin, AnswerOutcome};
 use crate::audit::{AuditEvent, AuditLog};
-use crate::channel::{Channel, InboundVoice, RawMessage};
+use crate::channel::{Channel, InboundImage, InboundVoice, RawMessage};
 use crate::config::{AgentBackend, ChannelKind, Config, PrimaryDeliveryConfig};
 use crate::history::{History, OutboundOrigin};
 use crate::jobs;
@@ -42,6 +42,7 @@ struct Job {
     text: String,
     reply_with_voice: bool,
     voice_attachment: Option<InboundVoice>,
+    image_attachments: Vec<InboundImage>,
     approval_origin: AnswerOrigin,
 }
 
@@ -601,11 +602,13 @@ impl Gateway {
                 let reply_with_voice = m.voice.is_some();
                 let message_text = if reply_with_voice {
                     "[Voice message]".to_string()
+                } else if m.text.trim().is_empty() && !m.images.is_empty() {
+                    "[Image attachment]".to_string()
                 } else {
                     m.text.trim().to_string()
                 };
                 let approval_origin = self.channel.approval_origin(m, &thread);
-                let approval = if reply_with_voice {
+                let approval = if reply_with_voice || !m.images.is_empty() {
                     Ok(AnswerOutcome::NotAnAnswer)
                 } else {
                     self.ctx.history.lock().unwrap().answer_question(
@@ -799,9 +802,11 @@ impl Gateway {
                     text: message_text,
                     reply_with_voice,
                     voice_attachment: m.voice.clone(),
+                    image_attachments: m.images.clone(),
                     approval_origin,
                 };
-                if job.text.trim().eq_ignore_ascii_case("/stop") {
+                if job.image_attachments.is_empty() && job.text.trim().eq_ignore_ascii_case("/stop")
+                {
                     if !self.stop(job).await {
                         return;
                     }

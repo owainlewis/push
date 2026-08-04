@@ -497,6 +497,7 @@ impl Inbox {
                     is_group: row.get(7)?,
                     text: row.get(5)?,
                     voice: None,
+                    images: Vec::new(),
                     is_from_me: row.get(8)?,
                     is_supported: row.get(9)?,
                     thread_id: None,

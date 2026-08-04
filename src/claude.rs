@@ -230,6 +230,7 @@ mod tests {
                     work_dir: work_dir.to_str().unwrap(),
                     instructions: &instructions,
                     prompt: &prompt,
+                    images: &[],
                 },
                 Duration::from_secs(5),
             )
@@ -272,6 +273,7 @@ mod tests {
                     work_dir: work_dir.to_str().unwrap(),
                     instructions: "assistant identity",
                     prompt: "continue",
+                    images: &[],
                 },
                 Duration::from_secs(5),
             )
@@ -349,6 +351,7 @@ mod tests {
                     work_dir: work_dir.to_str().unwrap(),
                     instructions: "",
                     prompt: "continue",
+                    images: &[],
                 },
                 Duration::from_secs(5),
             )
@@ -448,6 +451,7 @@ mod tests {
             work_dir,
             instructions: "",
             prompt: "hello",
+            images: &[],
         }
     }
 
@@ -547,6 +551,7 @@ mod tests {
             work_dir,
             instructions: String::new(),
             prompt: "hello".to_string(),
+            images: Vec::new(),
         }
     }
 }

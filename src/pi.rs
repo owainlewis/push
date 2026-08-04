@@ -275,6 +275,7 @@ mod tests {
                     work_dir: work_dir.to_str().unwrap(),
                     instructions: &instructions,
                     prompt: &prompt,
+                    images: &[],
                 },
                 Duration::from_secs(5),
             )
@@ -381,6 +382,7 @@ mod tests {
                     work_dir: work_dir.to_str().unwrap(),
                     instructions: "SOUL instructions",
                     prompt: "continue",
+                    images: &[],
                 },
                 Duration::from_secs(5),
             )
@@ -553,6 +555,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
             work_dir,
             instructions: "",
             prompt: "hello",
+            images: &[],
         }
     }
 
@@ -641,6 +644,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
             work_dir,
             instructions: String::new(),
             prompt: "hello".to_string(),
+            images: Vec::new(),
         }
     }
 }

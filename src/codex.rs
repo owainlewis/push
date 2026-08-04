@@ -188,6 +188,9 @@ impl Runner {
                     .arg("--ephemeral")
                     .arg("--ignore-user-config");
             }
+            for image in req.images {
+                cmd.arg("--image").arg(image);
+            }
             cmd.arg(req.prompt);
         } else {
             cmd.arg("exec");
@@ -196,6 +199,9 @@ impl Runner {
                 .arg("--skip-git-repo-check")
                 .arg("-o")
                 .arg(out_path);
+            for image in req.images {
+                cmd.arg("--image").arg(image);
+            }
             cmd.arg(req.session_id).arg(req.prompt);
         }
         cmd.current_dir(req.work_dir);
@@ -331,6 +337,7 @@ mod tests {
                     work_dir: work_dir.to_str().unwrap(),
                     instructions: &instructions,
                     prompt: &prompt,
+                    images: &[],
                 },
                 Duration::from_secs(5),
             )
@@ -367,6 +374,7 @@ mod tests {
                     work_dir: work_dir.to_str().unwrap(),
                     instructions: "assistant identity",
                     prompt: "continue",
+                    images: &[],
                 },
                 Duration::from_secs(5),
             )
@@ -384,6 +392,74 @@ mod tests {
         assert_arg_pair(&args, "-c", &developer_instructions("assistant identity"));
         assert_eq!(args.last().unwrap(), "continue");
         assert!(!args.contains(&"-C".to_string()));
+    }
+
+    #[tokio::test]
+    async fn attaches_images_to_new_and_resumed_sessions() {
+        let work_dir = temp_dir("codex-images-work");
+        let first_image = temp_path("codex-first-image.png");
+        let second_image = temp_path("codex-second-image.webp");
+        std::fs::write(&first_image, b"first").unwrap();
+        std::fs::write(&second_image, b"second").unwrap();
+
+        let new_args = temp_path("codex-new-image-args");
+        let new_cli = FakeCli::new(
+            "codex",
+            &codex_success_script(&new_args, "new reply", Some("codex-thread")),
+        );
+        runner(new_cli.bin())
+            .run(
+                Request {
+                    session_id: "",
+                    is_new: true,
+                    work_dir: work_dir.to_str().unwrap(),
+                    instructions: "",
+                    prompt: "inspect",
+                    images: &[first_image.clone(), second_image.clone()],
+                },
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+        let args = read_args(&new_args);
+        let attached = args
+            .windows(2)
+            .filter(|pair| pair[0] == "--image")
+            .map(|pair| pair[1].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            attached,
+            [
+                first_image.to_str().unwrap(),
+                second_image.to_str().unwrap()
+            ]
+        );
+
+        let resumed_args = temp_path("codex-resumed-image-args");
+        let resumed_cli = FakeCli::new(
+            "codex",
+            &codex_success_script(&resumed_args, "resumed reply", None),
+        );
+        runner(resumed_cli.bin())
+            .run(
+                Request {
+                    session_id: "codex-thread",
+                    is_new: false,
+                    work_dir: work_dir.to_str().unwrap(),
+                    instructions: "",
+                    prompt: "inspect again",
+                    images: std::slice::from_ref(&first_image),
+                },
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+        let args = read_args(&resumed_args);
+        assert_arg_sequence(&args, &["exec", "resume"]);
+        assert_arg_pair(&args, "--image", first_image.to_str().unwrap());
+
+        let _ = std::fs::remove_file(first_image);
+        let _ = std::fs::remove_file(second_image);
     }
 
     #[tokio::test]
@@ -439,6 +515,7 @@ mod tests {
                     work_dir: work_dir.to_str().unwrap(),
                     instructions: "",
                     prompt: "continue",
+                    images: &[],
                 },
                 Duration::from_secs(5),
             )
@@ -545,6 +622,7 @@ sleep 2
             work_dir,
             instructions: "",
             prompt: "hello",
+            images: &[],
         }
     }
 
@@ -690,6 +768,7 @@ sleep 2
             work_dir,
             instructions: String::new(),
             prompt: "hello".to_string(),
+            images: Vec::new(),
         }
     }
 

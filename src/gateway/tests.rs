@@ -2,7 +2,7 @@ use super::worker::{handle, run_with_periodic_activity, SESSION_SETUP_FAILURE};
 use super::*;
 use crate::agent::{FakeRunCall, FakeRunner};
 use crate::approval::Question;
-use crate::channel::{normalize_handle, thread_handle, InboundVoice};
+use crate::channel::{normalize_handle, thread_handle, InboundImage, InboundVoice};
 use crate::history::DeliveryStatus;
 use crate::imessage::{Poller, Sender};
 use crate::voice::{AudioClip, VoiceFuture, VoiceProvider};
@@ -160,6 +160,7 @@ fn msg(chat: &str, handle: &str, from_me: bool, text: &str) -> RawMessage {
         chat_identifier: chat.to_string(),
         text: text.to_string(),
         voice: None,
+        images: Vec::new(),
         is_from_me: from_me,
         is_group: false,
         is_supported: true,
@@ -244,6 +245,7 @@ fn setup_failure_job(row_id: i64) -> Job {
         text: "hello".to_string(),
         reply_with_voice: false,
         voice_attachment: None,
+        image_attachments: Vec::new(),
         approval_origin: AnswerOrigin {
             channel: "imessage".to_string(),
             thread_key: "imessage:self:me".to_string(),
@@ -1034,11 +1036,14 @@ async fn missing_backend_session_rotates_and_rehydrates_once() {
         vec![message(1, "+15551234567", "+15551234567", false, "first")],
     )
     .await;
-    run_messages(
-        &mut gateway,
-        vec![message(2, "+15551234567", "+15551234567", false, "second")],
-    )
-    .await;
+    let mut second = message(2, "+15551234567", "+15551234567", false, "second");
+    second.images.push(InboundImage {
+        locator: "image-file".to_string(),
+        file_size: Some(12),
+        mime_type: Some("image/png".to_string()),
+        data: Some(b"\x89PNG\r\n\x1a\nbody".to_vec()),
+    });
+    run_messages(&mut gateway, vec![second]).await;
 
     let calls = calls.lock().unwrap();
     assert_eq!(calls.len(), 3);
@@ -1048,6 +1053,9 @@ async fn missing_backend_session_rotates_and_rehydrates_once() {
         Some("second")
     );
     assert!(calls[2].is_new);
+    assert_eq!(calls[1].images.len(), 1);
+    assert_eq!(calls[2].images, calls[1].images);
+    assert!(!calls[1].images[0].exists());
     assert!(calls[2]
         .prompt
         .contains(r#"{"role":"user","content":"first"}"#));
@@ -1072,6 +1080,7 @@ async fn missing_backend_session_rotates_and_rehydrates_once() {
 
     let _ = std::fs::remove_file(&state_path);
     let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(format!("{state_path}.cache"));
     let _ = std::fs::remove_file(format!("{state_path}.db"));
     let _ = std::fs::remove_dir_all(sessions_dir);
     let _ = std::fs::remove_dir_all(assistant_dir);
@@ -1512,7 +1521,11 @@ async fn telegram_filters_before_agent_and_replies_to_originating_chat() {
 
     gateway
         .tick_fake(vec![
-            telegram_message(10, 8, 8, false, "ignore me"),
+            {
+                let mut message = telegram_image_message(10, 8, 8, "ignore me");
+                message.images[0].data = Some(b"not an image".to_vec());
+                message
+            },
             telegram_message(11, 7, 7, false, "hello"),
             telegram_message(12, 7, -100, true, "group"),
         ])
@@ -1724,6 +1737,220 @@ async fn telegram_voice_is_transcribed_and_gets_text_and_voice_replies() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn telegram_image_is_available_to_the_agent_and_removed_after_the_turn() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("image-sessions");
+    let assistant_dir = temp_path("image-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::<FakeRunCall>::new()));
+    let observed = Arc::new(Mutex::new(false));
+    let hook_calls = calls.clone();
+    let hook_observed = observed.clone();
+    let hook = Arc::new(move || {
+        let calls = hook_calls.lock().unwrap();
+        let image = &calls.last().unwrap().images[0];
+        assert!(image.is_file());
+        assert!(std::fs::read(image)
+            .unwrap()
+            .starts_with(b"\x89PNG\r\n\x1a\n"));
+        *hook_observed.lock().unwrap() = true;
+    });
+    let mut cfg = test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    );
+    cfg.channel = "telegram".to_string();
+    cfg.telegram_bot_token = Some("secret".to_string());
+    cfg.telegram_allow_user_ids = vec![7];
+    let mut gateway = Gateway::new(cfg).unwrap();
+    gateway.ctx.runners = Arc::new(fake_runners_with_hook(calls.clone(), Some(hook)));
+
+    run_messages(
+        &mut gateway,
+        vec![
+            telegram_image_message(1, 7, 7, ""),
+            telegram_image_message(2, 7, 7, "/help"),
+            telegram_image_message(3, 7, 7, "/stop"),
+        ],
+    )
+    .await;
+
+    assert!(*observed.lock().unwrap());
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(
+        crate::prompt::current_message(&calls[0].prompt).as_deref(),
+        Some("[Image attachment]")
+    );
+    assert_eq!(
+        crate::prompt::current_message(&calls[1].prompt).as_deref(),
+        Some("/help")
+    );
+    assert_eq!(
+        crate::prompt::current_message(&calls[2].prompt).as_deref(),
+        Some("/stop")
+    );
+    assert!(calls.iter().all(|call| call.images.len() == 1));
+    assert!(calls.iter().all(|call| !call.images[0].exists()));
+    drop(calls);
+    assert_eq!(gateway.store.lock().unwrap().cursor("telegram").unwrap(), 3);
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(format!("{state_path}.cache"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn telegram_image_is_removed_before_reply_delivery_finishes() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("image-delivery-sessions");
+    let assistant_dir = temp_path("image-delivery-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::<FakeRunCall>::new()));
+    let captured_path = Arc::new(Mutex::new(None));
+    let hook_calls = calls.clone();
+    let hook_path = captured_path.clone();
+    let hook = Arc::new(move || {
+        *hook_path.lock().unwrap() = Some(hook_calls.lock().unwrap()[0].images[0].clone());
+    });
+    let mut cfg = test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    );
+    cfg.channel = "telegram".to_string();
+    cfg.telegram_bot_token = Some("secret".to_string());
+    cfg.telegram_allow_user_ids = vec![7];
+    let mut gateway = Gateway::new(cfg).unwrap();
+    gateway.ctx.runners = Arc::new(fake_runners_with_hook(calls, Some(hook)));
+    *gateway.ctx.send_failures_remaining.lock().unwrap() = usize::MAX;
+
+    let task = tokio::spawn(async move {
+        run_messages(
+            &mut gateway,
+            vec![telegram_image_message(1, 7, 7, "inspect")],
+        )
+        .await;
+    });
+    let removed_path = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let Some(path) = captured_path.lock().unwrap().clone() {
+                if !path.exists() {
+                    break path;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("image should be removed while delivery keeps retrying");
+
+    assert!(!removed_path.exists());
+    assert!(!task.is_finished());
+    task.abort();
+    let _ = task.await;
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(format!("{state_path}.cache"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn invalid_and_oversized_telegram_images_fall_back_without_running_the_agent() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("invalid-image-sessions");
+    let assistant_dir = temp_path("invalid-image-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut cfg = test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    );
+    cfg.channel = "telegram".to_string();
+    cfg.telegram_bot_token = Some("secret".to_string());
+    cfg.telegram_allow_user_ids = vec![7];
+    let mut gateway = Gateway::new(cfg).unwrap();
+    gateway.ctx.runners = Arc::new(fake_runners(calls.clone()));
+    let mut invalid = telegram_image_message(1, 7, 7, "inspect");
+    invalid.images[0].data = Some(b"not an image".to_vec());
+    let mut oversized = telegram_image_message(2, 7, 7, "inspect");
+    oversized.images[0].file_size = Some(crate::image::MAX_IMAGE_BYTES + 1);
+
+    run_messages(&mut gateway, vec![invalid, oversized]).await;
+
+    assert!(calls.lock().unwrap().is_empty());
+    let replies = gateway.ctx.sent_replies.lock().unwrap();
+    assert_eq!(replies.len(), 2);
+    assert!(replies
+        .iter()
+        .all(|(_, reply)| reply.contains("JPEG, PNG, or WebP")));
+    assert_eq!(gateway.store.lock().unwrap().cursor("telegram").unwrap(), 2);
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(format!("{state_path}.cache"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn telegram_image_on_unsupported_backend_falls_back_without_downloading() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("unsupported-image-sessions");
+    let assistant_dir = temp_path("unsupported-image-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut cfg = test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    );
+    cfg.channel = "telegram".to_string();
+    cfg.agent = "pi".to_string();
+    cfg.telegram_bot_token = Some("secret".to_string());
+    cfg.telegram_allow_user_ids = vec![7];
+    let mut gateway = Gateway::new(cfg).unwrap();
+    gateway.ctx.runners = Arc::new(HashMap::from([(
+        AgentBackend::Pi,
+        Runner::Fake(FakeRunner {
+            backend: AgentBackend::Pi,
+            session_id: "fake-session".to_string(),
+            calls: calls.clone(),
+            before_return: None,
+            wait_for_release: None,
+            failure: None,
+            resume_missing_once: None,
+        }),
+    )]));
+    let mut message = telegram_image_message(1, 7, 7, "inspect");
+    message.images[0].data = Some(b"not an image".to_vec());
+
+    run_messages(&mut gateway, vec![message]).await;
+
+    assert!(calls.lock().unwrap().is_empty());
+    assert_eq!(
+        gateway.ctx.sent_replies.lock().unwrap()[0].1,
+        "Image messages are currently supported only when this conversation routes to Codex."
+    );
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(format!("{state_path}.cache"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn telegram_voice_without_openai_key_falls_back_without_running_agent() {
     let state_path = temp_state_path();
     let sessions_dir = temp_path("voice-missing-key-sessions");
@@ -1859,6 +2086,7 @@ async fn closed_worker_queue_is_recovered_without_another_message() {
         text: "recover older".to_string(),
         reply_with_voice: false,
         voice_attachment: None,
+        image_attachments: Vec::new(),
         approval_origin: AnswerOrigin {
             channel: "imessage".to_string(),
             thread_key: thread.to_string(),
@@ -1940,9 +2168,14 @@ async fn stop_interrupts_active_run_and_preserves_queued_messages() {
     );
     gateway.ctx.runners = Arc::new(runners);
 
-    gateway
-        .tick_fake(vec![message(1, "me@icloud.com", "", true, "slow")])
-        .await;
+    let mut slow = message(1, "me@icloud.com", "", true, "slow");
+    slow.images.push(InboundImage {
+        locator: "image-file".to_string(),
+        file_size: Some(12),
+        mime_type: Some("image/png".to_string()),
+        data: Some(b"\x89PNG\r\n\x1a\nbody".to_vec()),
+    });
+    gateway.tick_fake(vec![slow]).await;
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             if !calls.lock().unwrap().is_empty() {
@@ -1953,6 +2186,8 @@ async fn stop_interrupts_active_run_and_preserves_queued_messages() {
     })
     .await
     .expect("first run should become active");
+    let image_path = calls.lock().unwrap()[0].images[0].clone();
+    assert!(image_path.exists());
 
     gateway
         .tick_fake(vec![
@@ -1977,6 +2212,7 @@ async fn stop_interrupts_active_run_and_preserves_queued_messages() {
     })
     .await
     .expect("active run should stop before the queued run starts");
+    assert!(!image_path.exists());
     release.notify_one();
     gateway.queues.clear();
     gateway.drain_workers().await;
@@ -2007,6 +2243,7 @@ async fn stop_interrupts_active_run_and_preserves_queued_messages() {
     let _ = std::fs::remove_file(&state_path);
     let _ = std::fs::remove_file(format!("{state_path}.db"));
     let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(format!("{state_path}.cache"));
     let _ = std::fs::remove_dir_all(sessions_dir);
     let _ = std::fs::remove_dir_all(assistant_dir);
 }
@@ -2159,6 +2396,7 @@ async fn stop_targets_the_current_row_ahead_of_retained_failures() {
         text: text.to_string(),
         reply_with_voice: false,
         voice_attachment: None,
+        image_attachments: Vec::new(),
         approval_origin: AnswerOrigin {
             channel: "imessage".to_string(),
             thread_key: thread.to_string(),
@@ -3140,6 +3378,7 @@ fn message(row_id: i64, chat: &str, handle: &str, is_from_me: bool, text: &str) 
         chat_identifier: chat.to_string(),
         text: text.to_string(),
         voice: None,
+        images: Vec::new(),
         is_from_me,
         is_group: false,
         is_supported: true,
@@ -3162,6 +3401,7 @@ fn telegram_message(
         chat_identifier: chat_id.to_string(),
         text: text.to_string(),
         voice: None,
+        images: Vec::new(),
         is_from_me: false,
         is_group,
         is_supported: true,
@@ -3177,6 +3417,17 @@ fn telegram_voice_message(row_id: i64, user_id: i64, chat_id: i64) -> RawMessage
         mime_type: "audio/ogg".to_string(),
         filename: "voice.ogg".to_string(),
         data: Some(vec![1, 2, 3]),
+    });
+    message
+}
+
+fn telegram_image_message(row_id: i64, user_id: i64, chat_id: i64, caption: &str) -> RawMessage {
+    let mut message = telegram_message(row_id, user_id, chat_id, false, caption);
+    message.images.push(InboundImage {
+        locator: "image-file".to_string(),
+        file_size: Some(12),
+        mime_type: Some("image/png".to_string()),
+        data: Some(b"\x89PNG\r\n\x1a\nbody".to_vec()),
     });
     message
 }

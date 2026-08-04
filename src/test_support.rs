@@ -133,6 +133,7 @@ pub struct ContractRequest {
     pub work_dir: PathBuf,
     pub instructions: String,
     pub prompt: String,
+    pub images: Vec<PathBuf>,
 }
 
 impl ContractRequest {
@@ -143,6 +144,7 @@ impl ContractRequest {
             work_dir: self.work_dir.to_str().unwrap(),
             instructions: &self.instructions,
             prompt: &self.prompt,
+            images: &self.images,
         }
     }
 }

@@ -7,6 +7,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::approval::AnswerOrigin;
 use crate::config::{ChannelKind, Config};
+use crate::image::DownloadedImage;
 use crate::imessage::{Poller as IMessagePoller, Sender as IMessageSender};
 use crate::slack::{parse_message_target, Slack};
 use crate::telegram::Telegram;
@@ -26,6 +27,16 @@ pub struct InboundVoice {
 }
 
 #[derive(Debug, Clone)]
+pub struct InboundImage {
+    /// Channel-owned file identifier. The gateway treats this as opaque.
+    pub locator: String,
+    pub file_size: Option<usize>,
+    pub mime_type: Option<String>,
+    /// Tests and channels that already own the bytes may provide them directly.
+    pub data: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone)]
 pub struct RawMessage {
     pub row_id: i64,
     /// Provider-stable identifier used for durable deduplication when it is
@@ -37,6 +48,7 @@ pub struct RawMessage {
     pub is_group: bool,
     pub text: String,
     pub voice: Option<InboundVoice>,
+    pub images: Vec<InboundImage>,
     pub is_from_me: bool,
     pub is_supported: bool,
     /// Channel-specific thread/topic id (Telegram `message_thread_id`).
@@ -108,6 +120,7 @@ trait ChannelContract {
 
     async fn download_voice(&self, voice: &InboundVoice) -> Result<AudioClip>;
     async fn send_voice(&self, target: &str, clip: &AudioClip) -> Result<()>;
+    async fn download_image(&self, image: &InboundImage) -> Result<DownloadedImage>;
 
     fn delivery_semantics(&self) -> DeliverySemantics {
         DeliverySemantics {
@@ -306,6 +319,14 @@ impl Channel {
         }
     }
 
+    pub async fn download_image(&self, image: &InboundImage) -> Result<DownloadedImage> {
+        match self {
+            Self::IMessage(channel) => ChannelContract::download_image(channel, image).await,
+            Self::Telegram(channel) => ChannelContract::download_image(channel, image).await,
+            Self::Slack(channel) => ChannelContract::download_image(channel, image).await,
+        }
+    }
+
     pub fn delivery_semantics(&self) -> DeliverySemantics {
         match self {
             Self::IMessage(channel) => ChannelContract::delivery_semantics(channel),
@@ -358,6 +379,7 @@ impl ChannelContract for IMessageChannel {
                 is_group: message.is_group,
                 text: message.text,
                 voice: None,
+                images: Vec::new(),
                 is_from_me: message.is_from_me,
                 is_supported: true,
                 thread_id: None,
@@ -451,6 +473,15 @@ impl ChannelContract for IMessageChannel {
 
     async fn send_voice(&self, _target: &str, _clip: &AudioClip) -> Result<()> {
         bail!("iMessage voice replies are not supported yet")
+    }
+
+    async fn download_image(&self, image: &InboundImage) -> Result<DownloadedImage> {
+        let Some(bytes) = &image.data else {
+            bail!("iMessage image attachments are not supported yet");
+        };
+        Ok(DownloadedImage {
+            bytes: bytes.clone(),
+        })
     }
 }
 
@@ -575,6 +606,10 @@ impl ChannelContract for Telegram {
     async fn send_voice(&self, target: &str, clip: &AudioClip) -> Result<()> {
         self.send_voice(target, clip).await
     }
+
+    async fn download_image(&self, image: &InboundImage) -> Result<DownloadedImage> {
+        self.download_image(image).await
+    }
 }
 
 impl ChannelContract for Slack {
@@ -671,6 +706,15 @@ impl ChannelContract for Slack {
         bail!("Slack voice replies are not supported")
     }
 
+    async fn download_image(&self, image: &InboundImage) -> Result<DownloadedImage> {
+        let Some(bytes) = &image.data else {
+            bail!("Slack image attachments are not supported yet");
+        };
+        Ok(DownloadedImage {
+            bytes: bytes.clone(),
+        })
+    }
+
     fn delivery_semantics(&self) -> DeliverySemantics {
         DeliverySemantics {
             // Slack's HTTP client bounds each request. A zero gateway timeout
@@ -689,7 +733,8 @@ fn common_reject_reason(message: &RawMessage) -> Option<&'static str> {
         Some("unsupported_update")
     } else if message.is_group {
         Some("group_chat")
-    } else if message.text.trim().is_empty() && message.voice.is_none() {
+    } else if message.text.trim().is_empty() && message.voice.is_none() && message.images.is_empty()
+    {
         Some("empty_message")
     } else {
         None
@@ -784,6 +829,7 @@ mod tests {
             is_group: false,
             text: "hello".to_string(),
             voice: None,
+            images: Vec::new(),
             is_from_me,
             is_supported: true,
             thread_id: None,
@@ -800,6 +846,7 @@ mod tests {
             is_group,
             text: "hello".to_string(),
             voice: None,
+            images: Vec::new(),
             is_from_me: false,
             is_supported: true,
             thread_id: None,
@@ -894,6 +941,7 @@ mod tests {
             is_group: false,
             text: "hello".to_string(),
             voice: None,
+            images: Vec::new(),
             is_from_me: false,
             is_supported: true,
             thread_id: None,

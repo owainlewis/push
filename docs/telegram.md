@@ -50,6 +50,29 @@ Doctor validates that a token is available without displaying its value. A
 Telegram-only preflight does not open `chat.db` and does not require macOS or
 `osascript`.
 
+## Image Messages
+
+With Codex selected for the conversation, send the bot a Telegram photo or an
+image document. Push accepts JPEG, PNG, and WebP files. A caption becomes the
+message text; an image without a caption is still accepted. Telegram media
+groups are processed as separate messages.
+
+Push downloads an image only after the private-chat and sender allowlist checks
+pass. The declared and downloaded size must fit within the 6 MiB per-message
+limit, and Push verifies the downloaded file signature instead of trusting the
+provider MIME type. Unsupported, malformed, or oversized files receive a text
+reply and do not reach Codex.
+
+Validated bytes are written to an owner-only temporary directory under
+`$PUSH_HOME/cache`, attached to the Codex turn, and removed after success,
+failure, timeout, interruption, or session recovery. Push stores the caption or
+an `[Image attachment]` placeholder in conversation history, not the image
+bytes. The image is sent through the configured Codex model provider, so review
+that provider's image and data controls before using this feature.
+
+Image input for Claude Code and Pi, and sending generated images back through
+Telegram, are not supported yet.
+
 ## Voice Messages
 
 Add the optional OpenAI API key to `$PUSH_HOME/config.toml` to enable both incoming
@@ -100,10 +123,12 @@ channel can add those transport operations without changing the OpenAI layer.
 
 An incoming Telegram update reaches the agent only when all of these are true:
 
-- it is a normal text message or voice note in a private chat
+- it is a normal text message, voice note, photo, or image document in a private
+  chat
 - its numeric sender id is in `telegram.allow_user_ids`, or its numeric chat id
   is in `telegram.allow_chat_ids`
-- the message contains non-empty text or a voice attachment
+- the message contains non-empty text, a voice attachment, or an image
+  attachment
 
 Group chats, channels, group forum topics, edited messages, and other update
 types are out of scope and ignored. The private-chat thread key is
