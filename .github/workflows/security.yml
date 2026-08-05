@@ -24,10 +24,10 @@ jobs:
     name: RustSec advisory audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install cargo-audit
-        uses: taiki-e/install-action@v2.83.4
+        uses: taiki-e/install-action@v2.85.5
         with:
           tool: cargo-audit@0.22.2
           fallback: none
