@@ -817,17 +817,32 @@ fn complete_job(ctx: &Ctx, job: &Job, reason: &str) {
 /// Handles gateway-level slash commands before anything reaches the agent.
 fn command(ctx: &Ctx, job: &Job) -> Option<String> {
     match job.text.trim().to_lowercase().as_str() {
-        "/clear" | "/new" | "/reset" => match ctx.store.lock().unwrap().rotate(
-            &job.thread,
-            job.backend.as_str(),
-            ctx.runners
-                .get(&job.backend)
-                .map(|r| r.initial_session_id())
-                .unwrap_or_default(),
-        ) {
-            Ok(()) => Some("Started a fresh conversation.".to_string()),
-            Err(_) => Some("Couldn't reset the conversation.".to_string()),
-        },
+        "/clear" | "/new" | "/reset" => {
+            match ctx.store.lock().unwrap().rotate(
+                &job.thread,
+                job.backend.as_str(),
+                ctx.runners
+                    .get(&job.backend)
+                    .map(|r| r.initial_session_id())
+                    .unwrap_or_default(),
+            ) {
+                Ok(previous) => {
+                    if job.backend == crate::config::AgentBackend::Pi {
+                        if let Some(session_id) = previous {
+                            let removed = crate::pi::discard_session(&session_id);
+                            if removed > 0 {
+                                info!(
+                                    "[{}] discarded {removed} abandoned Pi session file(s)",
+                                    job.thread
+                                );
+                            }
+                        }
+                    }
+                    Some("Started a fresh conversation.".to_string())
+                }
+                Err(_) => Some("Couldn't reset the conversation.".to_string()),
+            }
+        }
         "/help" => Some(
             "Commands:\n/clear - start a fresh conversation\n/stop - stop the active request\n/help - this message"
                 .to_string(),
