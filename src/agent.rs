@@ -192,7 +192,7 @@ pub struct FakeRunCall {
 
 #[cfg(test)]
 impl FakeRunner {
-    async fn run(&self, req: Request<'_>, _timeout: Duration) -> Result<RunOutput, RunError> {
+    async fn run(&self, req: Request<'_>, timeout: Duration) -> Result<RunOutput, RunError> {
         self.calls.lock().unwrap().push(FakeRunCall {
             session_id: req.session_id.to_string(),
             is_new: req.is_new,
@@ -215,7 +215,14 @@ impl FakeRunner {
             before_return();
         }
         if let Some(release) = &self.wait_for_release {
-            release.notified().await;
+            // Real runners enforce the caller's timeout themselves; so does the
+            // fake, so a release that never arrives surfaces as Timeout.
+            if tokio::time::timeout(timeout, release.notified())
+                .await
+                .is_err()
+            {
+                return Err(RunError::Timeout);
+            }
         }
         if let Some(message) = &self.failure {
             return Err(RunError::Failed(message.clone()));

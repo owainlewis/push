@@ -52,6 +52,12 @@ pub struct Config {
     pub poll_interval: String,
     #[serde(default = "default_run_timeout")]
     pub run_timeout: String,
+    /// Overrides the default timeout reply text.
+    #[serde(default)]
+    pub timeout_reply: Option<String>,
+    /// Shell command run on run timeout; its stdout becomes the reply.
+    #[serde(default)]
+    pub timeout_hook: Option<String>,
     #[serde(default)]
     pub self_handles: Vec<String>,
     #[serde(default)]
@@ -903,6 +909,8 @@ mod tests {
     fn config() -> Config {
         let root = temp_dir("config-draft-boundary");
         Config {
+            timeout_reply: None,
+            timeout_hook: None,
             channel: "imessage".to_string(),
             channels: Vec::new(),
             primary_delivery: None,

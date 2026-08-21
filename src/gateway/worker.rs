@@ -468,11 +468,11 @@ where
                     format!("{} run timed out", runner.label()),
                 ),
             );
-            let reply = "That took too long and was stopped. Try again or simplify the request.";
+            let reply = timeout_reply(ctx, &job, &work_dir).await;
             finish_run_with_gateway_reply(
                 ctx,
                 &job,
-                reply,
+                &reply,
                 ReplyLabels {
                     record: "record timeout reply",
                     deliver: "deliver timeout reply",
@@ -696,6 +696,145 @@ struct ReplyLabels {
     record: &'static str,
     deliver: &'static str,
     completion: &'static str,
+}
+
+const DEFAULT_TIMEOUT_REPLY: &str =
+    "That took too long and was stopped. Try again or simplify the request.";
+
+const MAX_HOOK_STDOUT: usize = 64 * 1024;
+
+/// SIGKILLs the hook's whole process group (negative pid). Covers the shell
+/// leader and any backgrounded descendants — child.kill()/kill_on_drop only
+/// ever signal the leader. Errors are ignored: the group may already be gone
+/// on a given path.
+fn kill_hook_group(pgid: libc::pid_t) {
+    // Safety: signal syscall with an integer pid; no pointers involved.
+    unsafe {
+        libc::kill(-pgid, libc::SIGKILL);
+    }
+}
+
+/// Reads hook stdout with a byte cap, returning the bytes, whether the cap
+/// was exceeded, and the first read error (if any). A read error is not
+/// EOF: partial output from a failing pipe is a hook failure, so the error
+/// is surfaced for the caller to log and fall back.
+pub(crate) async fn read_hook_stdout<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+) -> (Vec<u8>, bool, Option<std::io::Error>) {
+    use tokio::io::AsyncReadExt;
+    let mut stdout = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let mut capped = false;
+    let mut read_error = None;
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(n) => {
+                if stdout.len() + n > MAX_HOOK_STDOUT {
+                    capped = true;
+                    break;
+                }
+                stdout.extend_from_slice(&chunk[..n]);
+            }
+            Err(error) => {
+                read_error = Some(error);
+                break;
+            }
+        }
+    }
+    (stdout, capped, read_error)
+}
+
+/// Resolves the reply for a timed-out run: hook stdout (trimmed) wins, then
+/// `timeout_reply`, then the default. Hook problems never lose the message.
+async fn timeout_reply(ctx: &Ctx, job: &Job, work_dir: &str) -> String {
+    let mut reply = ctx
+        .cfg
+        .timeout_reply
+        .as_deref()
+        .map(str::trim)
+        .filter(|reply| !reply.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| DEFAULT_TIMEOUT_REPLY.to_string());
+    let Some(hook) = ctx.cfg.timeout_hook.clone() else {
+        return reply;
+    };
+    // The hook is documented as a shell command: run it through /bin/sh so
+    // arguments, pipes, and redirects work (POSIX sh only — no pipefail,
+    // which older dash rejects). stdout is read with a byte cap so a runaway
+    // hook cannot exhaust memory; exceeding the cap kills the hook and uses
+    // the fallback reply. The hook runs in its own process group
+    // (process_group(0), leader pid == pgid) and every failure path
+    // signals the whole group, so backgrounded descendants die with the
+    // shell instead of leaking past the budget.
+    let child = tokio::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(&hook)
+        .env("PUSH_THREAD", &job.thread)
+        .env("PUSH_ROW_ID", job.row_id.to_string())
+        .env("PUSH_BACKEND", job.backend.as_str())
+        .env("PUSH_WORK_DIR", work_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .process_group(0)
+        .spawn();
+    let mut child = match child {
+        Ok(child) => child,
+        Err(error) => {
+            warn!("[{}] timeout hook failed to run: {error}", job.thread);
+            return reply;
+        }
+    };
+    let mut stdout_pipe = child.stdout.take().expect("hook stdout piped");
+    // Leader pid == process group id (process_group(0)); kept outside the
+    // timeout scope so the expiry path can still signal the group after the
+    // future (and the Child) is dropped.
+    let hook_pgid = child.id().expect("hook child alive before wait") as libc::pid_t;
+    let collect = read_hook_stdout(&mut stdout_pipe);
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        let (stdout, capped, read_error) = collect.await;
+        if capped {
+            kill_hook_group(hook_pgid);
+        }
+        (stdout, capped, read_error, child.wait().await)
+    })
+    .await;
+    match result {
+        Ok((_, _, Some(read_error), _)) => warn!(
+            "[{}] timeout hook stdout read failed: {read_error}: using fallback reply",
+            job.thread
+        ),
+        Ok((stdout, false, None, Ok(status))) if status.success() => {
+            let stdout = String::from_utf8_lossy(&stdout).trim().to_string();
+            if stdout.is_empty() {
+                warn!("[{}] timeout hook produced no output", job.thread);
+            } else {
+                reply = stdout;
+            }
+        }
+        Ok((_, true, _, _)) => warn!(
+            "[{}] timeout hook exceeded {} bytes: using fallback reply",
+            job.thread, MAX_HOOK_STDOUT
+        ),
+        Ok((_, _, _, Ok(status))) => warn!(
+            "[{}] timeout hook exited with {status}: using fallback reply",
+            job.thread
+        ),
+        Ok((_, _, _, Err(error))) => {
+            warn!("[{}] timeout hook failed to run: {error}", job.thread)
+        }
+        Err(_) => {
+            // kill_on_drop reaped the leader when the inner future dropped;
+            // the group signal takes care of any descendants it spawned.
+            kill_hook_group(hook_pgid);
+            warn!(
+                "[{}] timeout hook exceeded 5s: using fallback reply",
+                job.thread
+            )
+        }
+    }
+    reply
 }
 
 /// Records a gateway-authored reply, delivers it, and completes the row.

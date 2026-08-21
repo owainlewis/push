@@ -43,6 +43,8 @@ impl Drop for FakeCli {
 /// touch the filesystem through it.
 pub fn test_config() -> crate::config::Config {
     crate::config::Config {
+        timeout_reply: None,
+        timeout_hook: None,
         channel: "imessage".to_string(),
         channels: Vec::new(),
         primary_delivery: None,

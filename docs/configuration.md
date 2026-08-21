@@ -209,6 +209,8 @@ requests. Review [permissions and security](security.md) before enabling jobs.
 | `agent` | `"claude"` | Default backend |
 | `poll_interval` | `"3s"` | Delay between channel polls |
 | `run_timeout` | `"10m"` | Maximum chat backend run time |
+| `timeout_reply` | hardcoded string | Overrides the default timeout reply text |
+| `timeout_hook` | none | Shell command run via `/bin/sh -c` on run timeout; stdout becomes the reply (env vars: `PUSH_THREAD`, `PUSH_ROW_ID`, `PUSH_BACKEND`, `PUSH_WORK_DIR`; 5s budget, warn and fall back on any failure) |
 
 ### iMessage
 

@@ -3956,6 +3956,8 @@ async fn retired_job_approval_reply_explains_direct_creation() {
 
 fn test_config(state_path: &str, _sessions_dir: &str, assistant_dir: &str) -> Config {
     Config {
+        timeout_reply: None,
+        timeout_hook: None,
         channel: "imessage".to_string(),
         channels: Vec::new(),
         primary_delivery: None,
@@ -4081,6 +4083,287 @@ fn approval_question(
         now_ms() + 60_000,
     )
     .unwrap()
+}
+
+/// Runs one message against a never-released FakeRunner so the gateway times
+/// the run out, then returns the delivered replies and the canonical work dir.
+async fn run_to_timeout(
+    state_tag: &str,
+    mutate_cfg: &dyn Fn(&mut Config),
+) -> (Vec<(String, String)>, String) {
+    let state_path = temp_path(&format!("{state_tag}-state"));
+    let state = state_path.to_string_lossy().to_string();
+    let assistant_dir = temp_path(&format!("{state_tag}-assistant"));
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let mut cfg = test_config(&state, "", &assistant_dir.to_string_lossy());
+    mutate_cfg(&mut cfg);
+    let mut gateway = Gateway::new(cfg).unwrap();
+    let mut runners = HashMap::new();
+    runners.insert(
+        AgentBackend::Codex,
+        Runner::Fake(FakeRunner {
+            backend: AgentBackend::Codex,
+            session_id: "fake-session".to_string(),
+            calls: Arc::new(Mutex::new(Vec::new())),
+            before_return: None,
+            wait_for_release: Some(Arc::new(tokio::sync::Notify::new())),
+            failure: None,
+            resume_missing_once: None,
+        }),
+    );
+    gateway.ctx.runners = Arc::new(runners);
+    gateway.ctx.run_timeout = Duration::from_millis(100);
+    gateway
+        .tick_fake(vec![message(1, "me@icloud.com", "", true, "slow")])
+        .await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if !gateway.ctx.sent_replies.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("timeout reply should be delivered");
+    let work_dir = std::fs::canonicalize(&assistant_dir)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    gateway.queues.clear();
+    gateway.drain_workers().await;
+    let replies = gateway.ctx.sent_replies.lock().unwrap().clone();
+    let _ = std::fs::remove_dir_all(&assistant_dir);
+    let _ = std::fs::remove_dir_all(format!("{state}.cache"));
+    let _ = std::fs::remove_dir_all(format!("{state}.jobs"));
+    let _ = std::fs::remove_dir_all(format!("{state}.run"));
+    for suffix in ["", ".db", ".audit.jsonl", ".audit.jsonl.lock", ".home"] {
+        let _ = std::fs::remove_file(format!("{state}{suffix}"));
+    }
+    (replies, work_dir)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn timeout_uses_custom_reply() {
+    let (replies, _) = run_to_timeout("timeout-custom", &|cfg| {
+        cfg.timeout_reply = Some("custom timeout text".to_string());
+    })
+    .await;
+    assert!(replies
+        .iter()
+        .any(|(_, reply)| reply.contains("custom timeout text")));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn timeout_hook_stdout_wins() {
+    let cli = crate::test_support::FakeCli::new("hook-wins", "#!/bin/sh\necho hook says hi\n");
+    let (replies, _) = run_to_timeout("timeout-hook", &|cfg| {
+        cfg.timeout_reply = Some("custom timeout text".to_string());
+        cfg.timeout_hook = Some(cli.bin());
+    })
+    .await;
+    assert!(replies
+        .iter()
+        .any(|(_, reply)| reply.contains("hook says hi")));
+    assert!(!replies
+        .iter()
+        .any(|(_, reply)| reply.contains("custom timeout text")));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn timeout_hook_failure_falls_back() {
+    let cli = crate::test_support::FakeCli::new("hook-fail", "#!/bin/sh\nexit 1\n");
+    let (replies, _) = run_to_timeout("timeout-hook-fail", &|cfg| {
+        cfg.timeout_reply = Some("custom timeout text".to_string());
+        cfg.timeout_hook = Some(cli.bin());
+    })
+    .await;
+    assert!(replies
+        .iter()
+        .any(|(_, reply)| reply.contains("custom timeout text")));
+
+    let (replies, _) = run_to_timeout("timeout-hook-fail-default", &|cfg| {
+        cfg.timeout_hook = Some(cli.bin());
+    })
+    .await;
+    assert!(replies
+        .iter()
+        .any(|(_, reply)| reply.contains("That took too long and was stopped")));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn timeout_hook_overrun_falls_back() {
+    // The hook sleeps past the 5s budget; the reply must still be delivered
+    // close to the budget itself (5s plus CI margin, not 15s).
+    let cli = crate::test_support::FakeCli::new("hook-slow", "#!/bin/sh\nsleep 30\n");
+    let started = std::time::Instant::now();
+    let (replies, _) = run_to_timeout("timeout-hook-slow", &|cfg| {
+        cfg.timeout_reply = Some("custom timeout text".to_string());
+        cfg.timeout_hook = Some(cli.bin());
+    })
+    .await;
+    let elapsed = started.elapsed();
+    assert!(elapsed >= std::time::Duration::from_millis(4_500));
+    assert!(elapsed < std::time::Duration::from_secs(8));
+    assert!(replies
+        .iter()
+        .any(|(_, reply)| reply.contains("custom timeout text")));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn timeout_hook_descendants_are_killed() {
+    // A hook that backgrounds a long sleep must not leak it past the 5s
+    // budget: the whole process group is signalled, not just the shell.
+    // (pid file outside $PUSH_WORK_DIR: run_to_timeout wipes the work dir.)
+    let pid_path = temp_path("timeout-hook-descendant-pid");
+    let hook = format!(
+        "sleep 60 & echo $! > '{}'; sleep 30",
+        pid_path.to_string_lossy()
+    );
+    let (replies, _) = run_to_timeout("timeout-hook-descendant", &|cfg| {
+        cfg.timeout_reply = Some("custom timeout text".to_string());
+        cfg.timeout_hook = Some(hook.clone());
+    })
+    .await;
+    assert!(replies
+        .iter()
+        .any(|(_, reply)| reply.contains("custom timeout text")));
+
+    let pid: libc::pid_t = std::fs::read_to_string(&pid_path)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let _ = std::fs::remove_file(&pid_path);
+    // SIGKILL delivery is asynchronous; poll briefly for the descendant to
+    // disappear (signal 0 probes existence without sending anything).
+    let mut dead = false;
+    for _ in 0..100 {
+        // Safety: signal syscall with an integer pid; no pointers involved.
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            dead = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(dead, "hook descendant {pid} survived the timeout kill");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn timeout_hook_accepts_shell_syntax() {
+    // The hook value runs through /bin/sh -c, so arguments and expansion
+    // work without a wrapper script.
+    let (replies, _) = run_to_timeout("timeout-hook-shell", &|cfg| {
+        cfg.timeout_hook = Some("echo shell-hook-$PUSH_BACKEND".to_string());
+    })
+    .await;
+    assert!(replies
+        .iter()
+        .any(|(_, reply)| reply.contains("shell-hook-codex")));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn timeout_hook_unbounded_output_falls_back() {
+    // A hook that spews without end must not exhaust memory or deliver a
+    // giant reply: head -c caps capture, pipefail fails the pipeline, the
+    // fallback reply is used.
+    let (replies, _) = run_to_timeout("timeout-hook-runaway", &|cfg| {
+        cfg.timeout_reply = Some("custom timeout text".to_string());
+        cfg.timeout_hook = Some("yes runaway".to_string());
+    })
+    .await;
+    assert!(replies
+        .iter()
+        .any(|(_, reply)| reply.contains("custom timeout text")));
+    assert!(replies
+        .iter()
+        .all(|(_, reply)| !reply.contains("runawayrunaway")));
+}
+
+/// Reader that yields bytes once, then fails — models a hook pipe that
+/// breaks mid-write instead of reaching EOF.
+struct FailingPipeReader {
+    bytes: Vec<u8>,
+    done: bool,
+}
+
+impl tokio::io::AsyncRead for FailingPipeReader {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if this.done {
+            return std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "pipe broke mid-write",
+            )));
+        }
+        this.done = true;
+        buf.put_slice(&this.bytes);
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn hook_stdout_read_error_surfaces_not_swallowed() {
+    // A read error after partial output must be returned to the caller so
+    // the worker logs it and uses the fallback reply; treating it as EOF
+    // would deliver the partial bytes as a successful hook result.
+    use super::worker::read_hook_stdout;
+
+    let mut reader = FailingPipeReader {
+        bytes: b"partial".to_vec(),
+        done: false,
+    };
+    let (stdout, capped, read_error) = read_hook_stdout(&mut reader).await;
+    assert_eq!(stdout, b"partial");
+    assert!(!capped);
+    assert!(read_error.is_some());
+
+    // Clean EOF stays clean: no error, all bytes.
+    let mut eof = std::io::Cursor::new(b"all good".to_vec());
+    let (stdout, capped, read_error) = read_hook_stdout(&mut eof).await;
+    assert_eq!(stdout, b"all good");
+    assert!(!capped);
+    assert!(read_error.is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn blank_timeout_reply_falls_back_to_default() {
+    // A whitespace-only timeout_reply is treated as unset rather than
+    // delivering an empty message.
+    let (replies, _) = run_to_timeout("timeout-blank-reply", &|cfg| {
+        cfg.timeout_reply = Some("   ".to_string());
+    })
+    .await;
+    assert!(replies
+        .iter()
+        .any(|(_, reply)| reply.contains("That took too long and was stopped")));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn timeout_hook_receives_env_vars() {
+    let env_path = temp_path("hook-env");
+    let script = format!(
+        "#!/bin/sh\nenv | grep '^PUSH_' > '{}'\necho ok\n",
+        env_path.to_string_lossy()
+    );
+    let cli = crate::test_support::FakeCli::new("hook-env", &script);
+    let (replies, work_dir) = run_to_timeout("timeout-hook-env", &|cfg| {
+        cfg.timeout_hook = Some(cli.bin());
+    })
+    .await;
+    assert!(replies.iter().any(|(_, reply)| reply.contains("ok")));
+    let env = std::fs::read_to_string(&env_path).unwrap();
+    let _ = std::fs::remove_file(&env_path);
+    assert!(env
+        .lines()
+        .any(|line| line.starts_with("PUSH_THREAD=imessage:")));
+    assert!(env.contains("PUSH_ROW_ID=1"));
+    assert!(env.contains("PUSH_BACKEND=codex"));
+    assert!(env.contains(&format!("PUSH_WORK_DIR={work_dir}")));
 }
 
 fn message(row_id: i64, chat: &str, handle: &str, is_from_me: bool, text: &str) -> RawMessage {
