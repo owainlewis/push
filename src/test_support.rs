@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use uuid::Uuid;
@@ -61,6 +62,7 @@ pub fn test_config() -> crate::config::Config {
         voice_name: crate::config::DEFAULT_VOICE_NAME.to_string(),
         agent: "codex".to_string(),
         routes: Vec::new(),
+        command_hooks: HashMap::new(),
         assistant_root: "/fake/assistant".to_string(),
         jobs_dir: "/fake/jobs".to_string(),
         jobs_agent: None,

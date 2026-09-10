@@ -324,7 +324,52 @@ These messages are handled by the gateway before backend dispatch:
 | `/clear`, `/new`, `/reset` | Start a fresh backend session for that conversation |
 | `/stop` | Stop the active request; already queued messages continue in order |
 | `/help` | Return the available chat commands |
+| any command in `[command_hooks]` | Run the configured shell command; stdout is the reply, no backend turn |
 
 Starting a fresh session preserves canonical history. Push can seed the new
 backend session with bounded recent turns from the exact channel-qualified
 conversation.
+
+### Command hooks
+
+`[command_hooks]` maps chat slash commands to deterministic shell commands.
+The reply is the command's trimmed stdout, relayed verbatim — no agent turn,
+no tokens. A mapped command owns all its forms: message arguments are
+appended to the command line as trailing positional parameters (`$1`, `$2`,
+... after the command's own arguments), so command-shaped input stays
+deterministic and never becomes prompt content. Names are normalized to
+lowercase at load and must be ASCII letters, digits, `-` or `_` — names
+shadowing built-in commands (`/clear`, `/stop`, `/help`) are rejected:
+
+```toml
+[command_hooks]
+# Quick sanity check: send `/ping` in chat, expect `pong` back instantly.
+ping = "echo pong"
+# A longer report: the typing indicator stays on for the whole run,
+# and /report <topic> reaches the script as $1.
+report = "~/bin/report.sh"
+```
+
+With this config, `/report` runs `~/bin/report.sh` and `/report agents` runs
+`~/bin/report.sh agents`. Built-in commands keep exact matching: `/clear
+typo` reaches the backend as a regular message, unchanged. Hooks run with a
+timeout and a stdout/stderr cap (output beyond 64 KiB is an error reply); a
+failing or timed-out hook replies with a short error and never falls back
+to the backend. Unknown slash commands still reach the backend as regular
+messages. Hook output is delivered like any gateway reply and is recorded
+in canonical history. `/help` lists configured hook commands under
+"Custom commands" (sorted).
+
+Hooks run in the thread's queue like any other message: when the backend is
+mid-reply, a hook command waits for that turn to finish and runs afterward —
+replies stay in order and never interleave. `/stop` is the exception: it acts
+on the in-flight request immediately.
+
+Hooks receive the message context as environment variables: `PUSH_THREAD`,
+`PUSH_BACKEND`, `PUSH_ROW_ID`, and `PUSH_SESSION_ID` (only set when the thread
+already has a backend session) — enough for info commands to report on the
+current conversation.
+
+Never put secrets in hook commands: the config is read at startup and hook
+commands run with the gateway's permissions **and environment** (including
+any tokens set in the service environment).
