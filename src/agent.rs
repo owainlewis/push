@@ -177,6 +177,9 @@ pub struct FakeRunner {
     pub wait_for_release: Option<std::sync::Arc<tokio::sync::Notify>>,
     pub failure: Option<String>,
     pub resume_missing_once: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Overrides the canned reply so tests can exercise backend-reply
+    /// formatting conventions (for example a leading `> quoted portion`).
+    pub reply: Option<String>,
 }
 
 #[cfg(test)]
@@ -221,11 +224,14 @@ impl FakeRunner {
             return Err(RunError::Failed(message.clone()));
         }
         let current_message = crate::prompt::current_message(req.prompt);
-        Ok(RunOutput {
-            reply: format!(
+        let reply = self.reply.clone().unwrap_or_else(|| {
+            format!(
                 "fake reply: {}",
                 current_message.as_deref().unwrap_or(req.prompt)
-            ),
+            )
+        });
+        Ok(RunOutput {
+            reply,
             session_id: req.is_new.then(|| self.session_id.clone()),
         })
     }

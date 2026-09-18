@@ -262,7 +262,13 @@ impl Telegram {
         self.allow_user_ids.contains(&chat_id) || self.allow_chat_ids.contains(&chat_id)
     }
 
-    pub async fn send_rich(&self, target: &str, text: &str) -> Result<()> {
+    pub async fn send_rich_reply(
+        &self,
+        target: &str,
+        text: &str,
+        reply_to_message_id: Option<i64>,
+        quote: Option<&str>,
+    ) -> Result<()> {
         if text.encode_utf16().count() > TEXT_LIMIT {
             bail!("Telegram rich message exceeds the {TEXT_LIMIT} character chunk limit");
         }
@@ -270,6 +276,9 @@ impl Telegram {
         let mut payload = target_payload(target);
         payload["text"] = json!(html);
         payload["parse_mode"] = json!("HTML");
+        if let Some(params) = reply_parameters_payload(reply_to_message_id, quote) {
+            payload["reply_parameters"] = params;
+        }
         let transport_response = self
             .post_with_topic_fallback("sendMessage", payload)
             .await?;
@@ -278,15 +287,26 @@ impl Telegram {
         if !response.ok {
             // Rendered HTML Telegram rejects (for example a parse error)
             // still reaches the user as plain text within the same durable
-            // delivery chunk.
-            self.send_plain(target, text).await?;
+            // delivery chunk. Keep the anchoring and quote across the
+            // fallback.
+            self.send_plain_reply(target, text, reply_to_message_id, quote)
+                .await?;
         }
         Ok(())
     }
 
-    pub async fn send_plain(&self, target: &str, text: &str) -> Result<()> {
+    pub async fn send_plain_reply(
+        &self,
+        target: &str,
+        text: &str,
+        reply_to_message_id: Option<i64>,
+        quote: Option<&str>,
+    ) -> Result<()> {
         let mut payload = target_payload(target);
         payload["text"] = json!(text);
+        if let Some(params) = reply_parameters_payload(reply_to_message_id, quote) {
+            payload["reply_parameters"] = params;
+        }
         let transport_response = self
             .post_with_topic_fallback("sendMessage", payload)
             .await?;
@@ -501,6 +521,23 @@ struct Update {
     message: Option<TelegramMessage>,
 }
 
+/// Builds `reply_parameters` for anchored sends. The quote (a portion of the
+/// replied-to message chosen by the backend) only renders when anchored, and
+/// Telegram caps it at 1024 characters.
+fn reply_parameters_payload(
+    reply_to_message_id: Option<i64>,
+    quote: Option<&str>,
+) -> Option<Value> {
+    let mut params = json!({
+        "message_id": reply_to_message_id?,
+        "allow_sending_without_reply": true
+    });
+    if let Some(quoted) = quote {
+        params["quote"] = json!(quoted.chars().take(1024).collect::<String>());
+    }
+    Some(params)
+}
+
 impl Update {
     fn into_raw(self) -> RawMessage {
         let Some(message) = self.message else {
@@ -517,6 +554,8 @@ impl Update {
                 is_from_me: false,
                 is_supported: false,
                 thread_id: None,
+                reply_to_message_id: None,
+                reply_context: None,
             };
         };
         let images = message
@@ -572,8 +611,31 @@ impl Update {
             is_from_me: false,
             is_supported: true,
             thread_id: message.message_thread_id,
+            reply_to_message_id: message.message_id,
+            reply_context: message
+                .quote
+                .map(|quote| quote.text)
+                .or_else(|| {
+                    message
+                        .reply_to_message
+                        .as_deref()
+                        .and_then(|replied| replied.text.as_deref().or(replied.caption.as_deref()))
+                        .map(str::to_string)
+                })
+                .map(|text| reply_excerpt(&text)),
         }
     }
+}
+
+/// Flattens a replied-to message to one line, capped so a long quote cannot
+/// dominate the prompt.
+fn reply_excerpt(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut excerpt: String = flat.chars().take(200).collect();
+    if flat.chars().count() > 200 {
+        excerpt.push('…');
+    }
+    excerpt
 }
 
 #[derive(Deserialize)]
@@ -581,6 +643,8 @@ struct TelegramMessage {
     #[serde(default)]
     from: Option<User>,
     chat: Chat,
+    #[serde(default)]
+    message_id: Option<i64>,
     #[serde(default)]
     text: Option<String>,
     #[serde(default)]
@@ -593,6 +657,16 @@ struct TelegramMessage {
     voice: Option<TelegramVoice>,
     #[serde(default)]
     message_thread_id: Option<i64>,
+    #[serde(default)]
+    quote: Option<TextQuote>,
+    #[serde(default)]
+    reply_to_message: Option<Box<TelegramMessage>>,
+}
+
+#[derive(Deserialize)]
+struct TextQuote {
+    #[serde(default)]
+    text: String,
 }
 
 #[derive(Deserialize)]
@@ -819,6 +893,108 @@ mod tests {
         assert!(!messages[3].is_group);
     }
 
+    #[test]
+    fn selected_quote_takes_priority_over_replied_to_text() {
+        let update: Update = serde_json::from_value(json!({
+            "update_id": 10,
+            "message": {
+                "message_id": 21,
+                "from": {"id": 7},
+                "chat": {"id": 7, "type": "private"},
+                "text": "what about this part",
+                "quote": {"position": 12, "text": "the frobnicator keeps timing out"},
+                "reply_to_message": {
+                    "message_id": 20,
+                    "from": {"id": 99},
+                    "chat": {"id": 7, "type": "private"},
+                    "text": "long full message the user did not select"
+                }
+            }
+        }))
+        .unwrap();
+
+        let message = update.into_raw();
+
+        assert_eq!(
+            message.reply_context.as_deref(),
+            Some("the frobnicator keeps timing out")
+        );
+    }
+
+    #[test]
+    fn parses_reply_to_message_into_flattened_excerpt() {
+        let long = "word ".repeat(80).trim_end().to_string();
+        let update: Update = serde_json::from_value(json!({
+            "update_id": 9,
+            "message": {
+                "message_id": 20,
+                "from": {"id": 7},
+                "chat": {"id": 7, "type": "private"},
+                "text": "now do the other thing",
+                "reply_to_message": {
+                    "message_id": 19,
+                    "from": {"id": 99},
+                    "chat": {"id": 7, "type": "private"},
+                    "text": format!("first line\nsecond line {long}")
+                }
+            }
+        }))
+        .unwrap();
+
+        let message = update.into_raw();
+
+        let quoted = message.reply_context.unwrap();
+        assert!(!quoted.contains('\n'));
+        assert!(quoted.starts_with("first line second line word"));
+        assert!(quoted.ends_with('…'));
+        assert_eq!(quoted.chars().count(), 201);
+    }
+
+    #[tokio::test]
+    async fn replies_carry_reply_parameters_only_when_anchored() {
+        let ok = json!({"ok": true, "result": {"message_id": 5}});
+        let fake = Arc::new(FakeTransport::with_responses(vec![ok.clone(), ok]));
+        let telegram =
+            Telegram::with_transport("secret".to_string(), vec![7], vec![], fake.clone());
+
+        telegram
+            .send_plain_reply("chat", "hi", None, None)
+            .await
+            .unwrap();
+        telegram
+            .send_plain_reply("chat", "hi", Some(41), Some("the frobnicator"))
+            .await
+            .unwrap();
+
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].1.get("reply_parameters").is_none());
+        assert_eq!(calls[1].1["reply_parameters"]["message_id"], 41);
+        assert_eq!(
+            calls[1].1["reply_parameters"]["allow_sending_without_reply"],
+            true
+        );
+        assert_eq!(calls[1].1["reply_parameters"]["quote"], "the frobnicator");
+    }
+
+    #[tokio::test]
+    async fn quote_is_dropped_without_an_anchor() {
+        let fake = Arc::new(FakeTransport::with_responses(vec![json!({
+            "ok": true,
+            "result": {"message_id": 5}
+        })]));
+        let telegram =
+            Telegram::with_transport("secret".to_string(), vec![7], vec![], fake.clone());
+
+        telegram
+            .send_plain_reply("chat", "hi", None, Some("orphan quote"))
+            .await
+            .unwrap();
+
+        let calls = fake.calls.lock().unwrap();
+        assert!(calls[0].1.get("reply_parameters").is_none());
+    }
+
     #[tokio::test]
     async fn poll_uses_next_update_offset_and_long_poll_timeout() {
         let fake = Arc::new(FakeTransport::with_responses(vec![json!({
@@ -867,6 +1043,9 @@ mod tests {
                 document: None,
                 voice: None,
                 message_thread_id: None,
+                message_id: Some(1),
+                quote: None,
+                reply_to_message: None,
             }),
         }
         .into_raw();
@@ -898,6 +1077,9 @@ mod tests {
                     mime_type: Some("audio/ogg".to_string()),
                 }),
                 message_thread_id: None,
+                message_id: Some(1),
+                quote: None,
+                reply_to_message: None,
             }),
         }
         .into_raw();
@@ -1087,7 +1269,10 @@ mod tests {
         let telegram =
             Telegram::with_transport("do-not-log".to_string(), vec![7], vec![], fake.clone());
 
-        telegram.send_rich("7", "**reply**").await.unwrap();
+        telegram
+            .send_rich_reply("7", "**reply**", None, None)
+            .await
+            .unwrap();
 
         let calls = fake.calls.lock().unwrap();
         assert_eq!(
@@ -1114,7 +1299,10 @@ mod tests {
             Telegram::with_transport("secret".to_string(), vec![7], vec![], fake.clone());
         let text = "**reply**";
 
-        telegram.send_rich("7", text).await.unwrap();
+        telegram
+            .send_rich_reply("7", text, None, None)
+            .await
+            .unwrap();
 
         let calls = fake.calls.lock().unwrap();
         // The HTML send and its plain fallback share one gateway-owned chunk.
@@ -1132,7 +1320,7 @@ mod tests {
             Telegram::with_transport("secret".to_string(), vec![7], vec![], fake.clone());
 
         let error = telegram
-            .send_rich("7", &"x".repeat(TEXT_LIMIT + 1))
+            .send_rich_reply("7", &"x".repeat(TEXT_LIMIT + 1), None, None)
             .await
             .unwrap_err();
 
@@ -1150,8 +1338,14 @@ mod tests {
         let telegram =
             Telegram::with_transport("secret".to_string(), vec![7], vec![], fake.clone());
 
-        telegram.send_plain("7:99", "reply").await.unwrap();
-        telegram.send_rich("7:99", "reply").await.unwrap();
+        telegram
+            .send_plain_reply("7:99", "reply", None, None)
+            .await
+            .unwrap();
+        telegram
+            .send_rich_reply("7:99", "reply", None, None)
+            .await
+            .unwrap();
         telegram.send_typing("7:99").await.unwrap();
 
         let calls = fake.calls.lock().unwrap();
@@ -1190,7 +1384,10 @@ mod tests {
         let telegram =
             Telegram::with_transport("secret".to_string(), vec![7], vec![], fake.clone());
 
-        telegram.send_plain("7:99", "reply").await.unwrap();
+        telegram
+            .send_plain_reply("7:99", "reply", None, None)
+            .await
+            .unwrap();
 
         let calls = fake.calls.lock().unwrap();
         assert_eq!(
@@ -1217,7 +1414,10 @@ mod tests {
         let telegram =
             Telegram::with_transport("secret".to_string(), vec![7], vec![], fake.clone());
 
-        let error = telegram.send_plain("7:99", "reply").await.unwrap_err();
+        let error = telegram
+            .send_plain_reply("7:99", "reply", None, None)
+            .await
+            .unwrap_err();
 
         assert!(error.to_string().contains("HTTP 400"));
         assert_eq!(fake.calls.lock().unwrap().len(), 1);
@@ -1229,7 +1429,10 @@ mod tests {
         let telegram =
             Telegram::with_transport("secret".to_string(), vec![7], vec![], fake.clone());
 
-        telegram.send_rich("7:99", "reply").await.unwrap();
+        telegram
+            .send_rich_reply("7:99", "reply", None, None)
+            .await
+            .unwrap();
 
         let calls = fake.calls.lock().unwrap();
         assert_eq!(calls[0].0, "sendMessage");
@@ -1286,7 +1489,10 @@ mod tests {
         let text = format!("{}é", "a".repeat(TEXT_LIMIT));
 
         for chunk in split_text(&text) {
-            telegram.send_plain("7", &chunk).await.unwrap();
+            telegram
+                .send_plain_reply("7", &chunk, None, None)
+                .await
+                .unwrap();
         }
 
         let calls = fake.calls.lock().unwrap();

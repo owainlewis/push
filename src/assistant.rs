@@ -61,7 +61,7 @@ Good examples include preferences, active projects, people, recurring processes,
 "#;
 
 const PUSH_SKILL: &str = include_str!("../assistant/skills/push/SKILL.md");
-const PUSH_SKILL_VERSION: u32 = 3;
+const PUSH_SKILL_VERSION: u32 = 4;
 const PUSH_SKILL_LINK: &str = "../../skills/push";
 const PUSH_SKILL_MANIFEST: &str = ".push-managed.json";
 const PUSH_SKILL_PROVIDERS: [&str; 2] = [".agents", ".claude"];

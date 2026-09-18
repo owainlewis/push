@@ -80,3 +80,9 @@ in diagnostics or replies.
 For an ordinary conversation, return the final reply normally. Push sends it
 back through the originating channel. Do not invoke the Push CLI merely to send
 a chat reply.
+
+When the reply answers a specific part of the user's message, start the reply
+with a single line `> <that part>` before the answer. On channels that support
+reply quotes, Push moves that line into the reply header quote and removes it
+from the displayed text. Quote only exact words from the user's message, and
+send no quote line when the reply addresses the whole message.

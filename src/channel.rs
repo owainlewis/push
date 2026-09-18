@@ -55,6 +55,12 @@ pub struct RawMessage {
     pub is_supported: bool,
     /// Channel-specific thread/topic id (Telegram `message_thread_id`).
     pub thread_id: Option<i64>,
+    /// Provider message id of the inbound message (Telegram `message_id`),
+    /// used to anchor replies via `reply_parameters`.
+    pub reply_to_message_id: Option<i64>,
+    /// Flattened excerpt of the message the user replied to (Telegram
+    /// `reply_to_message`), prefixed to the backend prompt. None elsewhere.
+    pub reply_context: Option<String>,
 }
 
 impl RawMessage {
@@ -70,6 +76,11 @@ impl RawMessage {
 pub struct OutboundChunk {
     pub text: String,
     pub rich_markdown: bool,
+    /// Telegram message id to reply to (anchoring), when known.
+    pub reply_to_message_id: Option<i64>,
+    /// Exact portion of the trigger message to quote in the reply header
+    /// (Telegram `reply_parameters.quote`), chosen by the backend.
+    pub quote: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,6 +223,12 @@ impl Channel {
             Self::Telegram(channel) => ChannelContract::id(channel),
             Self::Slack(channel) => ChannelContract::id(channel),
         }
+    }
+
+    /// Whether the channel renders `reply_parameters`-style reply quotes.
+    /// Quote lifting on other channels would silently drop the quoted line.
+    pub fn supports_reply_quotes(&self) -> bool {
+        matches!(self, Self::Telegram(_))
     }
 
     pub async fn poll(&self, since: i64) -> Result<Vec<RawMessage>> {
@@ -422,6 +439,8 @@ impl ChannelContract for IMessageChannel {
                     .collect(),
                 is_from_me: message.is_from_me,
                 is_supported: true,
+                reply_to_message_id: None,
+                reply_context: None,
                 thread_id: None,
             })
             .collect())
@@ -515,6 +534,8 @@ impl ChannelContract for IMessageChannel {
             Vec::new()
         } else {
             vec![OutboundChunk {
+                reply_to_message_id: None,
+                quote: None,
                 text: format!("{text}{marker}"),
                 rich_markdown: false,
             }]
@@ -630,6 +651,8 @@ impl ChannelContract for Telegram {
         crate::telegram::split_text(text)
             .into_iter()
             .map(|text| OutboundChunk {
+                reply_to_message_id: None,
+                quote: None,
                 text,
                 rich_markdown: true,
             })
@@ -638,9 +661,21 @@ impl ChannelContract for Telegram {
 
     async fn send_chunk(&self, target: &str, chunk: &OutboundChunk) -> Result<()> {
         if chunk.rich_markdown {
-            self.send_rich(target, &chunk.text).await
+            self.send_rich_reply(
+                target,
+                &chunk.text,
+                chunk.reply_to_message_id,
+                chunk.quote.as_deref(),
+            )
+            .await
         } else {
-            self.send_plain(target, &chunk.text).await
+            self.send_plain_reply(
+                target,
+                &chunk.text,
+                chunk.reply_to_message_id,
+                chunk.quote.as_deref(),
+            )
+            .await
         }
     }
 
@@ -736,6 +771,8 @@ impl ChannelContract for Slack {
         crate::slack::split_text(&crate::markdown::to_slack_mrkdwn_for_chunking(text))
             .into_iter()
             .map(|text| OutboundChunk {
+                reply_to_message_id: None,
+                quote: None,
                 text,
                 rich_markdown: true,
             })
@@ -883,6 +920,8 @@ mod tests {
             images: Vec::new(),
             is_from_me,
             is_supported: true,
+            reply_to_message_id: None,
+            reply_context: None,
             thread_id: None,
         }
     }
@@ -900,6 +939,8 @@ mod tests {
             images: Vec::new(),
             is_from_me: false,
             is_supported: true,
+            reply_to_message_id: None,
+            reply_context: None,
             thread_id: None,
         }
     }
@@ -939,6 +980,8 @@ mod tests {
         assert_eq!(
             channel.outbound_chunks("reply", REPLY_MARKER),
             [OutboundChunk {
+                reply_to_message_id: None,
+                quote: None,
                 text: format!("reply{REPLY_MARKER}"),
                 rich_markdown: false,
             }]
@@ -974,6 +1017,8 @@ mod tests {
         assert_eq!(
             channel.outbound_chunks("reply", REPLY_MARKER),
             [OutboundChunk {
+                reply_to_message_id: None,
+                quote: None,
                 text: "reply".to_string(),
                 rich_markdown: true,
             }]
@@ -995,6 +1040,8 @@ mod tests {
             images: Vec::new(),
             is_from_me: false,
             is_supported: true,
+            reply_to_message_id: None,
+            reply_context: None,
             thread_id: None,
         };
 

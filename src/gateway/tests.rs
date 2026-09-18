@@ -166,6 +166,8 @@ fn msg(chat: &str, handle: &str, from_me: bool, text: &str) -> RawMessage {
         is_from_me: from_me,
         is_group: false,
         is_supported: true,
+        reply_to_message_id: None,
+        reply_context: None,
         thread_id: None,
     }
 }
@@ -239,6 +241,7 @@ fn setup_failure_ctx(
 
 fn setup_failure_job(row_id: i64) -> Job {
     Job {
+        telegram_reply_anchor: None,
         row_id,
         inbound_id: 1,
         thread: "imessage:self:me".to_string(),
@@ -396,7 +399,7 @@ async fn delivery_fails_when_channel_produces_no_chunks() {
     ))
     .unwrap();
 
-    assert!(!reply_to(&gateway.ctx, "me@icloud.com", " \t\n ").await);
+    assert!(!reply_to(&gateway.ctx, "me@icloud.com", " \t\n ", None).await);
     assert!(gateway.ctx.sent_replies.lock().unwrap().is_empty());
 
     let checkpoints = Arc::new(Mutex::new(Vec::new()));
@@ -1074,6 +1077,7 @@ async fn missing_backend_session_rotates_and_rehydrates_once() {
             wait_for_release: None,
             failure: None,
             resume_missing_once: Some(missing),
+            reply: None,
         }),
     );
     gateway.ctx.runners = Arc::new(runners);
@@ -1158,6 +1162,7 @@ async fn backend_switch_and_clear_start_fresh_sessions_with_history() {
             wait_for_release: None,
             failure: None,
             resume_missing_once: None,
+            reply: None,
         }),
     );
     runners.insert(
@@ -1170,6 +1175,7 @@ async fn backend_switch_and_clear_start_fresh_sessions_with_history() {
             wait_for_release: None,
             failure: None,
             resume_missing_once: None,
+            reply: None,
         }),
     );
     gateway.ctx.runners = Arc::new(runners);
@@ -1884,6 +1890,7 @@ async fn slack_images_reach_every_agent_backend_and_are_removed_after_each_turn(
                 wait_for_release: None,
                 failure: None,
                 resume_missing_once: None,
+                reply: None,
             }),
         )]));
 
@@ -1943,6 +1950,7 @@ async fn imessage_images_reach_every_agent_backend_and_are_removed_after_each_tu
                 wait_for_release: None,
                 failure: None,
                 resume_missing_once: None,
+                reply: None,
             }),
         )]));
         let mut inbound = message(1, "+15551234567", "+15551234567", false, "");
@@ -2473,6 +2481,7 @@ async fn telegram_image_only_and_captioned_messages_reach_pi() {
             wait_for_release: None,
             failure: None,
             resume_missing_once: None,
+            reply: None,
         }),
     )]));
 
@@ -2633,6 +2642,7 @@ async fn telegram_image_reaches_claude_and_is_removed_after_the_turn() {
             wait_for_release: None,
             failure: None,
             resume_missing_once: None,
+            reply: None,
         }),
     )]));
     run_messages(
@@ -2786,6 +2796,7 @@ async fn closed_worker_queue_is_recovered_without_another_message() {
         .unwrap();
     gateway.ack.lock().unwrap().in_flight.insert(1);
     let lost_job = Job {
+        telegram_reply_anchor: None,
         row_id: 1,
         inbound_id: lost_inbound_id,
         thread: thread.to_string(),
@@ -2872,6 +2883,7 @@ async fn stop_interrupts_active_run_and_preserves_queued_messages() {
             wait_for_release: Some(release.clone()),
             failure: None,
             resume_missing_once: None,
+            reply: None,
         }),
     );
     gateway.ctx.runners = Arc::new(runners);
@@ -2981,6 +2993,7 @@ async fn stop_interrupts_a_worker_queued_in_the_same_poll_batch() {
             wait_for_release: Some(release.clone()),
             failure: None,
             resume_missing_once: None,
+            reply: None,
         }),
     );
     gateway.ctx.runners = Arc::new(runners);
@@ -3096,6 +3109,7 @@ async fn stop_targets_the_current_row_ahead_of_retained_failures() {
     .unwrap();
     let thread = "imessage:self:me@icloud.com";
     let make_job = |row_id, inbound_id, text: &str| Job {
+        telegram_reply_anchor: None,
         row_id,
         inbound_id,
         thread: thread.to_string(),
@@ -3248,6 +3262,7 @@ async fn retried_stop_acknowledgement_does_not_cancel_the_next_request() {
             wait_for_release: Some(release.clone()),
             failure: None,
             resume_missing_once: None,
+            reply: None,
         }),
     );
     gateway.ctx.runners = Arc::new(runners);
@@ -3313,6 +3328,7 @@ async fn retried_stop_acknowledgement_does_not_cancel_the_next_request() {
             wait_for_release: Some(restart_release.clone()),
             failure: None,
             resume_missing_once: None,
+            reply: None,
         }),
     );
     restarted.ctx.runners = Arc::new(restart_runners);
@@ -4035,6 +4051,7 @@ fn fake_runners_with_hook(
             wait_for_release: None,
             failure: None,
             resume_missing_once: None,
+            reply: None,
         }),
     );
     runners
@@ -4096,6 +4113,8 @@ fn message(row_id: i64, chat: &str, handle: &str, is_from_me: bool, text: &str) 
         is_from_me,
         is_group: false,
         is_supported: true,
+        reply_to_message_id: None,
+        reply_context: None,
         thread_id: None,
     }
 }
@@ -4119,6 +4138,8 @@ fn telegram_message(
         is_from_me: false,
         is_group,
         is_supported: true,
+        reply_to_message_id: None,
+        reply_context: None,
         thread_id: None,
     }
 }
@@ -4173,6 +4194,135 @@ fn slack_image_message(
         is_from_me: false,
         is_group: false,
         is_supported: true,
+        reply_to_message_id: None,
+        reply_context: None,
         thread_id: None,
     }
+}
+
+#[test]
+fn lifts_leading_quote_line_from_backend_replies() {
+    let (quote, rest) =
+        super::lift_outbound_quote("> the frobnicator keeps timing out\nTry the cache path.");
+    assert_eq!(quote.as_deref(), Some("the frobnicator keeps timing out"));
+    assert_eq!(rest, "Try the cache path.");
+
+    let (quote, rest) = super::lift_outbound_quote("No quote here.\n> not lifted");
+    assert!(quote.is_none());
+    assert_eq!(rest, "No quote here.\n> not lifted");
+
+    let (quote, rest) = super::lift_outbound_quote("> quote only");
+    assert!(quote.is_none());
+    assert_eq!(rest, "> quote only");
+
+    let (quote, rest) = super::lift_outbound_quote("> \nafter empty quote");
+    assert!(quote.is_none());
+    assert_eq!(rest, "> \nafter empty quote");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn imessage_reply_keeps_leading_blockquote_line() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("backend-quote-sessions");
+    let assistant_dir = temp_path("backend-quote-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let config = test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    );
+    let mut gateway = Gateway::new(config).unwrap();
+    {
+        let mut runners = HashMap::new();
+        runners.insert(
+            AgentBackend::Codex,
+            Runner::Fake(FakeRunner {
+                backend: AgentBackend::Codex,
+                session_id: "fake-session".to_string(),
+                calls: calls.clone(),
+                before_return: None,
+                wait_for_release: None,
+                failure: None,
+                resume_missing_once: None,
+                reply: Some("> the frobnicator keeps timing out\nTry the cache path.".to_string()),
+            }),
+        );
+        gateway.ctx.runners = Arc::new(runners);
+    }
+    run_messages(
+        &mut gateway,
+        vec![message(1, "me@icloud.com", "", true, "hello")],
+    )
+    .await;
+
+    // Non-Telegram channels do not render reply quotes, so the blockquote
+    // line must stay in the message text.
+    assert_eq!(
+        gateway.ctx.sent_replies.lock().unwrap().as_slice(),
+        [(
+            "me@icloud.com".to_string(),
+            "> the frobnicator keeps timing out\nTry the cache path.\n\n-- sent by push"
+                .to_string()
+        )]
+    );
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn telegram_backend_reply_leading_quote_line_is_lifted_into_the_reply_quote() {
+    let state_path = temp_state_path();
+    let sessions_dir = temp_path("backend-quote-telegram-sessions");
+    let assistant_dir = temp_path("backend-quote-telegram-assistant");
+    std::fs::create_dir_all(&assistant_dir).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut cfg = test_config(
+        &state_path,
+        sessions_dir.to_str().unwrap(),
+        assistant_dir.to_str().unwrap(),
+    );
+    cfg.channel = "telegram".to_string();
+    cfg.self_handles.clear();
+    cfg.allow_from.clear();
+    cfg.telegram_bot_token = Some("secret".to_string());
+    cfg.telegram_allow_user_ids = vec![7];
+    let mut gateway = Gateway::new(cfg).unwrap();
+    {
+        let mut runners = HashMap::new();
+        runners.insert(
+            AgentBackend::Codex,
+            Runner::Fake(FakeRunner {
+                backend: AgentBackend::Codex,
+                session_id: "fake-session".to_string(),
+                calls: calls.clone(),
+                before_return: None,
+                wait_for_release: None,
+                failure: None,
+                resume_missing_once: None,
+                reply: Some("> the frobnicator keeps timing out\nTry the cache path.".to_string()),
+            }),
+        );
+        gateway.ctx.runners = Arc::new(runners);
+    }
+    gateway
+        .tick_fake(vec![telegram_message(1, 7, 7, false, "hello")])
+        .await;
+    gateway.queues.clear();
+    gateway.drain_workers().await;
+
+    assert_eq!(
+        gateway.ctx.sent_replies.lock().unwrap().as_slice(),
+        [("7".to_string(), "Try the cache path.".to_string())]
+    );
+
+    let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(format!("{state_path}.db"));
+    let _ = std::fs::remove_file(format!("{state_path}.audit.jsonl"));
+    let _ = std::fs::remove_dir_all(sessions_dir);
+    let _ = std::fs::remove_dir_all(assistant_dir);
 }
