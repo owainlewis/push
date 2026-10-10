@@ -913,7 +913,9 @@ pub fn split_text(text: &str) -> Vec<String> {
         let is_quote_prefix = rendered.starts_with("> ")
             && rendered
                 .as_bytes()
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .all(|pair| pair == b"> ");
         let mut after = formatting.clone();
         if is_quote_prefix {
