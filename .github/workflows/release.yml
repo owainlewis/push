@@ -40,12 +40,20 @@ jobs:
           scripts/check-release-version.sh "${RELEASE_TAG}"
 
   build:
-    name: build release (${{ matrix.os }})
+    name: build release (${{ matrix.target }})
     needs: validate
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
 
     steps:
       - uses: actions/checkout@v6
@@ -54,22 +62,22 @@ jobs:
 
       - name: Install Rust
         run: |
-          rustup toolchain install stable --profile minimal
+          rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
           rustup default stable
 
       - name: Build
-        run: cargo build --locked --release
+        run: cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
         run: |
           set -euo pipefail
           tag="${{ github.event.inputs.tag || github.ref_name }}"
-          target="$(rustc -Vv | awk '/host:/ { print $2 }')"
+          target="${{ matrix.target }}"
           package="push-${tag}-${target}"
 
           mkdir -p "dist/${package}"
-          cp target/release/push "dist/${package}/"
+          cp "target/${target}/release/push" "dist/${package}/"
           cp README.md LICENSE config.toml.example install.sh "dist/${package}/"
 
           tar -C dist -czf "dist/${package}.tar.gz" "${package}"
@@ -77,7 +85,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: release-${{ matrix.os }}
+          name: release-${{ matrix.target }}
           path: dist/*.tar.gz*
           if-no-files-found: error
 
